@@ -194,6 +194,47 @@ Contributions are welcome! Please follow the STRONG AYA conventions:
 4. Validate all inputs with Pydantic models
 5. Implement privacy guards for all partial functions
 
+n
+## Development
+
+This algorithm was adapted to STRONG AYA conventions through a series of stacked pull requests:
+
+### Stacked PRs for STRONG AYA Adaptation
+
+1. **PR1: Initial STRONG AYA adaptation** - Package structure and basic dependencies
+   - Restructured package from `coxph/` to `v6_cox_ph/`
+   - Added `pyproject.toml` with STRONG AYA dependencies
+   - Replaced logging with `safe_log` from v6-tools-general
+   - Added Pydantic v2 models for input validation
+   - Extracted mathematical logic to `coxph_logic.py` module
+
+2. **PR2: Privacy and data handling improvements**
+   - Enhanced partial.py with complete STRONG AYA data pipeline
+   - Added RDF data collection support
+   - Added comprehensive data quality checks
+   - Added event count validation
+   - Enhanced privacy configurations
+
+3. **PR3: Comprehensive testing infrastructure**
+   - Added conftest.py with Cox-PH specific fixtures
+   - Added unit tests for all utility functions
+   - Added integration tests for algorithm workflows
+   - Enhanced test data and configurations
+
+4. **PR4: Final refinements** - CI/CD and documentation
+   - Added GitHub Actions workflow for testing
+   - Enhanced documentation
+   - Final code cleanup and optimization
+
+### Contributing
+
+To contribute to this algorithm:
+
+1. **Follow STRONG AYA conventions**: Keep `central.py` and `partial.py` clean
+2. **Use proper logging**: Always use `safe_log()` instead of `print()`
+3. **Validate inputs**: Use Pydantic models for all external inputs
+4. **Implement privacy guards**: All partial functions must include privacy checks
+5. **Test thoroughly**: Add both unit and integration tests
 ## License
 
 Apache 2.0
