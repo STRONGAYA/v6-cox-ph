@@ -1,19 +1,21 @@
-# basic python3 image as base
-FROM harbor2.vantage6.ai/infrastructure/algorithm-base
+# Alpine-based Docker image for v6-cox-ph algorithm
+FROM python:3.10-alpine
 
-# This is a placeholder that should be overloaded by invoking
-# docker build with '--build-arg PKG_NAME=...'
-ARG PKG_NAME="coxph"
+# Install git (required for pip install from git)
+RUN apk add --no-cache git
 
-# install federated algorithm
+# Package name argument
+ARG PKG_NAME="v6-cox-ph"
+
+# Copy the entire repository
 COPY . /app
-RUN pip install /app
+WORKDIR /app
 
+# Install the package
+RUN pip install --no-cache-dir /app
 
-# Set environment variable to make name of the package available within the
-# docker image.
+# Set environment variable for package name
 ENV PKG_NAME=${PKG_NAME}
 
-# Tell docker to execute `wrap_algorithm()` when the image is run. This function
-# will ensure that the algorithm method is called properly.
-CMD python -c "from vantage6.algorithm.tools.wrap import wrap_algorithm; wrap_algorithm()"
+# Command to run when container starts
+CMD ["python", "-c", "from vantage6.algorithm.tools.wrap import wrap_algorithm; wrap_algorithm()"]
