@@ -7,6 +7,7 @@ This module contains:
 - Type definitions and constants
 """
 
+import pandas as pd
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, field_validator, Field
 from vantage6.algorithm.tools.exceptions import UserInputError
@@ -57,8 +58,8 @@ class CoxPHInput(BaseModel):
         if not isinstance(v, list):
             raise ValueError("organization_ids must be a list of integers")
         for org_id in v:
-            if not isinstance(org_id, int) or org_id <= 0:
-                raise ValueError(f"Invalid organization ID: {org_id}. Must be positive integer.")
+            if not isinstance(org_id, int) or org_id < 0:
+                raise ValueError(f"Invalid organization ID: {org_id}. Must be non-negative integer.")
         return list(set(v))  # Remove duplicates
 
 

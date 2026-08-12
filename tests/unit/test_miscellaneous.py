@@ -6,7 +6,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from v6_cox_ph.miscellaneous import (
+from v6-cox-ph.miscellaneous import (
     CoxPHInput,
     PartialResult,
     PrivacyThresholdConfig,

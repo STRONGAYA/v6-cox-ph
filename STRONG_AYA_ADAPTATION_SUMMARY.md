@@ -29,7 +29,7 @@ All branches have been pushed to the [STRONGAYA/v6-cox-ph](https://github.com/ST
 
 ```
 v6-cox-ph/
-├── v6_cox_ph/
+├── v6-cox-ph/
 │   ├── __init__.py           # Package exports
 │   ├── central.py            # Orchestration (clean, readable)
 │   ├── partial.py            # Data pipeline + delegates to logic

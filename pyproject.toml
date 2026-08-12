@@ -64,10 +64,10 @@ Homepage = "https://github.com/STRONGAYA/v6-cox-ph"
 Bugtracker = "https://github.com/STRONGAYA/v6-cox-ph/issues"
 
 [tool.setuptools]
-packages = ["v6_cox_ph"]
+packages = ["v6-cox-ph"]
 
 [tool.setuptools.package-data]
-v6_cox_ph = []
+v6-cox-ph = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

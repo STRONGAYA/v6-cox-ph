@@ -155,7 +155,7 @@ pytest tests/unit/
 pytest tests/integration/
 
 # Run with coverage
-pytest --cov=v6_cox_ph --cov-report=html
+pytest --cov=v6-cox-ph --cov-report=html
 ```
 
 ### Test Data
@@ -202,7 +202,7 @@ This algorithm was adapted to STRONG AYA conventions through a series of stacked
 ### Stacked PRs for STRONG AYA Adaptation
 
 1. **PR1: Initial STRONG AYA adaptation** - Package structure and basic dependencies
-   - Restructured package from `coxph/` to `v6_cox_ph/`
+   - Restructured package from `coxph/` to `v6-cox-ph/`
    - Added `pyproject.toml` with STRONG AYA dependencies
    - Replaced logging with `safe_log` from v6-tools-general
    - Added Pydantic v2 models for input validation

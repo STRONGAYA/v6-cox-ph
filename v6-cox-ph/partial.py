@@ -17,11 +17,13 @@ from vantage6.algorithm.client import AlgorithmClient
 
 from vantage6_strongaya_general.miscellaneous import (
     safe_log,
-    mask_unnecessary_variables,
-    apply_sample_size_threshold,
     set_datatypes,
     apply_data_stratification,
     collect_organisation_ids
+)
+from vantage6_strongaya_general.privacy_measures import (
+    mask_unnecessary_variables,
+    apply_sample_size_threshold
 )
 from vantage6_strongaya_rdf.collect_sparql_data import collect_sparql_data
 
@@ -89,9 +91,9 @@ def get_unique_event_times(
     
     # Step 3: Set datatypes
     safe_log("debug", "Setting datatypes")
-    df = set_datatypes(df)
+    df = set_datatypes(df, {})
     
-    # Step 4: Apply stratification if applicable (not currently used in Cox-PH, but included for completeness)
+    # Step 4: Apply stratification if applicable
     safe_log("debug", "Applying data stratification")
     df = apply_data_stratification(df, {})
     
@@ -197,7 +199,7 @@ def compute_summed_z(
     
     # Step 3: Set datatypes
     safe_log("debug", "Setting datatypes")
-    df = set_datatypes(df)
+    df = set_datatypes(df, {})
     
     # Step 4: Apply stratification if applicable
     safe_log("debug", "Applying data stratification")
@@ -298,7 +300,7 @@ def perform_iteration(
     
     # Step 3: Set datatypes
     safe_log("debug", "Setting datatypes")
-    df = set_datatypes(df)
+    df = set_datatypes(df, {})
     
     # Step 4: Apply stratification if applicable
     safe_log("debug", "Applying data stratification")

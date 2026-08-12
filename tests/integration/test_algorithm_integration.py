@@ -308,7 +308,7 @@ class TestCoxPHAlgorithmIntegration:
     @pytest.mark.unit
     def test_validate_input_valid(self, variables_config):
         """Test input validation with valid parameters."""
-        from v6_cox_ph.miscellaneous import validate_coxph_input
+        from v6-cox-ph.miscellaneous import validate_coxph_input
         
         # This should not raise any exception
         validated = validate_coxph_input(
@@ -326,7 +326,7 @@ class TestCoxPHAlgorithmIntegration:
     @pytest.mark.unit
     def test_validate_input_empty_expl_vars(self):
         """Test input validation with empty explanatory variables."""
-        from v6_cox_ph.miscellaneous import validate_coxph_input
+        from v6-cox-ph.miscellaneous import validate_coxph_input
         from vantage6.algorithm.tools.exceptions import UserInputError
         
         with pytest.raises(UserInputError):
@@ -340,7 +340,7 @@ class TestCoxPHAlgorithmIntegration:
     @pytest.mark.unit
     def test_validate_input_empty_column_name(self):
         """Test input validation with empty column name."""
-        from v6_cox_ph.miscellaneous import validate_coxph_input
+        from v6-cox-ph.miscellaneous import validate_coxph_input
         from vantage6.algorithm.tools.exceptions import UserInputError
         
         with pytest.raises(UserInputError):
@@ -354,7 +354,7 @@ class TestCoxPHAlgorithmIntegration:
     @pytest.mark.unit
     def test_compute_derivatives_basic(self):
         """Test derivative computation with basic inputs."""
-        from v6_cox_ph.coxph_logic import compute_derivatives
+        from v6-cox-ph.coxph_logic import compute_derivatives
         import numpy as np
         import pandas as pd
         
@@ -386,7 +386,7 @@ class TestCoxPHAlgorithmIntegration:
     @pytest.mark.unit
     def test_format_results_dataframe(self):
         """Test results DataFrame formatting."""
-        from v6_cox_ph.coxph_logic import format_results_dataframe
+        from v6-cox-ph.coxph_logic import format_results_dataframe
         import numpy as np
         
         results_data = {

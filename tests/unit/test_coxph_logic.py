@@ -6,7 +6,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from v6_cox_ph.coxph_logic import (
+from v6-cox-ph.coxph_logic import (
     compute_derivatives,
     compute_model_results,
     format_results_dataframe

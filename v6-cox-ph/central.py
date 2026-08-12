@@ -1,3 +1,4 @@
+from scipy.linalg import solve
 """
 Central algorithm functions for v6-cox-ph.
 
@@ -11,6 +12,7 @@ are delegated to coxph_logic.py module.
 import math
 import numpy as np
 import pandas as pd
+from scipy.linalg import solve
 
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import UserInputError
