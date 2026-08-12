@@ -407,3 +407,35 @@ def variables_config():
         "expl_vars": ["age", "treatment"],
         "organization_ids": [1, 2, 3]
     }
+
+
+@pytest.fixture
+def coxph_test_data():
+    """Load Cox-PH test data for unit testing."""
+    import pandas as pd
+    from pathlib import Path
+    
+    test_data_dir = Path(__file__).parent / "data"
+    
+    data_files = {
+        "data_1": test_data_dir / "coxph_test_data_1.csv",
+        "data_2": test_data_dir / "coxph_test_data_2.csv",
+        "data_3": test_data_dir / "coxph_test_data_3.csv",
+    }
+    
+    datasets = {}
+    for name, path in data_files.items():
+        if path.exists():
+            datasets[name] = pd.read_csv(path)
+    
+    return datasets
+
+
+@pytest.fixture
+def coxph_variables():
+    """Standard Cox-PH variable configuration for testing."""
+    return {
+        "time_col": "time",
+        "outcome_col": "event",
+        "expl_vars": ["age", "treatment"],
+    }
