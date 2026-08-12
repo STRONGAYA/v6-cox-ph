@@ -25,7 +25,11 @@ from vantage6_strongaya_general.miscellaneous import (
 )
 from vantage6_strongaya_rdf.collect_sparql_data import collect_sparql_data
 
-from .miscellaneous import PrivacyThresholdConfig
+from .miscellaneous import (
+    PrivacyThresholdConfig,
+    check_event_count,
+    check_data_quality
+)
 
 
 @data(1)
@@ -39,12 +43,15 @@ def get_unique_event_times(
     """
     Compute unique event times from the local data.
     
-    This function:
+    This function follows the STRONG AYA data pipeline:
     1. Checks for RDF endpoint and queries if present
     2. Masks unnecessary variables
     3. Sets datatypes
-    4. Applies sample size threshold
-    5. Computes unique event times for cases where outcome = 1
+    4. Applies data stratification if applicable
+    5. Validates that requested variables exist
+    6. Applies sample size threshold
+    7. Validates data quality
+    8. Computes unique event times for cases where outcome = 1
     
     Parameters
     ----------
@@ -84,13 +91,17 @@ def get_unique_event_times(
     safe_log("debug", "Setting datatypes")
     df = set_datatypes(df)
     
-    # Step 4: Validate that requested variables exist
+    # Step 4: Apply stratification if applicable (not currently used in Cox-PH, but included for completeness)
+    safe_log("debug", "Applying data stratification")
+    df = apply_data_stratification(df, {})
+    
+    # Step 5: Validate that requested variables exist
     safe_log("debug", "Validating requested variables exist")
     for var in variables_to_analyse:
         if var not in df.columns:
             raise UserInputError(f"Variable '{var}' not found in data")
     
-    # Step 5: Apply sample size threshold
+    # Step 6: Apply sample size threshold
     safe_log("debug", "Applying sample size threshold")
     try:
         df = apply_sample_size_threshold(client, df, variables_to_analyse)
@@ -98,20 +109,34 @@ def get_unique_event_times(
         safe_log("warning", f"Sample size threshold not met: {e}")
         return {"N-Threshold not met": client.organization_id}
     
-    # Check if we have enough events
-    event_count = df[df[outcome_col] == 1].shape[0]
-    if event_count <= PrivacyThresholdConfig.MIN_EVENT_COUNT:
-        safe_log("warning", f"Insufficient number of events ({event_count} <= {PrivacyThresholdConfig.MIN_EVENT_COUNT})")
+    # Step 7: Validate data quality
+    safe_log("debug", "Checking data quality")
+    data_quality = check_data_quality(df, time_col, outcome_col)
+    
+    if not data_quality["has_time"]:
+        safe_log("error", f"Time column '{time_col}' not found in data")
         return {"N-Threshold not met": client.organization_id}
     
-    # Step 6: Compute unique event times
+    if not data_quality["has_outcome"]:
+        safe_log("error", f"Outcome column '{outcome_col}' not found in data")
+        return {"N-Threshold not met": client.organization_id}
+    
+    if data_quality["has_negative_time"]:
+        safe_log("warning", "Negative time values detected")
+    
+    # Step 8: Check event count
+    if not check_event_count(df, outcome_col, PrivacyThresholdConfig.MIN_EVENT_COUNT):
+        safe_log("warning", f"Insufficient number of events ({data_quality['event_count']} <= {PrivacyThresholdConfig.MIN_EVENT_COUNT})")
+        return {"N-Threshold not met": client.organization_id}
+    
+    # Step 9: Compute unique event times
     safe_log("debug", "Computing unique event times for outcome=1")
     times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times['freq'] = times[outcome_col]
     times = times.drop(columns=outcome_col)
     
-    safe_log("info", f"Found {len(times)} unique event times")
+    safe_log("info", f"Found {len(times)} unique event times with {data_quality['event_count']} total events")
     return {'times': times.to_dict()}
 
 
@@ -126,12 +151,15 @@ def compute_summed_z(
     """
     Compute the sum of explanatory variables for event cases.
     
-    This function:
+    This function follows the STRONG AYA data pipeline:
     1. Checks for RDF endpoint and queries if present
     2. Masks unnecessary variables
     3. Sets datatypes
-    4. Applies sample size threshold
-    5. Computes sum of explanatory variables for cases where outcome = 1
+    4. Applies data stratification if applicable
+    5. Validates that requested variables exist
+    6. Applies sample size threshold
+    7. Validates data quality
+    8. Computes sum of explanatory variables for cases where outcome = 1
     
     Parameters
     ----------
@@ -149,6 +177,8 @@ def compute_summed_z(
     dict
         Dictionary containing:
         - sum: Dictionary of summed explanatory variables for event cases
+        OR
+        - N-Threshold not met: Organization ID if sample size is insufficient
     """
     safe_log("info", "Computing summed z statistics")
     
@@ -169,13 +199,17 @@ def compute_summed_z(
     safe_log("debug", "Setting datatypes")
     df = set_datatypes(df)
     
-    # Step 4: Validate that requested variables exist
+    # Step 4: Apply stratification if applicable
+    safe_log("debug", "Applying data stratification")
+    df = apply_data_stratification(df, {})
+    
+    # Step 5: Validate that requested variables exist
     safe_log("debug", "Validating requested variables exist")
     for var in variables_to_analyse:
         if var not in df.columns:
             raise UserInputError(f"Variable '{var}' not found in data")
     
-    # Step 5: Apply sample size threshold
+    # Step 6: Apply sample size threshold
     safe_log("debug", "Applying sample size threshold")
     try:
         df = apply_sample_size_threshold(client, df, variables_to_analyse)
@@ -183,11 +217,19 @@ def compute_summed_z(
         safe_log("warning", f"Sample size threshold not met: {e}")
         return {"N-Threshold not met": client.organization_id}
     
-    # Step 6: Compute summed Z statistics
+    # Step 7: Validate data quality
+    safe_log("debug", "Checking data quality")
+    # For this function, we just need to check that we have events
+    event_count = df[df[outcome_col] == 1].shape[0]
+    if event_count <= PrivacyThresholdConfig.MIN_EVENT_COUNT:
+        safe_log("warning", f"Insufficient number of events ({event_count} <= {PrivacyThresholdConfig.MIN_EVENT_COUNT})")
+        return {"N-Threshold not met": client.organization_id}
+    
+    # Step 8: Compute summed Z statistics
     safe_log("debug", "Computing sum of explanatory variables for event cases")
     z_sum = (df[df[outcome_col] == 1][expl_vars].sum().to_dict())
     
-    safe_log("info", f"Computed Z sum: {z_sum}")
+    safe_log("info", f"Computed Z sum for {len(expl_vars)} variables: {z_sum}")
     return {'sum': z_sum}
 
 
@@ -204,12 +246,15 @@ def perform_iteration(
     """
     Perform one iteration of the Newton-Raphson optimization for Cox-PH.
     
-    This function:
+    This function follows the STRONG AYA data pipeline:
     1. Checks for RDF endpoint and queries if present
     2. Masks unnecessary variables
     3. Sets datatypes
-    4. Applies sample size threshold
-    5. Computes aggregates needed for derivative computation
+    4. Applies data stratification if applicable
+    5. Validates that requested variables exist
+    6. Applies sample size threshold
+    7. Validates data quality
+    8. Computes aggregates needed for derivative computation
     
     Parameters
     ----------
@@ -233,6 +278,8 @@ def perform_iteration(
         - agg1: List of aggregated exp(beta * X) sums
         - agg2: List of aggregated X * exp(beta * X) sums
         - agg3: List of aggregated outer products X * X^T * exp(beta * X)
+        OR
+        - N-Threshold not met: Organization ID if sample size is insufficient
     """
     safe_log("info", "Computing aggregates for Cox-PH iteration")
     
@@ -253,13 +300,17 @@ def perform_iteration(
     safe_log("debug", "Setting datatypes")
     df = set_datatypes(df)
     
-    # Step 4: Validate that requested variables exist
+    # Step 4: Apply stratification if applicable
+    safe_log("debug", "Applying data stratification")
+    df = apply_data_stratification(df, {})
+    
+    # Step 5: Validate that requested variables exist
     safe_log("debug", "Validating requested variables exist")
     for var in variables_to_analyse:
         if var not in df.columns:
             raise UserInputError(f"Variable '{var}' not found in data")
     
-    # Step 5: Apply sample size threshold
+    # Step 6: Apply sample size threshold
     safe_log("debug", "Applying sample size threshold")
     try:
         df = apply_sample_size_threshold(client, df, variables_to_analyse)
@@ -267,7 +318,15 @@ def perform_iteration(
         safe_log("warning", f"Sample size threshold not met: {e}")
         return {"N-Threshold not met": client.organization_id}
     
-    # Step 6: Compute aggregates
+    # Step 7: Validate data quality
+    safe_log("debug", "Checking data quality")
+    data_quality = check_data_quality(df, time_col, "event")  # We don't have outcome_col here, but we can check time
+    
+    if not data_quality["has_time"]:
+        safe_log("error", f"Time column '{time_col}' not found in data")
+        return {"N-Threshold not met": client.organization_id}
+    
+    # Step 8: Compute aggregates
     safe_log("debug", "Computing aggregates for derivative computation")
     
     # Deserialize beta values

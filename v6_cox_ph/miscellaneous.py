@@ -88,6 +88,26 @@ class PrivacyThresholdConfig:
     """Configuration for privacy threshold checks."""
     MIN_SAMPLE_SIZE = 10
     MIN_EVENT_COUNT = 5
+    MAX_ITERATIONS = 10
+    CONVERGENCE_THRESHOLD = 0.000001
+
+
+class StratificationDetails:
+    """
+    Type definition for stratification details.
+    
+    This follows the STRONG AYA data standard for stratification.
+    """
+    pass
+
+
+class VariableDetails:
+    """
+    Type definition for variable details.
+    
+    This follows the STRONG AYA data standard for variable specifications.
+    """
+    pass
 
 
 def validate_coxph_input(
@@ -154,3 +174,79 @@ def validate_partial_result(result: Dict[str, Any]) -> PartialResult:
         return PartialResult(**result)
     except Exception as e:
         raise UserInputError(f"Invalid partial result: {e}")
+
+
+def check_event_count(df: pd.DataFrame, outcome_col: str, min_events: int = None) -> bool:
+    """
+    Check if the data has sufficient number of events.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The data to check
+    outcome_col : str
+        Name of the outcome column
+    min_events : int, optional
+        Minimum number of events required. If None, uses PrivacyThresholdConfig.MIN_EVENT_COUNT
+        
+    Returns
+    -------
+    bool
+        True if sufficient events, False otherwise
+    """
+    if min_events is None:
+        min_events = PrivacyThresholdConfig.MIN_EVENT_COUNT
+    
+    event_count = df[df[outcome_col] == 1].shape[0]
+    return event_count > min_events
+
+
+def check_data_quality(df: pd.DataFrame, time_col: str, outcome_col: str) -> Dict[str, Any]:
+    """
+    Perform comprehensive data quality checks.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The data to check
+    time_col : str
+        Name of the time column
+    outcome_col : str
+        Name of the outcome column
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing:
+        - has_time: Whether time column exists
+        - has_outcome: Whether outcome column exists
+        - event_count: Number of events
+        - censored_count: Number of censored observations
+        - total_count: Total number of observations
+        - time_range: Range of time values
+        - has_negative_time: Whether there are negative time values
+        - outcome_values: Unique values in outcome column
+    """
+    result = {
+        "has_time": time_col in df.columns,
+        "has_outcome": outcome_col in df.columns,
+        "event_count": 0,
+        "censored_count": 0,
+        "total_count": len(df),
+        "time_range": None,
+        "has_negative_time": False,
+        "outcome_values": []
+    }
+    
+    if result["has_time"]:
+        time_series = df[time_col]
+        result["time_range"] = (time_series.min(), time_series.max())
+        result["has_negative_time"] = (time_series < 0).any()
+    
+    if result["has_outcome"]:
+        outcome_series = df[outcome_col]
+        result["outcome_values"] = outcome_series.unique().tolist()
+        result["event_count"] = (outcome_series == 1).sum()
+        result["censored_count"] = (outcome_series == 0).sum()
+    
+    return result
