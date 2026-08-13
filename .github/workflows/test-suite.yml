@@ -2,9 +2,9 @@ name: Test Suite
 
 on:
   push:
-    branches: [ main, standard-coxph ]
+    branches: [ main, standard-coxph, strong-aya-adaptation, pr2-privacy-data-handling, pr3-testing-infrastructure, pr4-final-refinements ]
   pull_request:
-    branches: [ main, standard-coxph ]
+    branches: [ main, standard-coxph, strong-aya-adaptation, pr2-privacy-data-handling, pr3-testing-infrastructure, pr4-final-refinements ]
 
 permissions:
   contents: write
@@ -63,7 +63,7 @@ jobs:
 
       - name: Run Black code formatter check
         run: |
-          black --check --diff v6_cox_ph/ tests/
+          black --fast --check --diff v6_cox_ph/ tests/
 
       - name: Run Flake8 linter
         run: |
