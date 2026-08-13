@@ -1,3 +1,3 @@
 """
-Tests for v6-cox-ph algorithm.
+Tests for v6_cox_ph algorithm.
 """

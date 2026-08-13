@@ -63,15 +63,15 @@ jobs:
 
       - name: Run Black code formatter check
         run: |
-          black --check --diff v6-cox-ph/ tests/
+          black --check --diff v6_cox_ph/ tests/
 
       - name: Run Flake8 linter
         run: |
-          flake8 v6-cox-ph/ tests/ --max-line-length=120 --extend-ignore=E203,W503
+          flake8 v6_cox_ph/ tests/ --max-line-length=120 --extend-ignore=E203,W503
 
       - name: Run MyPy type checker
         run: |
-          find v6-cox-ph/ -name "*.py" -exec mypy {} --ignore-missing-imports \;
+          find v6_cox_ph/ -name "*.py" -exec mypy {} --ignore-missing-imports \;
 
   security:
     runs-on: ubuntu-latest
@@ -92,7 +92,7 @@ jobs:
 
       - name: Run Bandit security linter
         run: |
-          bandit -r v6-cox-ph/ -f json -o bandit-report.json || true
+          bandit -r v6_cox_ph/ -f json -o bandit-report.json || true
 
       - name: Check dependencies for known vulnerabilities
         run: |

@@ -1,1 +1,1 @@
-# Manual mock client tests for v6-cox-ph
+# Manual mock client tests for v6_cox_ph

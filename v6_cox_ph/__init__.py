@@ -1,5 +1,5 @@
 """
-v6-cox-ph: Federated Cox Proportional Hazards algorithm for STRONG AYA.
+v6_cox_ph: Federated Cox Proportional Hazards algorithm for STRONG AYA.
 
 This package provides a federated implementation of the Cox Proportional Hazards
 model following STRONG AYA conventions and data standards.
@@ -14,12 +14,12 @@ from .miscellaneous import (
     validate_coxph_input,
     validate_partial_result,
     check_event_count,
-    check_data_quality
+    check_data_quality,
 )
 from .coxph_logic import (
     compute_derivatives,
     compute_model_results,
-    format_results_dataframe
+    format_results_dataframe,
 )
 
 __all__ = [
@@ -36,5 +36,5 @@ __all__ = [
     "check_data_quality",
     "compute_derivatives",
     "compute_model_results",
-    "format_results_dataframe"
+    "format_results_dataframe",
 ]

@@ -1,11 +1,11 @@
-# Alpine-based Docker image for v6-cox-ph algorithm
+# Alpine-based Docker image for v6_cox_ph algorithm
 FROM python:3.10-alpine
 
 # Install git (required for pip install from git)
 RUN apk add --no-cache git
 
 # Package name argument
-ARG PKG_NAME="v6-cox-ph"
+ARG PKG_NAME="v6_cox_ph"
 
 # Copy the entire repository
 COPY . /app

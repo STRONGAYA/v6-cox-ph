@@ -23,7 +23,7 @@ from pathlib import Path
 # Get path of current directory
 current_path = Path(__file__).parent
 
-# Mock client for v6-cox-ph algorithm
+# Mock client for v6_cox_ph algorithm
 # Note: Each organization gets its own dataset
 client = MockAlgorithmClient(
     datasets=[
@@ -52,7 +52,7 @@ client = MockAlgorithmClient(
             }
         ],
     ],
-    module="v6-cox-ph",
+    module="v6_cox_ph",
 )
 
 # List mock organisations
@@ -63,9 +63,9 @@ org_ids = [organisation["id"] for organisation in organisations]
 print(f"\nOrganisation IDs: {org_ids}")
 
 # Test 1: Run the central method on all organisations
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("Test 1: Central method with all organisations")
-print("="*60)
+print("=" * 60)
 
 try:
     central_task = client.task.create(
@@ -76,7 +76,7 @@ try:
                 "outcome_col": "event",
                 "expl_vars": ["age", "treatment"],
                 "organization_ids": org_ids,
-            }
+            },
         },
         organizations=org_ids,
     )
@@ -87,9 +87,9 @@ except Exception as e:
     print(f"\nError in Test 1: {type(e).__name__}: {e}")
 
 # Test 2: Run with subset of organisations (just first two)
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("Test 2: Central method with subset of organisations")
-print("="*60)
+print("=" * 60)
 
 try:
     subset_task = client.task.create(
@@ -100,7 +100,7 @@ try:
                 "outcome_col": "event",
                 "expl_vars": ["age"],  # Single covariate
                 "organization_ids": org_ids[:2],  # First two organisations
-            }
+            },
         },
         organizations=org_ids[:2],
     )
@@ -111,9 +111,9 @@ except Exception as e:
     print(f"\nError in Test 2: {type(e).__name__}: {e}")
 
 # Test 3: Run with single organisation (should work)
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("Test 3: Central method with single organisation")
-print("="*60)
+print("=" * 60)
 
 try:
     single_task = client.task.create(
@@ -124,7 +124,7 @@ try:
                 "outcome_col": "event",
                 "expl_vars": ["age", "treatment"],
                 "organization_ids": [org_ids[0]],
-            }
+            },
         },
         organizations=[org_ids[0]],
     )
@@ -135,9 +135,9 @@ except Exception as e:
     print(f"\nError in Test 3: {type(e).__name__}: {e}")
 
 # Test 4: Test with invalid input (should fail gracefully)
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("Test 4: Invalid input (empty explanatory variables)")
-print("="*60)
+print("=" * 60)
 
 try:
     invalid_task = client.task.create(
@@ -148,7 +148,7 @@ try:
                 "outcome_col": "event",
                 "expl_vars": [],  # Empty list - should fail
                 "organization_ids": org_ids,
-            }
+            },
         },
         organizations=org_ids,
     )
@@ -159,9 +159,9 @@ except Exception as e:
     print(f"\nExpected error caught: {type(e).__name__}: {e}")
 
 # Test 5: Test with non-existent column
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("Test 5: Invalid input (non-existent column)")
-print("="*60)
+print("=" * 60)
 
 try:
     nonexistent_task = client.task.create(
@@ -172,7 +172,7 @@ try:
                 "outcome_col": "event",
                 "expl_vars": ["age"],
                 "organization_ids": org_ids,
-            }
+            },
         },
         organizations=org_ids,
     )
@@ -182,6 +182,6 @@ try:
 except Exception as e:
     print(f"\nExpected error caught: {type(e).__name__}: {e}")
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("All manual mock client tests completed!")
-print("="*60)
+print("=" * 60)

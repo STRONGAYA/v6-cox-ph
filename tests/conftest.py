@@ -1,5 +1,5 @@
 """
-Pytest configuration and fixtures for v6-cox-ph tests.
+Pytest configuration and fixtures for v6_cox_ph tests.
 """
 
 import os
@@ -36,24 +36,32 @@ def docker_client():
 def get_docker_host():
     """Get the Docker host based on the operating system."""
     system = platform.system().lower()
-    
+
     if system == "linux":
         # On Linux, we need to get the bridge IP
         try:
             result = subprocess.run(
-                ["docker", "network", "inspect", "bridge", "--format", 
-                 "{{range .IPAM.Config}}{{.Subnet}}{{end}}"],
-                capture_output=True, text=True, timeout=10
+                [
+                    "docker",
+                    "network",
+                    "inspect",
+                    "bridge",
+                    "--format",
+                    "{{range .IPAM.Config}}{{.Subnet}}{{end}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0 and result.stdout.strip():
                 subnet = result.stdout.strip()
                 # Extract the first IP from the subnet (e.g., 172.17.0.0/16 -> 172.17.0.1)
-                parts = subnet.split('.')
+                parts = subnet.split(".")
                 if len(parts) >= 3:
                     return f"{parts[0]}.{parts[1]}.{parts[2]}.1"
         except Exception:
             pass
-        
+
         # Fallback for Linux
         return "172.17.0.1"
     else:
@@ -66,7 +74,7 @@ def algorithm_image(docker_client):
     """Build the algorithm Docker image for the entire test session."""
     # Get repository root and derive package name from folder
     repo_root = Path(__file__).parent.parent
-    pkg_name = "v6-cox-ph"
+    pkg_name = "v6_cox_ph"
 
     # Create image tag from package name
     image_tag = f"{pkg_name}:ci-test"
@@ -322,7 +330,8 @@ def vantage6_network_session(docker_client, extra_node_config_file):
                 filters={"status": "running"}
             )
             service_containers = [
-                c for c in running_containers 
+                c
+                for c in running_containers
                 if any(tag in c.name for tag in ["server", "node", "store"])
             ]
 
@@ -334,8 +343,10 @@ def vantage6_network_session(docker_client, extra_node_config_file):
             else:
                 stable_count = 0
 
-            print(f"Waiting for network... ({elapsed}/{max_wait}s) "
-                  f"Containers: {len(service_containers)} running")
+            print(
+                f"Waiting for network... ({elapsed}/{max_wait}s) "
+                f"Containers: {len(service_containers)} running"
+            )
 
         if network_info["status"] != "running":
             pytest.skip(
@@ -369,23 +380,18 @@ def authentication(vantage6_network_session):
 
     for attempt in range(max_retries):
         try:
-            client = Client(
-                "http://localhost",
-                5000,
-                "/api"
-            )
+            client = Client("http://localhost", 5000, "/api")
 
             # Try to authenticate
             client.setup_encryption(None)
-            client.authenticate(
-                username="admin",
-                password="admin"
-            )
+            client.authenticate(username="admin", password="admin")
 
             # Test the connection
             organizations = client.organization.list()
             if organizations:
-                print(f"Successfully authenticated. Found {len(organizations)} organizations.")
+                print(
+                    f"Successfully authenticated. Found {len(organizations)} organizations."
+                )
                 return client
             else:
                 print("Authentication succeeded but no organizations found.")
@@ -405,7 +411,7 @@ def variables_config():
         "time_col": "time",
         "outcome_col": "event",
         "expl_vars": ["age", "treatment"],
-        "organization_ids": [1, 2, 3]
+        "organization_ids": [1, 2, 3],
     }
 
 
@@ -414,20 +420,20 @@ def coxph_test_data():
     """Load Cox-PH test data for unit testing."""
     import pandas as pd
     from pathlib import Path
-    
+
     test_data_dir = Path(__file__).parent / "data"
-    
+
     data_files = {
         "data_1": test_data_dir / "coxph_test_data_1.csv",
         "data_2": test_data_dir / "coxph_test_data_2.csv",
         "data_3": test_data_dir / "coxph_test_data_3.csv",
     }
-    
+
     datasets = {}
     for name, path in data_files.items():
         if path.exists():
             datasets[name] = pd.read_csv(path)
-    
+
     return datasets
 
 

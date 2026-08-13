@@ -1,20 +1,21 @@
 """
-Unit tests for Cox-PH logic in v6-cox-ph.
+Unit tests for Cox-PH logic in v6_cox_ph.
 """
 
-import pytest
 import pandas as pd
 import numpy as np
 
-from v6-cox-ph.coxph_logic import (
+from v6_cox_ph.coxph_logic import (
     compute_derivatives,
-    compute_model_results,
     format_results_dataframe
 )
 
 
 class TestComputeDerivatives:
+    """Tests for compute_derivatives function."""
+
     def test_basic_derivatives(self):
+        """Test derivative computation with basic inputs."""
         # Create test data
         summed_agg1 = np.array([10.0, 8.0, 6.0])
         summed_agg2 = np.array([[1.0, 2.0], [1.5, 2.5], [0.5, 1.5]])
@@ -42,7 +43,10 @@ class TestComputeDerivatives:
 
 
 class TestFormatResultsDataframe:
+    """Tests for format_results_dataframe function."""
+
     def test_format_results(self):
+        """Test results DataFrame formatting."""
         results_data = {
             "Coef": [0.5, -0.3],
             "Exp(coef)": [1.6487, 0.7408],
