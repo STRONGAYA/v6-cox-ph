@@ -1,1 +1,1 @@
-# Unit tests for v6_cox_ph
+# Unit tests for v6-cox-ph

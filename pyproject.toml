@@ -60,10 +60,11 @@ lint = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/STRONGAYA/v6_cox_ph"
-Bugtracker = "https://github.com/STRONGAYA/v6_cox_ph/issues"
+Homepage = "https://github.com/STRONGAYA/v6-cox-ph"
+Bugtracker = "https://github.com/STRONGAYA/v6-cox-ph/issues"
 
 [tool.setuptools]
+package-dir = {v6_cox_ph = "v6-cox-ph"}
 packages = ["v6_cox_ph"]
 
 [tool.setuptools.package-data]

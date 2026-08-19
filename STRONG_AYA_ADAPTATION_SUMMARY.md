@@ -1,4 +1,4 @@
-# STRONG AYA Adaptation Summary: v6_cox_ph
+# STRONG AYA Adaptation Summary: v6-cox-ph
 
 ## 🎯 Overview
 
@@ -12,7 +12,7 @@ The Cox-PH algorithm has been successfully adapted to STRONG AYA conventions and
 
 ## 📦 GitHub Branches
 
-All branches have been pushed to the [STRONGAYA/v6_cox_ph](https://github.com/STRONGAYA/v6_cox_ph) repository:
+All branches have been pushed to the [STRONGAYA/v6-cox-ph](https://github.com/STRONGAYA/v6-cox-ph) repository:
 
 | Branch | PR | Focus | Status |
 |--------|----|-------|--------|
@@ -28,8 +28,8 @@ All branches have been pushed to the [STRONGAYA/v6_cox_ph](https://github.com/ST
 ## 🏗️ Project Structure
 
 ```
-v6_cox_ph/
-├── v6_cox_ph/
+v6-cox-ph/
+├── v6-cox-ph/
 │   ├── __init__.py           # Package exports
 │   ├── central.py            # Orchestration (clean, readable)
 │   ├── partial.py            # Data pipeline + delegates to logic
@@ -178,8 +178,8 @@ v6_cox_ph/
 
 ```bash
 # Clone the repository
-git clone https://github.com/STRONGAYA/v6_cox_ph.git
-cd v6_cox_ph
+git clone https://github.com/STRONGAYA/v6-cox-ph.git
+cd v6-cox-ph
 
 # Install with dependencies
 pip install -e .[dev]
@@ -188,7 +188,7 @@ pip install -e .[dev]
 pytest
 
 # Build Docker image
-docker build -t v6_cox_ph .
+docker build -t v6-cox-ph .
 ```
 
 ### For Base Repository Maintainers
@@ -239,7 +239,7 @@ To backport improvements:
 
 ## ✨ Summary
 
-The v6_cox_ph algorithm is now **fully adapted to STRONG AYA conventions** with:
+The v6-cox-ph algorithm is now **fully adapted to STRONG AYA conventions** with:
 
 - ✅ Proper architecture (central-partial pattern)
 - ✅ Complete privacy guards

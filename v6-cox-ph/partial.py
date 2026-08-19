@@ -1,5 +1,5 @@
 """
-Partial algorithm functions for v6_cox_ph.
+Partial algorithm functions for v6-cox-ph.
 
 This file contains the partial functions that are executed on each node with access
 to local data. It handles data pipeline steps and delegates computation to

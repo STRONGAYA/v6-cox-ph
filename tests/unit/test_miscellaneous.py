@@ -1,5 +1,5 @@
 """
-Unit tests for miscellaneous utilities in v6_cox_ph.
+Unit tests for miscellaneous utilities in v6-cox-ph.
 """
 
 import pytest

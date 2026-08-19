@@ -1,5 +1,5 @@
 """
-Miscellaneous utilities for the v6_cox_ph algorithm.
+Miscellaneous utilities for the v6-cox-ph algorithm.
 
 This module contains:
 - Pydantic models for input validation

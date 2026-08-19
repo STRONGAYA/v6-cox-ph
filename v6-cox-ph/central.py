@@ -1,5 +1,5 @@
 """
-Central algorithm functions for v6_cox_ph.
+Central algorithm functions for v6-cox-ph.
 
 This file contains the central orchestration logic for the federated Cox-PH algorithm.
 It coordinates subtasks dispatched to nodes, collects partial results, and aggregates them.

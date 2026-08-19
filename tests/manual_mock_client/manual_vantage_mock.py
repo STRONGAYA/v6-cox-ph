@@ -23,7 +23,7 @@ from pathlib import Path
 # Get path of current directory
 current_path = Path(__file__).parent
 
-# Mock client for v6_cox_ph algorithm
+# Mock client for v6-cox-ph algorithm
 # Note: Each organization gets its own dataset
 client = MockAlgorithmClient(
     datasets=[
@@ -52,7 +52,7 @@ client = MockAlgorithmClient(
             }
         ],
     ],
-    module="v6_cox_ph",
+    module="v6-cox-ph",
 )
 
 # List mock organisations

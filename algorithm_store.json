@@ -1,6 +1,6 @@
 {
   "name": "coxph",
-  "image": "v6-coxph",
+  "image": "v6-cox-ph",
   "vantage6_version": "4.3",
   "partitioning": "horizontal",
   "functions": [

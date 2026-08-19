@@ -1,5 +1,5 @@
 """
-Comprehensive Vantage6 integration testing for v6_cox_ph algorithm.
+Comprehensive Vantage6 integration testing for v6-cox-ph algorithm.
 """
 
 import pytest

@@ -1,4 +1,4 @@
-# Backport Analysis: v6_cox_ph STRONG AYA Adaptation
+# Backport Analysis: v6-cox-ph STRONG AYA Adaptation
 
 This document identifies which improvements made during the STRONG AYA adaptation can be backported to the base (non-STRONG AYA) repository to benefit the general vantage6 Cox-PH algorithm.
 
@@ -194,7 +194,7 @@ These changes are specific to STRONG AYA and should NOT be backported:
 - `apply_data_stratification()` calls
 
 ### 4. **Package Structure**
-- Package name change from `coxph` to `v6_cox_ph`
+- Package name change from `coxph` to `v6-cox-ph`
 - `pyproject.toml` vs `setup.py` (can be backported separately)
 
 ---

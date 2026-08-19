@@ -1,5 +1,5 @@
 """
-Unit tests for Cox-PH logic in v6_cox_ph.
+Unit tests for Cox-PH logic in v6-cox-ph.
 """
 
 import pandas as pd

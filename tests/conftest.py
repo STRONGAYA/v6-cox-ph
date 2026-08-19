@@ -1,5 +1,5 @@
 """
-Pytest configuration and fixtures for v6_cox_ph tests.
+Pytest configuration and fixtures for v6-cox-ph tests.
 """
 
 import os

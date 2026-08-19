@@ -1,4 +1,4 @@
-# v6_cox_ph
+# v6-cox-ph
 
 Federated Cox Proportional Hazards algorithm for STRONG AYA.
 
@@ -46,8 +46,8 @@ The algorithm follows the STRONG AYA central-partial pattern:
 
 ```bash
 # Clone the repository
-git clone https://github.com/STRONGAYA/v6_cox_ph.git
-cd v6_cox_ph
+git clone https://github.com/STRONGAYA/v6-cox-ph.git
+cd v6-cox-ph
 
 # Install the package
 pip install -e .
@@ -122,10 +122,10 @@ The algorithm returns a dictionary containing:
 
 ```bash
 # Build the image
-docker build -t v6_cox_ph .
+docker build -t v6-cox-ph .
 
 # Or with a specific package name
-docker build --build-arg PKG_NAME=v6_cox_ph -t v6_cox_ph .
+docker build --build-arg PKG_NAME=v6-cox-ph -t v6-cox-ph .
 ```
 
 ### Running with Docker
@@ -134,8 +134,8 @@ The Docker image can be pushed to a registry and used with vantage6:
 
 ```bash
 # Tag and push to a registry
-docker tag v6_cox_ph harbor2.vantage6.ai/algorithms/v6_cox_ph
-docker push harbor2.vantage6.ai/algorithms/v6_cox_ph
+docker tag v6-cox-ph harbor2.vantage6.ai/algorithms/v6-cox-ph
+docker push harbor2.vantage6.ai/algorithms/v6-cox-ph
 ```
 
 ## Testing
@@ -155,7 +155,7 @@ pytest tests/unit/
 pytest tests/integration/
 
 # Run with coverage
-pytest --cov=v6_cox_ph --cov-report=html
+pytest --cov=v6-cox-ph --cov-report=html
 ```
 
 ### Test Data
@@ -202,7 +202,7 @@ This algorithm was adapted to STRONG AYA conventions through a series of stacked
 ### Stacked PRs for STRONG AYA Adaptation
 
 1. **PR1: Initial STRONG AYA adaptation** - Package structure and basic dependencies
-   - Restructured package from `coxph/` to `v6_cox_ph/`
+   - Restructured package from `coxph/` to `v6-cox-ph/`
    - Added `pyproject.toml` with STRONG AYA dependencies
    - Replaced logging with `safe_log` from v6-tools-general
    - Added Pydantic v2 models for input validation

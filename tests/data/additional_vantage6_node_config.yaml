@@ -2,5 +2,5 @@
 policies:
   allowed_algorithms:
     - ^hello-world$
-    - ^v6_cox_ph$
+    - ^v6-cox-ph$
   require_algorithm_pull: false
