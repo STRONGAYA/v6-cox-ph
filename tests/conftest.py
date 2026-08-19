@@ -74,7 +74,7 @@ def algorithm_image(docker_client):
     """Build the algorithm Docker image for the entire test session."""
     # Get repository root and derive package name from folder
     repo_root = Path(__file__).parent.parent
-    pkg_name = "v6_cox_ph"
+    pkg_name = "v6-cox-ph"
 
     # Create image tag from package name
     image_tag = f"{pkg_name}:ci-test"

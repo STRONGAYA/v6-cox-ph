@@ -5,7 +5,7 @@ FROM python:3.10-alpine
 RUN apk add --no-cache git
 
 # Package name argument
-ARG PKG_NAME="v6_cox_ph"
+ARG PKG_NAME="v6-cox-ph"
 
 # Copy the entire repository
 COPY . /app
