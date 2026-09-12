@@ -197,17 +197,14 @@ def check_sample_size(
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
-        warn(
-            f"Sample size threshold not met: {n_rows} rows <= {threshold}."
-        )
+        warn(f"Sample size threshold not met: {n_rows} rows <= {threshold}.")
         return False
 
     if outcome_col is not None and outcome_col in df.columns:
         n_events = int((df[outcome_col] == 1).sum())
         if n_events <= threshold:
             warn(
-                f"Sample size threshold not met: {n_events} events <= "
-                f"{threshold}."
+                f"Sample size threshold not met: {n_events} events <= " f"{threshold}."
             )
             return False
 
@@ -303,7 +300,7 @@ def bin_times(times: pd.Series, width: float | None) -> pd.Series:
     """
     if width is None or width <= 0:
         return times
-    return (np.floor(times.to_numpy(dtype=float) / width) * width)
+    return np.floor(times.to_numpy(dtype=float) / width) * width
 
 
 def tail_cutoff(times: pd.Series, k: int) -> float | None:

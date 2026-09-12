@@ -148,17 +148,17 @@ class TestFederatedPipelineVsLifelines:
             z = model.loc[var, "Z"]
             # Coef and SE are rounded to 5 decimals, so allow rounding slack;
             # the original bug produces a ~13 % error on treatment.
-            assert abs(z - coef / se) <= 1e-3, (
-                f"Z != Coef/SE for {var}: Z={z}, Coef/SE={coef / se}"
-            )
+            assert (
+                abs(z - coef / se) <= 1e-3
+            ), f"Z != Coef/SE for {var}: Z={z}, Coef/SE={coef / se}"
 
     def test_aic_close_to_lifelines(self, standard_result):
         """AIC within 0.1 of the lifelines AIC."""
         df1, df2, _ = _load_datasets()
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        assert abs(standard_result["aic"] - ref["aic"]) <= 0.1, (
-            f"AIC mismatch: fed={standard_result['aic']}, ref={ref['aic']}"
-        )
+        assert (
+            abs(standard_result["aic"] - ref["aic"]) <= 0.1
+        ), f"AIC mismatch: fed={standard_result['aic']}, ref={ref['aic']}"
 
 
 @pytest.mark.unit
@@ -178,9 +178,7 @@ class TestFederatedEqualsPooled:
         )
 
         pooled_df = pd.concat([df1, df2], ignore_index=True)
-        pooled = _run_central(
-            [[{"database": pooled_df, "db_type": "csv"}]], [1]
-        )
+        pooled = _run_central([[{"database": pooled_df, "db_type": "csv"}]], [1])
 
         fed_model = pd.read_json(StringIO(fed["model"]))
         pooled_model = pd.read_json(StringIO(pooled["model"]))
@@ -280,22 +278,22 @@ class TestDefaultGuardsPrivacyProperty:
             values = [float(v) for v in agg1]
             # Non-increasing
             for i in range(1, len(values)):
-                assert values[i] <= values[i - 1] + 1e-9, (
-                    f"node {node_idx}: agg1 not non-increasing at {i}"
-                )
+                assert (
+                    values[i] <= values[i - 1] + 1e-9
+                ), f"node {node_idx}: agg1 not non-increasing at {i}"
             # Every positive change (decrease) is >= k
             for i in range(1, len(values)):
                 decrease = values[i - 1] - values[i]
                 if decrease > 1e-9:
-                    assert decrease >= k - 1e-9, (
-                        f"node {node_idx}: decrease {decrease} < k={k} at {i}"
-                    )
+                    assert (
+                        decrease >= k - 1e-9
+                    ), f"node {node_idx}: decrease {decrease} < k={k} at {i}"
             # Smallest non-zero value is >= k
             non_zero = [v for v in values if v > 1e-9]
             assert non_zero, f"node {node_idx}: all agg1 are zero"
-            assert min(non_zero) >= k - 1e-9, (
-                f"node {node_idx}: min non-zero agg1 {min(non_zero)} < k={k}"
-            )
+            assert (
+                min(non_zero) >= k - 1e-9
+            ), f"node {node_idx}: min non-zero agg1 {min(non_zero)} < k={k}"
 
     def test_coefficients_within_loose_bound(self):
         """With default guards, coefficients stay within 0.1 of lifelines."""
@@ -309,8 +307,7 @@ class TestDefaultGuardsPrivacyProperty:
         model = pd.read_json(StringIO(result["model"]))
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
-                f"coef {var}: fed={model.loc[var, 'Coef']}, "
-                f"ref={ref['coef'][var]}"
+                f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
             )
 
 
@@ -347,9 +344,9 @@ class TestTimeBinning:
                 t = pd.DataFrame.from_dict(r["times"])
                 shared_times.extend(t["time"].tolist())
         for t in shared_times:
-            assert t % 10 == 0 or np.isclose(t % 10, 0), (
-                f"shared time {t} is not a multiple of 10"
-            )
+            assert t % 10 == 0 or np.isclose(
+                t % 10, 0
+            ), f"shared time {t} is not a multiple of 10"
 
         # The full pipeline still converges.
         result = _run_central(datasets, [1, 2])

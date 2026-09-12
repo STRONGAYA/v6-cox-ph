@@ -161,17 +161,13 @@ class TestEnsureSpawnedByCentral:
     def test_subtask_passes(self):
         """A task with a parent passes the guard."""
         token = self._make_token(task_id=7)
-        client = self._make_client(
-            token=token, task_dict={"parent": {"id": 3}}
-        )
+        client = self._make_client(token=token, task_dict={"parent": {"id": 3}})
         ensure_spawned_by_central(client)
 
     def test_task_lookup_failure_fails_closed(self):
         """If task.get raises, the guard fails closed with AlgorithmError."""
         token = self._make_token(task_id=7)
-        client = self._make_client(
-            token=token, raises=RuntimeError("connection error")
-        )
+        client = self._make_client(token=token, raises=RuntimeError("connection error"))
         with pytest.raises(AlgorithmError):
             ensure_spawned_by_central(client)
 
@@ -395,9 +391,9 @@ class TestGuardedRiskSetMasks:
         sizes = [int(m.sum()) for m in masks]
         for i in range(1, len(sizes)):
             change = sizes[i - 1] - sizes[i]
-            assert change == 0 or change >= 5, (
-                f"change {change} at index {i} (sizes={sizes})"
-            )
+            assert (
+                change == 0 or change >= 5
+            ), f"change {change} at index {i} (sizes={sizes})"
 
     def test_tail_goes_to_empty_only_from_ge_k(self):
         """The final transition to an empty risk set must remove >= k."""

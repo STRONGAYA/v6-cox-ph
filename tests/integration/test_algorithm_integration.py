@@ -342,9 +342,7 @@ class TestCoxPHAlgorithmIntegration:
             organizations=[1],
             name=f"Direct partial call — {method}",
             image=algorithm_image_name,
-            description=(
-                f"Negative test: calling {method} directly must be refused."
-            ),
+            description=(f"Negative test: calling {method} directly must be refused."),
             input_={"method": method, "kwargs": kwargs},
             databases=[{"label": "coxph_test_data_1"}],
         )
@@ -564,16 +562,16 @@ def determine_model_acceptance(
 
         # Z must equal Coef / SE (regression check for the old bug)
         z = fed_df.loc[var, "Z"]
-        assert abs(z - fed_coef / fed_se) <= 1e-4, (
-            f"Z != Coef/SE for {var}: Z={z}, Coef/SE={fed_coef / fed_se}"
-        )
+        assert (
+            abs(z - fed_coef / fed_se) <= 1e-4
+        ), f"Z != Coef/SE for {var}: Z={z}, Coef/SE={fed_coef / fed_se}"
 
         # p must equal 2 * Phi(-|Z|)
         expected_p = 2 * norm.cdf(-abs(z))
         pval = fed_df.loc[var, "p-value"]
-        assert abs(pval - expected_p) <= 1e-6, (
-            f"p-value mismatch for {var}: got {pval}, expected {expected_p}"
-        )
+        assert (
+            abs(pval - expected_p) <= 1e-6
+        ), f"p-value mismatch for {var}: got {pval}, expected {expected_p}"
 
     assert np.isfinite(federated_result["aic"]), "AIC should be finite"
 

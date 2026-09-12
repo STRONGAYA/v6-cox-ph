@@ -58,3 +58,22 @@ credentials. Check [this page](https://docs.docker.com/get-started/04_sharing_ap
 For more details on sharing images on Docker Hub. If you are using a different
 Docker registry, check the documentation of that registry and be sure that you
 have sufficient permissions.
+
+### Node configuration (algorithm_env)
+
+Privacy guards are tuned through node environment variables:
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `SAMPLE_SIZE_THRESHOLD` | int | 10 | Minimum rows and events (strictly greater). |
+| `COXPH_TIME_BIN_WIDTH` | float | (disabled) | Event-time bin width; when set, times are coarsened to `floor(t/w)*w`. |
+| `COXPH_MIN_RISK_SET_CHANGE` | int | 5 | Minimum risk-set change (`k`); consecutive shared aggregates differ by 0 or `>= k`. Set to `1` to disable tail censoring and the jump guard. |
+
+See `docs/coxph/Privacy.rst` for the privacy implications.
+
+### Output fields
+
+The `central` function returns, alongside the model table, a `converged`
+(bool) and `n_iterations` (int) field indicating whether the Newton-Raphson
+optimiser converged. The Wald statistic is `Z = Coef / SE` and the p-value is
+`p = 2 * Phi(-|Z|)`. See `docs/coxph/Usage.rst` for the full output schema.

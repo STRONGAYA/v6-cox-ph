@@ -227,12 +227,8 @@ class TestComputeModelResults:
         beta = np.array([0.5, -0.3])
         se = result["standard_errors"]
         rd = result["results_data"]
-        np.testing.assert_allclose(
-            rd["lower_CI"], np.exp(beta - 1.96 * se), atol=1e-5
-        )
-        np.testing.assert_allclose(
-            rd["upper_CI"], np.exp(beta + 1.96 * se), atol=1e-5
-        )
+        np.testing.assert_allclose(rd["lower_CI"], np.exp(beta - 1.96 * se), atol=1e-5)
+        np.testing.assert_allclose(rd["upper_CI"], np.exp(beta + 1.96 * se), atol=1e-5)
 
     def test_compute_model_results_wald(self, model_fixture):
         """Test the overall Wald statistic and p-value."""

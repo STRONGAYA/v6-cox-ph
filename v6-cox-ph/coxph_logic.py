@@ -144,7 +144,9 @@ def compute_model_results(
     # Fisher information, i.e. the inverse of the negative Hessian).
     try:
         covariance = np.linalg.inv(-secondary_derivative)
-        serrors = np.array([np.sqrt(covariance[k, k]) for k in range(covariance.shape[0])])
+        serrors = np.array(
+            [np.sqrt(covariance[k, k]) for k in range(covariance.shape[0])]
+        )
     except np.linalg.LinAlgError as e:
         warn(f"Could not invert Hessian matrix: {e}")
         covariance = np.zeros((n_covs, n_covs))

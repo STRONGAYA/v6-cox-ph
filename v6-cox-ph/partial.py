@@ -71,10 +71,7 @@ def get_unique_event_times(
         warn("Negative time values detected in the data")
 
     if not check_sample_size(df, outcome_col, settings):
-        warn(
-            "Sub-task was not executed because the number of samples "
-            "is too small."
-        )
+        warn("Sub-task was not executed because the number of samples " "is too small.")
         return {"N-Threshold not met": client.organization_id}
 
     df = prepare_time_column(df, time_col, settings, outcome_col)
