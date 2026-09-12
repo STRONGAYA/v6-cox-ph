@@ -21,6 +21,10 @@ from .coxph_logic import compute_derivatives, compute_model_results
 from .coxph_logic import format_results_dataframe
 from .miscellaneous import validate_coxph_input
 
+# Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
+# it to force non-convergence.
+MAX_ITERATIONS = 10
+
 
 @algorithm_client
 def central(
@@ -87,7 +91,7 @@ def central(
     info(f"Sending task to organisations {ids}")
 
     n_covs = len(expl_vars)
-    epochs = 10
+    epochs = MAX_ITERATIONS
 
     # Subtask: get unique event times
     info("Defining input parameters for subtask — get unique event times")
