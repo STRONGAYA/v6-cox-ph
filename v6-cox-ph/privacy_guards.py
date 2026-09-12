@@ -293,3 +293,102 @@ def validate_iteration_input(
                 )
 
     return beta_arr, grid
+
+
+def bin_times(times: pd.Series, width: float | None) -> pd.Series:
+    """Coarsen event times to a regular grid ``floor(t / w) * w``.
+
+    When ``width`` is ``None`` or non-positive the times are returned
+    unchanged.
+    """
+    if width is None or width <= 0:
+        return times
+    return (np.floor(times.to_numpy(dtype=float) / width) * width)
+
+
+def tail_cutoff(times: pd.Series, k: int) -> float | None:
+    """Return the k-th largest time, used as the tail-censoring cut-off.
+
+    Rows with ``time > t_cut`` are administratively censored (their time is
+    clamped to ``t_cut``), which guarantees that the largest shared risk set
+    contains at least ``k`` individuals.
+
+    Returns ``None`` when ``k <= 1`` (guard disabled) or when there are
+    fewer than ``k`` times (the node is excluded by the threshold before
+    censoring runs).
+    """
+    if k is None or k <= 1:
+        return None
+    vals = pd.to_numeric(times, errors="coerce").dropna().to_numpy()
+    if len(vals) < k:
+        return None
+    return float(np.sort(vals)[-k])
+
+
+def prepare_time_column(
+    df: pd.DataFrame,
+    time_col: str,
+    settings: PrivacySettings,
+    outcome_col: str | None = None,
+) -> pd.DataFrame:
+    """Bin and tail-censor the time column of a node's DataFrame.
+
+    The transformation is applied in this order: bin the time column to the
+    configured grid, compute the tail cut-off from the (binned) times, clamp
+    rows past the cut-off to ``t_cut`` and, when an outcome column is given,
+    set their event to 0 (administrative censoring).
+
+    The input is not modified; a copy is returned.
+    """
+    out = df.copy()
+
+    width = settings.time_bin_width
+    if width is not None and width > 0:
+        out[time_col] = bin_times(out[time_col], width)
+
+    t_cut = tail_cutoff(out[time_col], settings.min_risk_set_change)
+    if t_cut is not None:
+        clamp_mask = out[time_col] > t_cut
+        if clamp_mask.any():
+            out.loc[clamp_mask, time_col] = t_cut
+            if outcome_col is not None and outcome_col in out.columns:
+                out.loc[clamp_mask, outcome_col] = 0
+
+    return out
+
+
+def guarded_risk_set_masks(
+    times: pd.Series, grid: list[float], k: int
+) -> list[np.ndarray]:
+    """Compute risk-set masks with the minimum-change ("jump") guard.
+
+    Walking the grid from smallest to largest time, if moving from ``t_i`` to
+    ``t_{i+1}`` would remove fewer than ``k`` (but more than zero)
+    individuals from the risk set, the previous (larger) risk set is held.
+    Consequently consecutive shared aggregates differ by 0 or by at least
+    ``k`` individuals. When ``k <= 1`` the guard is a no-op and the masks are
+    the plain ``times >= t`` masks.
+
+    Returns
+    -------
+    list[np.ndarray]
+        One boolean mask per grid point (aligned with ``grid``).
+    """
+    times_arr = pd.to_numeric(times, errors="coerce").to_numpy()
+
+    if k is None or k <= 1:
+        return [times_arr >= t for t in grid]
+
+    masks: list[np.ndarray] = []
+    current = times_arr >= grid[0]
+    masks.append(current)
+    for t in grid[1:]:
+        cand = times_arr >= t
+        removed = int(current.sum() - cand.sum())
+        if 0 < removed < k:
+            # Hold the previous risk set.
+            masks.append(current)
+        else:
+            current = cand
+            masks.append(current)
+    return masks

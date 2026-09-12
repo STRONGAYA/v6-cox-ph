@@ -18,7 +18,9 @@ from .miscellaneous import check_data_quality
 from .privacy_guards import (
     check_sample_size,
     ensure_spawned_by_central,
+    guarded_risk_set_masks,
     load_privacy_settings,
+    prepare_time_column,
     validate_iteration_input,
 )
 
@@ -75,6 +77,8 @@ def get_unique_event_times(
         )
         return {"N-Threshold not met": client.organization_id}
 
+    df = prepare_time_column(df, time_col, settings, outcome_col)
+
     times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times["freq"] = times[outcome_col]
@@ -121,6 +125,8 @@ def compute_summed_z(
         raise PrivacyThresholdViolation(
             "Sample size threshold not met: refusing to share aggregates."
         )
+
+    df = prepare_time_column(df, time_col, settings, outcome_col)
 
     z_sum = df[df[outcome_col] == 1][expl_vars].sum().to_dict()
     return {"sum": z_sum}
@@ -175,33 +181,33 @@ def perform_iteration(
         beta, unique_time_events, expl_vars, settings
     )
 
+    df = prepare_time_column(df, time_col, settings)
+
     num_unique_time_events = len(unique_time_events)
     num_explanatory_vars = len(expl_vars)
+
+    masks = guarded_risk_set_masks(
+        df[time_col], unique_time_events, settings.min_risk_set_change
+    )
+    X_all = df[expl_vars].to_numpy(dtype=float)
 
     agg1: list = []
     agg2: list = []
     agg3: list = []
 
     for i in range(num_unique_time_events):
-        r_i = df[df[time_col] >= unique_time_events[i]][expl_vars]
-        if not r_i.empty:
-            ebz = np.exp(np.dot(np.array(r_i), beta))
-            agg1.append(sum(ebz))
-
-            def func(x: np.ndarray) -> np.ndarray:
-                return np.asarray(x) * np.asarray(ebz)
-
-            z_ebz = r_i.apply(func)
-            agg2.append(z_ebz.sum())
-
-            summed: np.ndarray = np.zeros((num_explanatory_vars, num_explanatory_vars))
-            for j in range(len(r_i)):
-                summed = summed + np.outer(np.array(z_ebz)[j], np.array(r_i)[j].T)
-            agg3.append(summed)
-        else:
+        mask = masks[i]
+        n_in_set = int(mask.sum())
+        if n_in_set == 0:
             agg1.append(0)
             agg2.append(pd.Series(np.zeros(num_explanatory_vars), index=expl_vars))
             agg3.append(np.zeros((num_explanatory_vars, num_explanatory_vars)))
+        else:
+            X = X_all[mask]
+            ebz = np.exp(X @ beta)
+            agg1.append(float(ebz.sum()))
+            agg2.append(pd.Series((X * ebz[:, None]).sum(axis=0), index=expl_vars))
+            agg3.append((X * ebz[:, None]).T @ X)
 
     agg2 = pd.DataFrame(agg2).to_dict()
     agg3 = [array.tolist() for array in agg3]
