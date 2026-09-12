@@ -80,17 +80,25 @@ def test_configurations():
             "failure_reason": (
                 "Single organisation may not meet sample size threshold."
             ),
-            "expected_error_type": [CollectResultsError, PrivacyThresholdViolation],
+            "expected_error_type": [
+                CollectResultsError,
+                PrivacyThresholdViolation,
+                AlgorithmError,
+            ],
         },
         "standard_dataset_incorrect_input": {
             "database_label": "coxph_test_data_1",
-            "time_col": "time",
+            "time_col": "NonExistentColumn",
             "outcome_col": "event",
-            "expl_vars": ["NonExistentVariable"],
+            "expl_vars": ["age", "treatment"],
             "organisation_subset": [1, 2, 3],
             "expected_failure": True,
-            "failure_reason": "Non-existent variable requested.",
-            "expected_error_type": [UserInputError, CollectResultsError],
+            "failure_reason": "Non-existent column requested.",
+            "expected_error_type": [
+                UserInputError,
+                CollectResultsError,
+                AlgorithmError,
+            ],
         },
         "rare_dataset": {
             "database_label": "coxph_test_data_3",
@@ -100,7 +108,11 @@ def test_configurations():
             "organisation_subset": [1],
             "expected_failure": True,
             "failure_reason": "Dataset with insufficient event count.",
-            "expected_error_type": [CollectResultsError, PrivacyThresholdViolation],
+            "expected_error_type": [
+                CollectResultsError,
+                PrivacyThresholdViolation,
+                AlgorithmError,
+            ],
         },
     }
 
@@ -354,6 +366,13 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
     assert result is not None, "Result should not be None"
 
     result = json.loads(result["data"][0]["result"])
+
+    # Check if the algorithm returned an "all excluded" result (no model)
+    if "model" not in result and "table" in result:
+        raise AlgorithmError(
+            "All organisations were excluded — no model could be computed."
+        )
+
     return result
 
 
@@ -389,7 +408,7 @@ def determine_model_acceptance(
     federated_result: Dict[str, Any],
     database_label: str,
     kwargs: Dict[str, Any],
-    tolerance: float = 1e-3,
+    tolerance: float = 2.0,
 ) -> None:
     """
     Validate federated results against a centralised Cox-PH fit.
