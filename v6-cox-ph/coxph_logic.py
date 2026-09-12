@@ -53,29 +53,27 @@ def compute_derivatives(
     safe_log("info", "Computing derivatives for Cox-PH model")
 
     n_covs = len(z_sum)
+    n_times = len(aggregated_time_events)
     tot_p1 = np.zeros(n_covs)
     tot_p2 = np.zeros((n_covs, n_covs))
 
-    for index, row in aggregated_time_events.iterrows():
-        freq = row.get("freq", 1)
+    freqs = aggregated_time_events["freq"].to_numpy()
 
-        if index >= len(summed_agg1):
-            continue
+    if len(summed_agg1) != n_times:
+        raise ValueError(
+            f"Length mismatch: aggregated_time_events has {n_times} rows but "
+            f"summed_agg1 has {len(summed_agg1)} entries"
+        )
 
-        s1_value = summed_agg1[index]
-        s2_value = (
-            summed_agg2[index]
-            if isinstance(summed_agg2, np.ndarray)
-            else np.array(summed_agg2[index])
-        )
-        s3_value = (
-            summed_agg3[index]
-            if isinstance(summed_agg3, np.ndarray)
-            else np.array(summed_agg3[index])
-        )
+    for pos in range(n_times):
+        freq = freqs[pos]
+
+        s1_value = summed_agg1[pos]
+        s2_value = np.asarray(summed_agg2[pos])
+        s3_value = np.asarray(summed_agg3[pos])
 
         if s1_value <= 0 or np.isnan(s1_value):
-            safe_log("warning", f"Invalid s1_value at index {index}: {s1_value}")
+            safe_log("warning", f"Invalid s1_value at position {pos}: {s1_value}")
             continue
 
         # Primary derivative component
@@ -83,17 +81,9 @@ def compute_derivatives(
 
         # Secondary derivative component
         first_part = s3_value / s1_value
-
-        if isinstance(s2_value, (list, np.ndarray)):
-            s2_array = np.array(s2_value)
-            numerator = np.outer(s2_array, s2_array)
-        else:
-            numerator = np.zeros((n_covs, n_covs))
-
+        numerator = np.outer(s2_value, s2_value)
         denominator = s1_value * s1_value
-        second_part = (
-            numerator / denominator if denominator > 0 else np.zeros((n_covs, n_covs))
-        )
+        second_part = numerator / denominator
 
         s2 = freq * (first_part - second_part)
 
@@ -113,6 +103,8 @@ def compute_model_results(
     aggregated_time_events: pd.DataFrame,
     summed_agg1: np.ndarray,
     expl_vars: List[str],
+    converged: bool = True,
+    n_iterations: int | None = None,
 ) -> Dict[str, Any]:
     """
     Compute final model results after convergence.
@@ -122,15 +114,22 @@ def compute_model_results(
     beta : np.ndarray
         Final estimated regression coefficients.
     secondary_derivative : np.ndarray
-        Final Hessian matrix (negative second derivative).
+        Final Hessian matrix (negative second derivative), evaluated at the
+        same ``beta`` that is reported.
     z_sum : pd.Series
         Sum of explanatory variables for all event cases.
     aggregated_time_events : pd.DataFrame
         DataFrame containing unique event times and their frequencies.
     summed_agg1 : np.ndarray
-        Final aggregated sum of exp(beta * X) for each event time.
+        Final aggregated sum of exp(beta * X) for each event time, evaluated
+        at the same ``beta`` that is reported.
     expl_vars : List[str]
         Names of the explanatory variables.
+    converged : bool
+        Whether the Newton-Raphson optimiser converged. When ``False`` a
+        warning is appended so users know SE/p-values may be unreliable.
+    n_iterations : int | None
+        Number of Newton-Raphson iterations performed.
 
     Returns
     -------
@@ -141,22 +140,25 @@ def compute_model_results(
 
     n_covs = len(beta)
 
-    # Standard errors from the Fisher information matrix
+    # Standard errors from the covariance matrix (inverse of the observed
+    # Fisher information, i.e. the inverse of the negative Hessian).
     try:
-        fisher = np.linalg.inv(-secondary_derivative)
-        serrors = np.array([np.sqrt(fisher[k, k]) for k in range(fisher.shape[0])])
+        covariance = np.linalg.inv(-secondary_derivative)
+        serrors = np.array(
+            [np.sqrt(covariance[k, k]) for k in range(covariance.shape[0])]
+        )
     except np.linalg.LinAlgError as e:
         safe_log("warning", f"Could not invert Hessian matrix: {e}")
-        fisher = np.zeros((n_covs, n_covs))
+        covariance = np.zeros((n_covs, n_covs))
         serrors = np.array([np.nan] * n_covs)
 
-    # Z-values and p-values
+    # Z-values and p-values (Wald test: Z = beta / SE)
     with np.errstate(divide="ignore", invalid="ignore"):
         zvalues = np.zeros(n_covs)
         pvalues = np.ones(n_covs)
         for i in range(n_covs):
             if serrors[i] > 0 and not np.isnan(serrors[i]):
-                zvalues[i] = (np.exp(beta[i]) - 1) / serrors[i]
+                zvalues[i] = beta[i] / serrors[i]
                 pvalues[i] = 2 * norm.cdf(-abs(zvalues[i]))
             else:
                 zvalues[i] = np.nan
@@ -176,18 +178,11 @@ def compute_model_results(
         linear_part = np.dot(z_sum.values, beta)
 
         risk_set_part = 0
+        freqs = aggregated_time_events["freq"].to_numpy()
         if hasattr(summed_agg1, "__len__") and len(summed_agg1) > 0:
-            for i in range(len(aggregated_time_events)):
+            for i in range(len(freqs)):
                 if i < len(summed_agg1) and summed_agg1[i] > 0:
-                    freq = aggregated_time_events.iloc[i].get("freq", 1)
-                    if summed_agg1[i] <= 0:
-                        safe_log(
-                            "warning",
-                            f"Risk set sum is non-positive at time index {i}: "
-                            f"{summed_agg1[i]}",
-                        )
-                        continue
-                    risk_set_part += freq * np.log(summed_agg1[i])
+                    risk_set_part += freqs[i] * np.log(summed_agg1[i])
 
         log_likelihood = linear_part - risk_set_part
         n_params = len(beta)
@@ -234,9 +229,17 @@ def compute_model_results(
             safe_log("warning", msg)
             warnings.append(msg)
 
+    if not converged:
+        n_iter_str = str(n_iterations) if n_iterations is not None else "unknown"
+        msg = (
+            f"Newton-Raphson did not converge in {n_iter_str} iterations; "
+            f"SE/p-values may be unreliable"
+        )
+        warnings.append(msg)
+
     return {
         "results_data": results_data,
-        "fisher_info": fisher,
+        "covariance": covariance,
         "standard_errors": serrors,
         "zvalues": zvalues,
         "pvalues": pvalues,

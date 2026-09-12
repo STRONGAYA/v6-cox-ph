@@ -2,16 +2,66 @@ How to use
 ==========
 
 Input arguments
----------------
+----------------
 The input arguments for the central function consist of:
 
-- time_col (string): The name of the column in the dataset that contains the time data.
-- outcome_col (string): The name of the column in the dataset that contains the outcome data.
-- expl_vars (list): A list of explanatory variables (i.e. predictors) to be used in the computation.
-- organization_ids (list): A list of organization IDs that participate in the collaboration and you wish to run the algorithm on.
+- ``time_col`` (string): the name of the column containing the time data.
+- ``outcome_col`` (string): the name of the column containing the outcome data
+  (1 = event, 0 = censored).
+- ``expl_vars`` (list): a list of explanatory variables (predictors) to be
+  used in the computation.
+- ``organization_ids`` (list): a list of organisation IDs that participate in
+  the collaboration and you wish to run the algorithm on. When ``None`` all
+  organisations are used.
+
+Output fields
+-------------
+
+The central function returns a dictionary with:
+
+- ``model``: a JSON table indexed by variable name with columns ``Coef``,
+  ``Exp(coef)``, ``SE``, ``lower_CI``, ``upper_CI``, ``Z`` and ``p-value``.
+- ``overall_p_value``: the overall Wald test p-value.
+- ``aic``: the Akaike Information Criterion.
+- ``degrees_of_freedom``: the number of model parameters.
+- ``warnings``: a list of human-readable warning strings.
+- ``included_organizations`` / ``excluded_organizations``: the organisations
+  that passed / failed the sample-size threshold.
+- ``converged`` (bool): whether the Newton-Raphson optimiser converged.
+- ``n_iterations`` (int): the number of iterations performed.
+
+The Wald statistic is reported as ``Z = Coef / SE`` and the p-value as
+``p = 2 * Phi(-|Z|)``. When ``converged`` is ``False`` a warning is appended
+advising that the SE/p-values may be unreliable.
+
+Node configuration (algorithm_env)
+----------------------------------
+
+Privacy guards are configured through node environment variables
+(``algorithm_env``):
+
+============================== =========== =========== =========================
+Variable                        Type        Default      Description
+============================== =========== =========== =========================
+``SAMPLE_SIZE_THRESHOLD``       int         10          Minimum rows and events
+                                                        (strictly greater).
+``COXPH_TIME_BIN_WIDTH``        float       (disabled)  Event-time bin width. When
+                                                        set, times are coarsened
+                                                        to ``floor(t/w)*w``.
+``COXPH_MIN_RISK_SET_CHANGE``   int         5           Minimum risk-set change
+                                                        (``k``). Consecutive
+                                                        shared aggregates differ
+                                                        by 0 or ``>= k``. Set to
+                                                        ``1`` to disable tail
+                                                        censoring and the jump
+                                                        guard.
+============================== =========== =========== =========================
+
+See ``docs/coxph/Privacy.rst`` for the privacy implications of these
+settings.
 
 Python client example
----------------------
+----------------------
 
 To understand the information below, you should be familiar with the vantage6
 framework.

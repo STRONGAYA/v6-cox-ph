@@ -11,13 +11,22 @@ import numpy as np
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
+from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
 from vantage6_strongaya_general.miscellaneous import safe_log
 from vantage6_strongaya_general.privacy_measures import (
     apply_sample_size_threshold,
     mask_unnecessary_variables,
 )
 
-from .miscellaneous import check_data_quality, check_event_count
+from .miscellaneous import check_data_quality
+from .privacy_guards import (
+    check_sample_size,
+    ensure_spawned_by_central,
+    guarded_risk_set_masks,
+    load_privacy_settings,
+    prepare_time_column,
+    validate_iteration_input,
+)
 
 
 @data(1)
@@ -50,6 +59,9 @@ def get_unique_event_times(
     """
     safe_log("info", "Computing unique event times")
 
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
     # STRONG AYA: determine variables to analyse and apply privacy guards
     variables_to_analyse = [time_col, outcome_col]
     df = mask_unnecessary_variables(df, variables_to_analyse)
@@ -67,16 +79,17 @@ def get_unique_event_times(
     if quality["has_negative_time"]:
         safe_log("warning", "Negative time values detected in the data")
 
-    if not check_event_count(df, outcome_col, min_events=10):
+    if not check_sample_size(df, outcome_col, settings):
         safe_log(
             "warning",
-            "Sub-task was not executed because the number of samples "
-            "is too small (n <= 10)",
+            "Sub-task was not executed because the number of samples " "is too small.",
         )
         return {"N-Threshold not met": client.organization_id}
 
     # STRONG AYA: apply sample size threshold
     df = apply_sample_size_threshold(client, df, variables_to_analyse)
+
+    df = prepare_time_column(df, time_col, settings, outcome_col)
 
     times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
@@ -88,7 +101,11 @@ def get_unique_event_times(
 @data(1)
 @algorithm_client
 def compute_summed_z(
-    client: AlgorithmClient, df: pd.DataFrame, outcome_col: str, expl_vars: list
+    client: AlgorithmClient,
+    df: pd.DataFrame,
+    time_col: str,
+    outcome_col: str,
+    expl_vars: list,
 ) -> dict:
     """
     Compute the sum of the specified explanatory variables for the outcome events.
@@ -99,6 +116,8 @@ def compute_summed_z(
         The client instance used to interact with the vantage6 server.
     df : pd.DataFrame
         The DataFrame containing the data.
+    time_col : str
+        The name of the column containing the time data.
     outcome_col : str
         The name of the column containing the outcome data.
     expl_vars : list
@@ -111,10 +130,22 @@ def compute_summed_z(
     """
     safe_log("info", "Computing summed Z statistics")
 
-    # STRONG AYA: determine variables to analyse and apply privacy guards
-    variables_to_analyse = [outcome_col] + expl_vars
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
+    # STRONG AYA: determine variables to analyse and apply privacy guards.
+    # time_col is included because tail censoring needs it.
+    variables_to_analyse = [time_col, outcome_col] + expl_vars
     df = mask_unnecessary_variables(df, variables_to_analyse)
+
+    if not check_sample_size(df, outcome_col, settings):
+        raise PrivacyThresholdViolation(
+            "Sample size threshold not met: refusing to share aggregates."
+        )
+
     df = apply_sample_size_threshold(client, df, variables_to_analyse)
+
+    df = prepare_time_column(df, time_col, settings, outcome_col)
 
     z_sum = df[df[outcome_col] == 1][expl_vars].sum().to_dict()
     return {"sum": z_sum}
@@ -157,38 +188,51 @@ def perform_iteration(
         "info", "Computing aggregates for the derivation of the partial likelihood"
     )
 
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
     # STRONG AYA: determine variables to analyse and apply privacy guards
     variables_to_analyse = [time_col] + expl_vars
     df = mask_unnecessary_variables(df, variables_to_analyse)
 
-    beta = np.array(beta)
+    # perform_iteration does not have the outcome column available, so the
+    # threshold is checked on rows only.
+    if not check_sample_size(df, outcome_col=None, settings=settings):
+        raise PrivacyThresholdViolation(
+            "Sample size threshold not met: refusing to share aggregates."
+        )
+
+    beta, unique_time_events = validate_iteration_input(
+        beta, unique_time_events, expl_vars, settings
+    )
+
+    df = prepare_time_column(df, time_col, settings)
+
     num_unique_time_events = len(unique_time_events)
     num_explanatory_vars = len(expl_vars)
+
+    masks = guarded_risk_set_masks(
+        df[time_col], unique_time_events, settings.min_risk_set_change
+    )
+    X_all = df[expl_vars].to_numpy(dtype=float)
 
     agg1: list = []
     agg2: list = []
     agg3: list = []
 
     for i in range(num_unique_time_events):
-        r_i = df[df[time_col] >= unique_time_events[i]][expl_vars]
-        if not r_i.empty:
-            ebz = np.exp(np.dot(np.array(r_i), beta))
-            agg1.append(sum(ebz))
-
-            def func(x: np.ndarray) -> np.ndarray:
-                return np.asarray(x) * np.asarray(ebz)
-
-            z_ebz = r_i.apply(func)
-            agg2.append(z_ebz.sum())
-
-            summed: np.ndarray = np.zeros((num_explanatory_vars, num_explanatory_vars))
-            for j in range(len(r_i)):
-                summed = summed + np.outer(np.array(z_ebz)[j], np.array(r_i)[j].T)
-            agg3.append(summed)
-        else:
+        mask = masks[i]
+        n_in_set = int(mask.sum())
+        if n_in_set == 0:
             agg1.append(0)
             agg2.append(pd.Series(np.zeros(num_explanatory_vars), index=expl_vars))
             agg3.append(np.zeros((num_explanatory_vars, num_explanatory_vars)))
+        else:
+            X = X_all[mask]
+            ebz = np.exp(X @ beta)
+            agg1.append(float(ebz.sum()))
+            agg2.append(pd.Series((X * ebz[:, None]).sum(axis=0), index=expl_vars))
+            agg3.append((X * ebz[:, None]).T @ X)
 
     agg2 = pd.DataFrame(agg2).to_dict()
     agg3 = [array.tolist() for array in agg3]
