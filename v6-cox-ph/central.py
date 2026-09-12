@@ -175,9 +175,12 @@ def central(
     results = client.wait_for_results(task_id=task.get("id"))
     info("Results obtained!")
 
-    z_sum: pd.Series = pd.Series(dtype=float)
+    z_sum = None
     for output in results:
-        z_sum += pd.Series(output["sum"])
+        if z_sum is None:
+            z_sum = pd.Series(output["sum"])
+        else:
+            z_sum += pd.Series(output["sum"])
 
     beta: np.ndarray = np.zeros(n_covs)
 
@@ -211,9 +214,10 @@ def central(
         results = client.wait_for_results(task_id=task.get("id"))
         info("Results obtained!")
 
-        summed_agg1: np.ndarray = np.zeros(0)
-        summed_agg2: np.ndarray = np.zeros(0)
-        summed_agg3: np.ndarray = np.zeros(0)
+        n_times = len(unique_time_events)
+        summed_agg1: np.ndarray = np.zeros(n_times)
+        summed_agg2: np.ndarray = np.zeros((n_times, n_covs))
+        summed_agg3: np.ndarray = np.zeros((n_times, n_covs, n_covs))
 
         for output in results:
             summed_agg1 += np.array(output["agg1"])
