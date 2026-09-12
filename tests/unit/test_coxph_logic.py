@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 # Add the algorithm module to the path
-algorithm_path = Path(__file__).parent.parent.parent / "coxph"
+algorithm_path = Path(__file__).parent.parent.parent / "v6-cox-ph"
 sys.path.insert(0, str(algorithm_path))
 
 from coxph_logic import (  # noqa: E402
