@@ -11,13 +11,14 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from scipy.linalg import solve
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import UserInputError
 from vantage6.algorithm.tools.util import error, info, warn
 
 from .coxph_logic import compute_derivatives, compute_model_results
-from .coxph_logic import format_results_dataframe, update_beta
+from .coxph_logic import format_results_dataframe
 from .miscellaneous import validate_coxph_input
 
 
@@ -184,6 +185,16 @@ def central(
 
     beta: np.ndarray = np.zeros(n_covs)
 
+    # Variables that must stay consistent with the reported beta: the
+    # secondary derivative (Hessian) and summed_agg1 are evaluated at the
+    # same beta that is ultimately reported. By testing convergence *before*
+    # applying the Newton step we keep all three in sync without an extra
+    # round-trip.
+    secondary_derivative: np.ndarray = np.zeros((n_covs, n_covs))
+    summed_agg1: np.ndarray = np.zeros(0)
+    converged = False
+    epoch = 0
+
     for epoch in range(epochs):
         # Serialise beta for vantage6
         beta_serialised: list = beta.tolist()
@@ -199,9 +210,6 @@ def central(
             },
         }
 
-        # Deserialise beta
-        beta = np.array(beta_serialised)
-
         info("Creating subtask for all organisations")
         task = client.task.create(
             input_=input_,
@@ -215,9 +223,9 @@ def central(
         info("Results obtained!")
 
         n_times = len(unique_time_events)
-        summed_agg1: np.ndarray = np.zeros(n_times)
-        summed_agg2: np.ndarray = np.zeros((n_times, n_covs))
-        summed_agg3: np.ndarray = np.zeros((n_times, n_covs, n_covs))
+        summed_agg1 = np.zeros(n_times)
+        summed_agg2 = np.zeros((n_times, n_covs))
+        summed_agg3 = np.zeros((n_times, n_covs, n_covs))
 
         for output in results:
             summed_agg1 += np.array(output["agg1"])
@@ -232,7 +240,8 @@ def central(
             z_sum,
         )
 
-        beta, delta = update_beta(beta, primary_derivative, secondary_derivative)
+        step = solve(secondary_derivative, primary_derivative)
+        delta = float(np.max(np.abs(step)))
 
         if math.isnan(delta):
             warn("Delta has turned into a NaN")
@@ -240,9 +249,20 @@ def central(
 
         if delta <= 0.000001:
             info("Betas have settled! Finished iterating!")
+            converged = True
             break
 
-    # Compute final model results
+        beta = beta - step
+
+    n_iterations = epoch + 1
+    if not converged:
+        warn(
+            f"Newton-Raphson did not converge in {epochs} iterations; "
+            f"SE/p-values may be unreliable"
+        )
+
+    # Compute final model results — beta, secondary_derivative and
+    # summed_agg1 are all evaluated at the reported beta.
     model = compute_model_results(
         beta=beta,
         secondary_derivative=secondary_derivative,
@@ -250,6 +270,8 @@ def central(
         aggregated_time_events=aggregated_time_events,
         summed_agg1=summed_agg1,
         expl_vars=expl_vars,
+        converged=converged,
+        n_iterations=n_iterations,
     )
 
     results_df = format_results_dataframe(model["results_data"], expl_vars)
@@ -262,4 +284,6 @@ def central(
         "aic": model["aic"],
         "degrees_of_freedom": model["n_params"],
         "warnings": model["warnings"],
+        "converged": converged,
+        "n_iterations": n_iterations,
     }

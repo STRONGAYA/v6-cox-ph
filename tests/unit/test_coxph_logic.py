@@ -94,9 +94,12 @@ class TestComputeDerivatives:
         # s2 = 2 * ([0.2-0.16, 0.4-0.32], [0.4-0.32, 0.8-0.64])
         #    = 2 * [[0.04, 0.08], [0.08, 0.16]] = [[0.08, 0.16], [0.16, 0.32]]
         # ... continuing for all 3 event times and summing
-        # The exact values are complex; verify they are finite and reasonable
-        assert np.all(np.isfinite(primary))
-        assert np.all(np.isfinite(secondary))
+        np.testing.assert_allclose(primary, [7.741667, 15.483333], atol=1e-6)
+        np.testing.assert_allclose(
+            secondary,
+            [[-0.276181, -0.552361], [-0.552361, -1.104722]],
+            atol=1e-6,
+        )
 
     def test_compute_derivatives_skips_invalid_s1(
         self, sample_aggregated_time_events, sample_z_sum
@@ -147,13 +150,13 @@ class TestUpdateBeta:
 class TestComputeModelResults:
     """Tests for the compute_model_results function."""
 
-    def test_compute_model_results_returns_dict(self, sample_z_sum):
-        """Test that compute_model_results returns a properly structured dict."""
+    @pytest.fixture
+    def model_fixture(self, sample_z_sum):
+        """Common fixture for model results tests."""
         beta = np.array([0.5, -0.3])
         secondary = np.array([[-10.0, 2.0], [2.0, -8.0]])
         agg_time_events = pd.DataFrame({"time": [5.0, 10.0], "freq": [2, 3]})
         summed_agg1 = np.array([5.0, 8.0])
-
         result = compute_model_results(
             beta=beta,
             secondary_derivative=secondary,
@@ -162,10 +165,14 @@ class TestComputeModelResults:
             summed_agg1=summed_agg1,
             expl_vars=["age", "treatment"],
         )
+        return result, beta, secondary, agg_time_events, summed_agg1
 
+    def test_compute_model_results_returns_dict(self, model_fixture):
+        """Test that compute_model_results returns a properly structured dict."""
+        result, *_ = model_fixture
         assert isinstance(result, dict)
         assert "results_data" in result
-        assert "fisher_info" in result
+        assert "covariance" in result
         assert "standard_errors" in result
         assert "zvalues" in result
         assert "pvalues" in result
@@ -174,40 +181,78 @@ class TestComputeModelResults:
         assert "n_params" in result
         assert "warnings" in result
 
-    def test_compute_model_results_n_params(self, sample_z_sum):
+    def test_compute_model_results_n_params(self, model_fixture):
         """Test that n_params matches the number of coefficients."""
-        beta = np.array([0.5, -0.3])
-        secondary = np.array([[-10.0, 2.0], [2.0, -8.0]])
-        agg_time_events = pd.DataFrame({"time": [5.0, 10.0], "freq": [2, 3]})
-        summed_agg1 = np.array([5.0, 8.0])
-
-        result = compute_model_results(
-            beta=beta,
-            secondary_derivative=secondary,
-            z_sum=sample_z_sum,
-            aggregated_time_events=agg_time_events,
-            summed_agg1=summed_agg1,
-            expl_vars=["age", "treatment"],
-        )
+        result, *_ = model_fixture
         assert result["n_params"] == 2
 
-    def test_compute_model_results_aic_finite(self, sample_z_sum):
-        """Test that AIC is a finite float when computation succeeds."""
-        beta = np.array([0.5, -0.3])
-        secondary = np.array([[-10.0, 2.0], [2.0, -8.0]])
-        agg_time_events = pd.DataFrame({"time": [5.0, 10.0], "freq": [2, 3]})
-        summed_agg1 = np.array([5.0, 8.0])
+    def test_compute_model_results_covariance(self, model_fixture):
+        """Test the covariance matrix is the inverse of the negative Hessian."""
+        result, beta, secondary, *_ = model_fixture
+        expected_cov = np.linalg.inv(-secondary)
+        np.testing.assert_allclose(result["covariance"], expected_cov)
 
-        result = compute_model_results(
-            beta=beta,
-            secondary_derivative=secondary,
-            z_sum=sample_z_sum,
-            aggregated_time_events=agg_time_events,
-            summed_agg1=summed_agg1,
-            expl_vars=["age", "treatment"],
+    def test_compute_model_results_se(self, model_fixture):
+        """Test standard errors are the square root of the covariance diagonal."""
+        result, beta, secondary, *_ = model_fixture
+        expected_se = np.sqrt(np.diag(np.linalg.inv(-secondary)))
+        np.testing.assert_allclose(result["standard_errors"], expected_se)
+
+    def test_compute_model_results_z_is_beta_over_se(self, model_fixture):
+        """Regression test: Z must equal Coef / SE (not (exp(beta)-1)/SE)."""
+        result, *_ = model_fixture
+        se = result["standard_errors"]
+        beta = np.array([0.5, -0.3])
+        np.testing.assert_allclose(result["zvalues"], beta / se, atol=1e-9)
+
+    def test_compute_model_results_z_values(self, model_fixture):
+        """Test Z-values against manually computed values."""
+        result, *_ = model_fixture
+        np.testing.assert_allclose(
+            result["zvalues"], [1.5411035, -0.82704293], atol=1e-6
         )
+
+    def test_compute_model_results_p_values(self, model_fixture):
+        """Test p-values are 2*Phi(-|Z|)."""
+        from scipy.stats import norm
+
+        result, *_ = model_fixture
+        z = result["zvalues"]
+        expected_p = 2 * norm.cdf(-np.abs(z))
+        np.testing.assert_allclose(result["pvalues"], expected_p)
+
+    def test_compute_model_results_confidence_intervals(self, model_fixture):
+        """Test confidence intervals are exp(beta ± 1.96*SE)."""
+        result, *_ = model_fixture
+        beta = np.array([0.5, -0.3])
+        se = result["standard_errors"]
+        rd = result["results_data"]
+        np.testing.assert_allclose(
+            rd["lower_CI"], np.exp(beta - 1.96 * se), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            rd["upper_CI"], np.exp(beta + 1.96 * se), atol=1e-5
+        )
+
+    def test_compute_model_results_wald(self, model_fixture):
+        """Test the overall Wald statistic and p-value."""
+        result, beta, secondary, *_ = model_fixture
+        from scipy.stats import chi2
+
+        expected_wald = beta @ (-secondary) @ beta
+        expected_p = float(chi2.sf(expected_wald, 2))
+        np.testing.assert_allclose(result["overall_p_value"], expected_p)
+
+    def test_compute_model_results_aic(self, model_fixture):
+        """Test AIC against manually computed value."""
+        result, beta, secondary, agg_time_events, summed_agg1 = model_fixture
+        z_sum = pd.Series([10.0, 20.0])
+        linear_part = np.dot(z_sum.values, beta)
+        risk_set_part = 2 * np.log(5.0) + 3 * np.log(8.0)
+        expected_ll = linear_part - risk_set_part
+        expected_aic = -2 * expected_ll + 2 * 2
         assert result["aic"] is not None
-        assert np.isfinite(result["aic"])
+        np.testing.assert_allclose(result["aic"], expected_aic, atol=1e-6)
 
     def test_compute_model_results_warnings_for_large_coef(self, sample_z_sum):
         """Test that warnings are generated for large coefficients."""
@@ -226,6 +271,33 @@ class TestComputeModelResults:
         )
         assert len(result["warnings"]) > 0
         assert "age" in result["warnings"][0]
+
+    def test_compute_model_results_non_converged_warning(self, sample_z_sum):
+        """Test that a non-convergence warning is appended."""
+        beta = np.array([0.5, -0.3])
+        secondary = np.array([[-10.0, 2.0], [2.0, -8.0]])
+        agg_time_events = pd.DataFrame({"time": [5.0, 10.0], "freq": [2, 3]})
+        summed_agg1 = np.array([5.0, 8.0])
+
+        result = compute_model_results(
+            beta=beta,
+            secondary_derivative=secondary,
+            z_sum=sample_z_sum,
+            aggregated_time_events=agg_time_events,
+            summed_agg1=summed_agg1,
+            expl_vars=["age", "treatment"],
+            converged=False,
+            n_iterations=10,
+        )
+        warning_text = " ".join(result["warnings"])
+        assert "did not converge" in warning_text
+        assert "10" in warning_text
+
+    def test_compute_model_results_converged_no_warning(self, model_fixture):
+        """Test that no convergence warning is appended when converged."""
+        result, *_ = model_fixture
+        for w in result["warnings"]:
+            assert "did not converge" not in w
 
 
 @pytest.mark.unit
