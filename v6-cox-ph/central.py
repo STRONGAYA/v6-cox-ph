@@ -14,7 +14,10 @@ import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import UserInputError
-from vantage6.algorithm.tools.util import error, info, warn
+from vantage6_strongaya_general.miscellaneous import (
+    collect_organisation_ids,
+    safe_log,
+)
 
 from .coxph_logic import compute_derivatives, compute_model_results
 from .coxph_logic import format_results_dataframe, update_beta
@@ -74,22 +77,17 @@ def central(
     expl_vars = validated.expl_vars
     organization_ids = validated.organization_ids
 
-    # Collect all organisations unless specified
-    ids: list
-    if organization_ids is None:
-        organisations = client.organization.list()
-        ids = [organisation.get("id") for organisation in organisations]
-    else:
-        ids = organization_ids
+    # STRONG AYA: collect organisation IDs
+    ids = collect_organisation_ids(organization_ids, client)
 
     excluded_ids = []
-    info(f"Sending task to organisations {ids}")
+    safe_log("info", f"Sending task to organisations {ids}")
 
     n_covs = len(expl_vars)
     epochs = 10
 
     # Subtask: get unique event times
-    info("Defining input parameters for subtask — get unique event times")
+    safe_log("info", "Defining input parameters for subtask — get unique event times")
     input_ = {
         "method": "get_unique_event_times",
         "kwargs": {
@@ -103,9 +101,10 @@ def central(
     while not n_threshold_met:
         _excluded_ids = []
         if n_loops > 2:
-            error(
+            safe_log(
+                "error",
                 "Sample size violations should be eliminated yet criteria "
-                "are not met. Exiting"
+                "are not met. Exiting",
             )
             raise ValueError(
                 "Sample size violations should be eliminated yet criteria "
@@ -113,7 +112,7 @@ def central(
             )
 
         n_loops += 1
-        info("Creating subtask for all selected organisations")
+        safe_log("info", "Creating subtask for all selected organisations")
         task = client.task.create(
             input_=input_,
             organizations=ids,
@@ -121,16 +120,17 @@ def central(
             description="Getting unique event times and their counts",
         )
 
-        info("Waiting for results")
+        safe_log("info", "Waiting for results")
         results = client.wait_for_results(task_id=task.get("id"))
-        info("Results obtained!")
+        safe_log("info", "Results obtained!")
 
         unique_time_events = []
         for output in results:
             if "N-Threshold not met" in output:
-                warn(
+                safe_log(
+                    "warning",
                     f"Insufficient samples for organisation "
-                    f"{output['N-Threshold not met']}. Excluding from analysis."
+                    f"{output['N-Threshold not met']}. Excluding from analysis.",
                 )
                 ids.remove(output["N-Threshold not met"])
                 excluded_ids.append(output["N-Threshold not met"])
@@ -143,7 +143,9 @@ def central(
         if len(_excluded_ids) == 0:
             n_threshold_met = True
         elif len(ids) == 0:
-            warn("No organisations meet the minimal sample size threshold.")
+            safe_log(
+                "warning", "No organisations meet the minimal sample size threshold."
+            )
             return {"excluded_organizations": excluded_ids, "table": np.nan}
 
     aggregated_time_events = pd.concat(unique_time_events)
@@ -154,7 +156,7 @@ def central(
     unique_time_events = aggregated_time_events[time_col].tolist()
 
     # Subtask: compute summed Z
-    info("Defining input parameters for subtask — compute summed Z")
+    safe_log("info", "Defining input parameters for subtask — compute summed Z")
     input_ = {
         "method": "compute_summed_z",
         "kwargs": {
@@ -163,7 +165,7 @@ def central(
         },
     }
 
-    info("Creating subtask for all organisations")
+    safe_log("info", "Creating subtask for all organisations")
     task = client.task.create(
         input_=input_,
         organizations=ids,
@@ -171,9 +173,9 @@ def central(
         description="Computing the summed Z statistic",
     )
 
-    info("Waiting for results")
+    safe_log("info", "Waiting for results")
     results = client.wait_for_results(task_id=task.get("id"))
-    info("Results obtained!")
+    safe_log("info", "Results obtained!")
 
     z_sum = None
     for output in results:
@@ -188,7 +190,7 @@ def central(
         # Serialise beta for vantage6
         beta_serialised: list = beta.tolist()
 
-        info("Defining input parameters for subtask — perform iteration")
+        safe_log("info", "Defining input parameters for subtask — perform iteration")
         input_ = {
             "method": "perform_iteration",
             "kwargs": {
@@ -202,7 +204,7 @@ def central(
         # Deserialise beta
         beta = np.array(beta_serialised)
 
-        info("Creating subtask for all organisations")
+        safe_log("info", "Creating subtask for all organisations")
         task = client.task.create(
             input_=input_,
             organizations=ids,
@@ -210,9 +212,9 @@ def central(
             description="Iterating to find the optimal beta",
         )
 
-        info("Waiting for results")
+        safe_log("info", "Waiting for results")
         results = client.wait_for_results(task_id=task.get("id"))
-        info("Results obtained!")
+        safe_log("info", "Results obtained!")
 
         n_times = len(unique_time_events)
         summed_agg1: np.ndarray = np.zeros(n_times)
@@ -235,11 +237,11 @@ def central(
         beta, delta = update_beta(beta, primary_derivative, secondary_derivative)
 
         if math.isnan(delta):
-            warn("Delta has turned into a NaN")
+            safe_log("warning", "Delta has turned into a NaN")
             break
 
         if delta <= 0.000001:
-            info("Betas have settled! Finished iterating!")
+            safe_log("info", "Betas have settled! Finished iterating!")
             break
 
     # Compute final model results

@@ -11,7 +11,11 @@ import numpy as np
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
-from vantage6.algorithm.tools.util import info, warn
+from vantage6_strongaya_general.miscellaneous import safe_log
+from vantage6_strongaya_general.privacy_measures import (
+    apply_sample_size_threshold,
+    mask_unnecessary_variables,
+)
 
 from .miscellaneous import check_data_quality, check_event_count
 
@@ -44,26 +48,35 @@ def get_unique_event_times(
         A dictionary containing unique event times, or a message
         indicating that the subtask was not executed for privacy reasons.
     """
-    info("Computing unique event times")
+    safe_log("info", "Computing unique event times")
+
+    # STRONG AYA: determine variables to analyse and apply privacy guards
+    variables_to_analyse = [time_col, outcome_col]
+    df = mask_unnecessary_variables(df, variables_to_analyse)
 
     # Data quality checks
     quality = check_data_quality(df, time_col, outcome_col)
     if not quality["has_time"] or not quality["has_outcome"]:
-        warn(
+        safe_log(
+            "warning",
             f"Missing required columns: time={quality['has_time']}, "
-            f"outcome={quality['has_outcome']}"
+            f"outcome={quality['has_outcome']}",
         )
         return {"N-Threshold not met": client.organization_id}
 
     if quality["has_negative_time"]:
-        warn("Negative time values detected in the data")
+        safe_log("warning", "Negative time values detected in the data")
 
     if not check_event_count(df, outcome_col, min_events=10):
-        warn(
+        safe_log(
+            "warning",
             "Sub-task was not executed because the number of samples "
-            "is too small (n <= 10)"
+            "is too small (n <= 10)",
         )
         return {"N-Threshold not met": client.organization_id}
+
+    # STRONG AYA: apply sample size threshold
+    df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
     times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
@@ -96,7 +109,13 @@ def compute_summed_z(
     dict
         A dictionary containing the sum of the explanatory variables.
     """
-    info("Computing summed Z statistics")
+    safe_log("info", "Computing summed Z statistics")
+
+    # STRONG AYA: determine variables to analyse and apply privacy guards
+    variables_to_analyse = [outcome_col] + expl_vars
+    df = mask_unnecessary_variables(df, variables_to_analyse)
+    df = apply_sample_size_threshold(client, df, variables_to_analyse)
+
     z_sum = df[df[outcome_col] == 1][expl_vars].sum().to_dict()
     return {"sum": z_sum}
 
@@ -134,7 +153,14 @@ def perform_iteration(
     dict
         A dictionary containing the aggregates computed during the iteration.
     """
-    info("Computing aggregates for the derivation of the partial likelihood")
+    safe_log(
+        "info", "Computing aggregates for the derivation of the partial likelihood"
+    )
+
+    # STRONG AYA: determine variables to analyse and apply privacy guards
+    variables_to_analyse = [time_col] + expl_vars
+    df = mask_unnecessary_variables(df, variables_to_analyse)
+
     beta = np.array(beta)
     num_unique_time_events = len(unique_time_events)
     num_explanatory_vars = len(expl_vars)

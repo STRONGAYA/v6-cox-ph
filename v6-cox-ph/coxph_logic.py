@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.linalg import solve
 from scipy.stats import chi2, norm
 
-from vantage6.algorithm.tools.util import info, warn
+from vantage6_strongaya_general.miscellaneous import safe_log
 
 from typing import Any, Dict, List, Tuple
 
@@ -50,7 +50,7 @@ def compute_derivatives(
         - secondary_derivative: Second derivative (Hessian) of the partial
           log-likelihood.
     """
-    info("Computing derivatives for Cox-PH model")
+    safe_log("info", "Computing derivatives for Cox-PH model")
 
     n_covs = len(z_sum)
     tot_p1 = np.zeros(n_covs)
@@ -75,7 +75,7 @@ def compute_derivatives(
         )
 
         if s1_value <= 0 or np.isnan(s1_value):
-            warn(f"Invalid s1_value at index {index}: {s1_value}")
+            safe_log("warning", f"Invalid s1_value at index {index}: {s1_value}")
             continue
 
         # Primary derivative component
@@ -137,7 +137,7 @@ def compute_model_results(
     Dict[str, Any]
         Dictionary containing model coefficients, statistics, and warnings.
     """
-    info("Computing final model results")
+    safe_log("info", "Computing final model results")
 
     n_covs = len(beta)
 
@@ -146,7 +146,7 @@ def compute_model_results(
         fisher = np.linalg.inv(-secondary_derivative)
         serrors = np.array([np.sqrt(fisher[k, k]) for k in range(fisher.shape[0])])
     except np.linalg.LinAlgError as e:
-        warn(f"Could not invert Hessian matrix: {e}")
+        safe_log("warning", f"Could not invert Hessian matrix: {e}")
         fisher = np.zeros((n_covs, n_covs))
         serrors = np.array([np.nan] * n_covs)
 
@@ -168,7 +168,7 @@ def compute_model_results(
         wald_statistic = np.dot(beta, np.dot(-secondary_derivative, beta))
         overall_p_value = float(chi2.sf(wald_statistic, degrees_of_freedom))
     except Exception as e:
-        warn(f"Could not compute Wald statistic: {e}")
+        safe_log("warning", f"Could not compute Wald statistic: {e}")
         overall_p_value = None
 
     # AIC for model comparison
@@ -181,9 +181,10 @@ def compute_model_results(
                 if i < len(summed_agg1) and summed_agg1[i] > 0:
                     freq = aggregated_time_events.iloc[i].get("freq", 1)
                     if summed_agg1[i] <= 0:
-                        warn(
+                        safe_log(
+                            "warning",
                             f"Risk set sum is non-positive at time index {i}: "
-                            f"{summed_agg1[i]}"
+                            f"{summed_agg1[i]}",
                         )
                         continue
                     risk_set_part += freq * np.log(summed_agg1[i])
@@ -196,10 +197,10 @@ def compute_model_results(
 
         aic = float(-2 * log_likelihood + 2 * n_params)
     except (ValueError, IndexError, FloatingPointError) as e:
-        warn(f"Could not compute AIC due to numerical/data issue: {e}")
+        safe_log("warning", f"Could not compute AIC due to numerical/data issue: {e}")
         aic = None
     except Exception as e:
-        warn(f"Unexpected error computing AIC: {e}")
+        safe_log("warning", f"Unexpected error computing AIC: {e}")
         aic = None
 
     # Results data
@@ -230,7 +231,7 @@ def compute_model_results(
                 f"Warning: Covariate '{var_name}' may perfectly predict the event "
                 f"(coef={coef}, SE={se}). Results may be unreliable."
             )
-            warn(msg)
+            safe_log("warning", msg)
             warnings.append(msg)
 
     return {
