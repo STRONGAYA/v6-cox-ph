@@ -163,6 +163,7 @@ def central(
     input_ = {
         "method": "compute_summed_z",
         "kwargs": {
+            "time_col": time_col,
             "outcome_col": outcome_col,
             "expl_vars": expl_vars,
         },

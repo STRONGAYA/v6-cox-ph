@@ -11,9 +11,16 @@ import numpy as np
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
+from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
 from vantage6.algorithm.tools.util import info, warn
 
-from .miscellaneous import check_data_quality, check_event_count
+from .miscellaneous import check_data_quality
+from .privacy_guards import (
+    check_sample_size,
+    ensure_spawned_by_central,
+    load_privacy_settings,
+    validate_iteration_input,
+)
 
 
 @data(1)
@@ -46,6 +53,9 @@ def get_unique_event_times(
     """
     info("Computing unique event times")
 
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
     # Data quality checks
     quality = check_data_quality(df, time_col, outcome_col)
     if not quality["has_time"] or not quality["has_outcome"]:
@@ -58,10 +68,10 @@ def get_unique_event_times(
     if quality["has_negative_time"]:
         warn("Negative time values detected in the data")
 
-    if not check_event_count(df, outcome_col, min_events=10):
+    if not check_sample_size(df, outcome_col, settings):
         warn(
             "Sub-task was not executed because the number of samples "
-            "is too small (n <= 10)"
+            "is too small."
         )
         return {"N-Threshold not met": client.organization_id}
 
@@ -75,7 +85,11 @@ def get_unique_event_times(
 @data(1)
 @algorithm_client
 def compute_summed_z(
-    client: AlgorithmClient, df: pd.DataFrame, outcome_col: str, expl_vars: list
+    client: AlgorithmClient,
+    df: pd.DataFrame,
+    time_col: str,
+    outcome_col: str,
+    expl_vars: list,
 ) -> dict:
     """
     Compute the sum of the specified explanatory variables for the outcome events.
@@ -86,6 +100,8 @@ def compute_summed_z(
         The client instance used to interact with the vantage6 server.
     df : pd.DataFrame
         The DataFrame containing the data.
+    time_col : str
+        The name of the column containing the time data.
     outcome_col : str
         The name of the column containing the outcome data.
     expl_vars : list
@@ -97,6 +113,15 @@ def compute_summed_z(
         A dictionary containing the sum of the explanatory variables.
     """
     info("Computing summed Z statistics")
+
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
+    if not check_sample_size(df, outcome_col, settings):
+        raise PrivacyThresholdViolation(
+            "Sample size threshold not met: refusing to share aggregates."
+        )
+
     z_sum = df[df[outcome_col] == 1][expl_vars].sum().to_dict()
     return {"sum": z_sum}
 
@@ -135,7 +160,21 @@ def perform_iteration(
         A dictionary containing the aggregates computed during the iteration.
     """
     info("Computing aggregates for the derivation of the partial likelihood")
-    beta = np.array(beta)
+
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
+    # perform_iteration does not have the outcome column available, so the
+    # threshold is checked on rows only.
+    if not check_sample_size(df, outcome_col=None, settings=settings):
+        raise PrivacyThresholdViolation(
+            "Sample size threshold not met: refusing to share aggregates."
+        )
+
+    beta, unique_time_events = validate_iteration_input(
+        beta, unique_time_events, expl_vars, settings
+    )
+
     num_unique_time_events = len(unique_time_events)
     num_explanatory_vars = len(expl_vars)
 
