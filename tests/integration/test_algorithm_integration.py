@@ -14,6 +14,7 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import norm
 
 from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
@@ -294,6 +295,72 @@ class TestCoxPHAlgorithmIntegration:
             result = extract_coxph_result(client, task)
             determine_model_acceptance(result, config["database_label"], kwargs)
 
+    @pytest.mark.parametrize(
+        "method,kwargs",
+        [
+            (
+                "get_unique_event_times",
+                {"time_col": "time", "outcome_col": "event"},
+            ),
+            (
+                "compute_summed_z",
+                {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": ["age", "treatment"],
+                },
+            ),
+            (
+                "perform_iteration",
+                {
+                    "time_col": "time",
+                    "expl_vars": ["age", "treatment"],
+                    "beta": [0.0, 0.0],
+                    "unique_time_events": [10.0, 20.0, 30.0],
+                },
+            ),
+        ],
+    )
+    def test_partial_functions_are_blocked_when_called_directly(
+        self,
+        authentication,
+        algorithm_image_name,
+        method,
+        kwargs,
+    ):
+        """
+        Partial functions must refuse direct (user) invocation.
+
+        Each partial applies ``ensure_spawned_by_central``: a task created
+        directly by a user has no parent, so the partial must abort with a
+        privacy error. The run log must contain the privacy message.
+        """
+        client = authentication
+
+        task = client.task.create(
+            collaboration=1,
+            organizations=[1],
+            name=f"Direct partial call — {method}",
+            image=algorithm_image_name,
+            description=(
+                f"Negative test: calling {method} directly must be refused."
+            ),
+            input_={"method": method, "kwargs": kwargs},
+            databases=[{"label": "coxph_test_data_1"}],
+        )
+
+        with pytest.raises((AlgorithmError, CollectResultsError)) as exc_info:
+            extract_coxph_result(client, task)
+
+        # The privacy message must appear somewhere in the error chain.
+        message = str(exc_info.value)
+        assert (
+            "privacy" in message.lower()
+            or "partial" in message.lower()
+            or "parent" in message.lower()
+            or "direct" in message.lower()
+        ), f"Expected a privacy-related error, got: {message}"
+
 
 def extract_coxph_result(client, task) -> Dict[str, Any]:
     """
@@ -413,9 +480,19 @@ def determine_model_acceptance(
     """
     Validate federated results against a centralised Cox-PH fit.
 
-    Loads the test data, fits a centralised Cox-PH model using lifelines,
-    and compares the federated coefficients against the centralised fit
-    within the specified tolerance.
+    The integration demo network hosts the same labelled CSV on every node,
+    so a task over N organisations fits N identical copies. The lifelines
+    reference is therefore built on the dataset replicated
+    ``len(included_organizations)`` times.
+
+    Checks (meaningful tolerances that would catch the Z-statistic bug):
+
+    - coefficients within 0.05 of the reference
+    - SE within 10 % relative of the reference
+    - Z == Coef / SE to 1e-4
+    - p == 2 * norm.cdf(-|Z|)
+    - AIC finite
+    - ``converged`` present and ``n_iterations`` present
 
     Parameters
     ----------
@@ -426,7 +503,7 @@ def determine_model_acceptance(
     kwargs : Dict[str, Any]
         Algorithm kwargs containing time_col, outcome_col, expl_vars.
     tolerance : float
-        Numerical tolerance for coefficient comparison.
+        Unused; kept for backward compatibility with existing callers.
 
     Raises
     ------
@@ -446,10 +523,14 @@ def determine_model_acceptance(
     outcome_col = kwargs["outcome_col"]
     expl_vars = kwargs["expl_vars"]
 
-    # Fit centralised Cox-PH model on the combined data
-    cph = CoxPHFitter()
-    central_df = df[[time_col, outcome_col] + expl_vars].copy()
+    # Each included organisation hosts the same labelled CSV, so the pooled
+    # reference is the dataset replicated once per included organisation.
+    n_orgs = len(federated_result["included_organizations"])
+    central_df = pd.concat([df] * n_orgs, ignore_index=True)
+    central_df = central_df[[time_col, outcome_col] + expl_vars].copy()
     central_df[outcome_col] = central_df[outcome_col].astype(bool)
+
+    cph = CoxPHFitter()
     cph.fit(central_df, duration_col=time_col, event_col=outcome_col)
 
     # Extract federated coefficients from the result
@@ -458,31 +539,42 @@ def determine_model_acceptance(
 
     fed_df = pd.read_json(StringIO(model_json))
 
-    # Compare each coefficient
-    for var in expl_vars:
-        if var in cph.params_.index and var in fed_df.index:
-            central_coef = cph.params_[var]
-            fed_coef = fed_df.loc[var, "Coef"]
-            assert abs(fed_coef - central_coef) <= tolerance, (
-                f"Coefficient mismatch for {var}: "
-                f"federated={fed_coef}, centralised={central_coef}, "
-                f"tolerance={tolerance}"
-            )
-            print(
-                f"Coefficient validation passed for {var}: "
-                f"federated={fed_coef}, centralised={central_coef}"
-            )
+    # Convergence fields
+    assert "converged" in federated_result, "converged should be present"
+    assert "n_iterations" in federated_result, "n_iterations should be present"
 
-    # Validate that p-values are present and finite
-    assert "p-value" in fed_df.columns, "p-value column should be present"
     for var in expl_vars:
-        if var in fed_df.index:
-            pval = fed_df.loc[var, "p-value"]
-            assert np.isfinite(pval), f"p-value for {var} should be finite"
+        assert var in cph.params_.index, f"{var} missing from lifelines params"
+        assert var in fed_df.index, f"{var} missing from federated result"
 
-    # Validate AIC is present
-    assert (
-        "aic" in federated_result or federated_result.get("aic") is not None
-    ), "AIC should be present in the result"
+        central_coef = cph.params_[var]
+        fed_coef = fed_df.loc[var, "Coef"]
+        assert abs(fed_coef - central_coef) <= 0.05, (
+            f"Coefficient mismatch for {var}: "
+            f"federated={fed_coef}, centralised={central_coef}"
+        )
+
+        central_se = cph.standard_errors_[var]
+        fed_se = fed_df.loc[var, "SE"]
+        rel_se_diff = abs(fed_se - central_se) / central_se if central_se else 0
+        assert rel_se_diff <= 0.10, (
+            f"SE mismatch for {var}: federated={fed_se}, "
+            f"centralised={central_se}, relative diff={rel_se_diff}"
+        )
+
+        # Z must equal Coef / SE (regression check for the old bug)
+        z = fed_df.loc[var, "Z"]
+        assert abs(z - fed_coef / fed_se) <= 1e-4, (
+            f"Z != Coef/SE for {var}: Z={z}, Coef/SE={fed_coef / fed_se}"
+        )
+
+        # p must equal 2 * Phi(-|Z|)
+        expected_p = 2 * norm.cdf(-abs(z))
+        pval = fed_df.loc[var, "p-value"]
+        assert abs(pval - expected_p) <= 1e-6, (
+            f"p-value mismatch for {var}: got {pval}, expected {expected_p}"
+        )
+
+    assert np.isfinite(federated_result["aic"]), "AIC should be finite"
 
     print("All model acceptance checks passed")
