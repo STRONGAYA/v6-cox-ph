@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+tests
+docs
+*.egg-info
+__pycache__
+*.pyc
+venv
+.venv
