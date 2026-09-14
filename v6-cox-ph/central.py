@@ -277,14 +277,14 @@ def central(
             step = solve(secondary_derivative, primary_derivative)
         except np.linalg.LinAlgError as e:
             convergence_cause = f"Hessian is singular: {e}"
-            safe_log("warning", convergence_cause)
+            safe_log("warn", convergence_cause)
             break
 
         delta = float(np.max(np.abs(step)))
 
         if not np.isfinite(delta):
             convergence_cause = "Newton step is not finite"
-            safe_log("warning", convergence_cause)
+            safe_log("warn", convergence_cause)
             break
 
         if delta <= 0.000001:
@@ -305,11 +305,11 @@ def central(
         msg = (
             f"Newton-Raphson did not converge in {n_iterations} iterations; "
             f"SE/p-values may be unreliable; statistics are reported at the "
-            f"last evaluated beta",
+            f"last evaluated beta"
         )
         if convergence_cause:
             msg += f"; cause: {convergence_cause}"
-        safe_log("warning", msg)
+        safe_log("warn", msg)
         central_warnings.append(msg)
 
     # Compute final model results — beta, secondary_derivative and
