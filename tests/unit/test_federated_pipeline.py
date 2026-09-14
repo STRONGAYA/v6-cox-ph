@@ -355,13 +355,22 @@ class TestNaNPolicy:
     """NaN rows are dropped identically in all partials (FR-B4)."""
 
     def test_nan_rows_dropped_consistently(self, monkeypatch, guards_off):
-        """A NaN in age on node 1 is dropped in both compute_summed_z and
-        perform_iteration; the federated result matches lifelines on the
-        NaN-free pooled data."""
+        """A NaN in age on an event row of node 1 is dropped in
+        compute_summed_z (and thus excluded from event counts, z_sum and
+        risk sets); the federated result matches lifelines on the NaN-free
+        pooled data.
+
+        Putting the NaN on an *event* row is critical: get_unique_event_times
+        does not have expl_vars and cannot drop rows with NaN covariates, so
+        without the fix the event counts (freq) would include that row while
+        z_sum and the risk sets would not — a 10-20x tolerance violation.
+        """
         df1, df2, _ = _load_datasets()
         df1 = df1.copy()
-        # Introduce a NaN in the first row's age column
-        df1.loc[0, "age"] = np.nan
+        # Introduce NaN in age on the first event row (row 1, event=1)
+        event_rows = df1[df1["event"] == 1].index[:3].tolist()
+        for idx in event_rows:
+            df1.loc[idx, "age"] = np.nan
 
         datasets = [
             [{"database": df1, "db_type": "csv"}],

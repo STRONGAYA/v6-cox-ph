@@ -162,13 +162,6 @@ def central(
                 "n_iterations": 0,
             }
 
-    aggregated_time_events = pd.concat(unique_time_events)
-    aggregated_time_events = aggregated_time_events.groupby(
-        time_col, as_index=False
-    ).sum()
-
-    unique_time_events = aggregated_time_events[time_col].tolist()
-
     # Subtask: compute summed Z
     info("Defining input parameters for subtask — compute summed Z")
     input_ = {
@@ -193,12 +186,35 @@ def central(
     info("Results obtained!")
 
     z_sum = None
+    time_event_dfs = []
     for i, output in enumerate(results):
         _validate_zsum_result(output, expl_vars, org_id=ids[i] if i < len(ids) else i)
         if z_sum is None:
             z_sum = pd.Series(output["sum"])
         else:
             z_sum += pd.Series(output["sum"])
+        # Collect per-time event counts (NaN-consistent with z_sum)
+        if "times" in output:
+            time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
+
+    # Build aggregated_time_events from compute_summed_z results, not from
+    # get_unique_event_times. The latter drops NaN only in time/outcome
+    # columns, while compute_summed_z also drops NaN in expl_vars — so
+    # event counts from compute_summed_z are consistent with z_sum and the
+    # risk sets (FR-B4).
+    if time_event_dfs:
+        aggregated_time_events = pd.concat(time_event_dfs)
+        aggregated_time_events = aggregated_time_events.groupby(
+            time_col, as_index=False
+        ).sum()
+    else:
+        # Fallback: use get_unique_event_times results (pre-FR-B4 behaviour)
+        aggregated_time_events = pd.concat(unique_time_events)
+        aggregated_time_events = aggregated_time_events.groupby(
+            time_col, as_index=False
+        ).sum()
+
+    unique_time_events = aggregated_time_events[time_col].tolist()
 
     beta: np.ndarray = np.zeros(n_covs)
 
