@@ -420,3 +420,53 @@ def guarded_risk_set_masks(
             current = cand
             masks.append(current)
     return masks
+
+
+def validate_expl_vars(
+    df: pd.DataFrame, expl_vars: list, time_col: str, outcome_col: str | None
+) -> None:
+    """Validate explanatory variables on the node (FR-B3).
+
+    Checks that every name in ``expl_vars`` is a column of ``df``, does not
+    overlap with ``time_col`` or ``outcome_col``, and is numeric. Column
+    names are user input and may be echoed in the error message; data
+    values are never echoed.
+
+    Raises
+    ------
+    UserInputError
+        On any validation failure.
+    """
+    for var in expl_vars:
+        if var not in df.columns:
+            raise UserInputError(
+                f"Explanatory variable '{var}' not found in data columns."
+            )
+        if var == time_col:
+            raise UserInputError(
+                f"Explanatory variable '{var}' must not equal time_col "
+                f"'{time_col}'."
+            )
+        if outcome_col is not None and var == outcome_col:
+            raise UserInputError(
+                f"Explanatory variable '{var}' must not equal outcome_col "
+                f"'{outcome_col}'."
+            )
+        if not pd.api.types.is_numeric_dtype(df[var]):
+            raise UserInputError(
+                f"Explanatory variable '{var}' must be numeric, got "
+                f"dtype {df[var].dtype}."
+            )
+
+
+def drop_incomplete_rows(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Drop rows with NaN in any of the specified columns (FR-B4).
+
+    Applied identically in all three partials before ``check_sample_size``
+    so that thresholds apply to the analysed rows. The input is not
+    modified; a copy is returned.
+    """
+    existing_cols = [c for c in cols if c in df.columns]
+    if not existing_cols:
+        return df.copy()
+    return df.dropna(subset=existing_cols).copy()
