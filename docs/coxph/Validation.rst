@@ -57,8 +57,9 @@ Integration tests
 
 ``tests/integration/test_algorithm_integration.py`` dispatches real tasks
 through a ``v6 dev`` network. ``determine_model_acceptance`` builds the
-lifelines reference on the dataset replicated once per included
-organisation (each demo node hosts the same labelled CSV) and asserts:
+lifelines reference by concatenating the per-node row slices of the
+included organisations (the demo network partitions each CSV across nodes
+by row index) and asserts:
 
 - coefficients within ``0.05`` of the reference;
 - SE within 10 % relative;
