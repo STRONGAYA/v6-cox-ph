@@ -14,7 +14,7 @@ dependencies = [
     "numpy",
     "scipy",
     "pydantic>=2.0.0",
-    "pyjwt",
+    "pyjwt>=2.4,<3",
 ]
 
 [project.optional-dependencies]

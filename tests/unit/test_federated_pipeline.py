@@ -398,8 +398,10 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
 class TestDefaultGuardsPrivacyProperty:
     """With default guards (k=5), shared risk-set aggregates are protected."""
 
-    def test_agg1_changes_at_least_k(self):
+    def test_agg1_changes_at_least_k(self, monkeypatch):
         """Every positive decrease in per-node agg1 is >= k and min >= k."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         k = 5
         df1, df2, _ = _load_datasets()
         datasets = [
@@ -429,8 +431,10 @@ class TestDefaultGuardsPrivacyProperty:
                 min(non_zero) >= k - 1e-9
             ), f"node {node_idx}: min non-zero agg1 {min(non_zero)} < k={k}"
 
-    def test_coefficients_within_loose_bound(self):
+    def test_coefficients_within_loose_bound(self, monkeypatch):
         """With default guards, coefficients stay within 0.1 of lifelines."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         df1, df2, _ = _load_datasets()
         datasets = [
             [{"database": df1, "db_type": "csv"}],

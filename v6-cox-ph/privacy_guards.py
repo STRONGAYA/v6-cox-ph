@@ -88,10 +88,18 @@ def load_privacy_settings() -> PrivacySettings:
         default=str(DEFAULT_MIN_RISK_SET_CHANGE),
         as_type="int",
     )
-    if min_risk_set_change is None or min_risk_set_change < 0:
+    if min_risk_set_change is None or min_risk_set_change < 1:
         raise UserInputError(
-            f"{ENV_MIN_RISK_SET_CHANGE} must be a non-negative integer, got "
+            f"{ENV_MIN_RISK_SET_CHANGE} must be a positive integer (>= 1), got "
             f"{min_risk_set_change!r}"
+        )
+
+    if sample_size_threshold + 1 < min_risk_set_change:
+        raise UserInputError(
+            f"{ENV_SAMPLE_SIZE_THRESHOLD} ({sample_size_threshold}) + 1 must be "
+            f">= {ENV_MIN_RISK_SET_CHANGE} ({min_risk_set_change}); otherwise "
+            f"a node can pass the sample-size threshold but fail to guarantee "
+            f"risk sets of size >= k."
         )
 
     time_bin_width_raw = get_env_var(ENV_TIME_BIN_WIDTH, default=None)
@@ -125,10 +133,9 @@ def ensure_spawned_by_central(client) -> None:
     server only sets ``parent_id`` for container-created sub-tasks, so a user
     task (called directly) has ``parent = None`` and is refused.
 
-    The ``MockAlgorithmClient`` has no ``_access_token``; in that case the
-    guard is skipped with an info log (the only path where the token is
-    absent). Any failure to obtain the task fails closed with
-    ``AlgorithmError``.
+    The guard is skipped only for ``MockAlgorithmClient`` (in-process tests).
+    Any other client without a decodable token raises ``AlgorithmError``
+    (fail closed). Any failure to obtain the task also fails closed.
 
     Raises
     ------
@@ -136,20 +143,31 @@ def ensure_spawned_by_central(client) -> None:
         If the running task has no parent (i.e. it was created directly by a
         user rather than by ``central``).
     AlgorithmError
-        If the task lookup itself fails (fail closed).
+        If the token is missing or cannot be decoded, or if the task lookup
+        itself fails (fail closed).
     """
-    token = getattr(client, "_access_token", None)
+    from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
 
-    # MockAlgorithmClient and any client without a token: skip the guard.
-    if token is None:
-        info(
-            "Skipping parent-task guard: no access token present "
-            "(likely a mock client)."
-        )
+    if isinstance(client, MockAlgorithmClient):
+        info("Skipping parent-task guard: mock client detected.")
         return
 
+    token = getattr(client, "_access_token", None)
+    if token is None:
+        raise AlgorithmError(
+            "No access token found on client; cannot verify parent task. "
+            "Refusing to proceed (fail closed)."
+        )
+
     try:
-        payload = jwt.decode(token, options={"verify_signature": False})
+        payload = jwt.decode(
+            token,
+            options={
+                "verify_signature": False,
+                "verify_exp": False,
+                "verify_sub": False,
+            },
+        )
         task_id = payload["sub"]["task_id"]
     except Exception as e:
         raise AlgorithmError(
@@ -200,7 +218,11 @@ def check_sample_size(
         warn(f"Sample size threshold not met: {n_rows} rows <= {threshold}.")
         return False
 
-    if outcome_col is not None and outcome_col in df.columns:
+    if outcome_col is not None:
+        if outcome_col not in df.columns:
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' not found in data columns."
+            )
         n_events = int((df[outcome_col] == 1).sum())
         if n_events <= threshold:
             warn(
@@ -300,7 +322,10 @@ def bin_times(times: pd.Series, width: float | None) -> pd.Series:
     """
     if width is None or width <= 0:
         return times
-    return np.floor(times.to_numpy(dtype=float) / width) * width
+    return pd.Series(
+        np.floor(times.to_numpy(dtype=float) / width) * width,
+        index=times.index,
+    )
 
 
 def tail_cutoff(times: pd.Series, k: int) -> float | None:
@@ -310,15 +335,21 @@ def tail_cutoff(times: pd.Series, k: int) -> float | None:
     clamped to ``t_cut``), which guarantees that the largest shared risk set
     contains at least ``k`` individuals.
 
-    Returns ``None`` when ``k <= 1`` (guard disabled) or when there are
-    fewer than ``k`` times (the node is excluded by the threshold before
-    censoring runs).
+    Returns ``None`` when ``k <= 1`` (guard disabled).
+
+    Raises ``PrivacyViolation`` when ``k > 1`` and fewer than ``k`` valid
+    times remain — a node should have been excluded by the sample-size
+    threshold before this is reached, so this is a defence-in-depth
+    assertion.
     """
     if k is None or k <= 1:
         return None
     vals = pd.to_numeric(times, errors="coerce").dropna().to_numpy()
     if len(vals) < k:
-        return None
+        raise PrivacyViolation(
+            f"Tail censoring requires at least {k} valid times but only "
+            f"{len(vals)} are available."
+        )
     return float(np.sort(vals)[-k])
 
 
