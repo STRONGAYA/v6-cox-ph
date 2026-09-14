@@ -188,31 +188,25 @@ def central(
     z_sum = None
     time_event_dfs = []
     for i, output in enumerate(results):
-        _validate_zsum_result(output, expl_vars, org_id=ids[i] if i < len(ids) else i)
+        _validate_zsum_result(
+            output, expl_vars, time_col, org_id=ids[i] if i < len(ids) else i
+        )
         if z_sum is None:
             z_sum = pd.Series(output["sum"])
         else:
             z_sum += pd.Series(output["sum"])
         # Collect per-time event counts (NaN-consistent with z_sum)
-        if "times" in output:
-            time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
+        time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
 
     # Build aggregated_time_events from compute_summed_z results, not from
     # get_unique_event_times. The latter drops NaN only in time/outcome
     # columns, while compute_summed_z also drops NaN in expl_vars — so
     # event counts from compute_summed_z are consistent with z_sum and the
     # risk sets (FR-B4).
-    if time_event_dfs:
-        aggregated_time_events = pd.concat(time_event_dfs)
-        aggregated_time_events = aggregated_time_events.groupby(
-            time_col, as_index=False
-        ).sum()
-    else:
-        # Fallback: use get_unique_event_times results (pre-FR-B4 behaviour)
-        aggregated_time_events = pd.concat(unique_time_events)
-        aggregated_time_events = aggregated_time_events.groupby(
-            time_col, as_index=False
-        ).sum()
+    aggregated_time_events = pd.concat(time_event_dfs)
+    aggregated_time_events = aggregated_time_events.groupby(
+        time_col, as_index=False
+    ).sum()
 
     unique_time_events = aggregated_time_events[time_col].tolist()
 
@@ -226,6 +220,7 @@ def central(
     secondary_derivative: np.ndarray = np.zeros((n_covs, n_covs))
     summed_agg1: np.ndarray = np.zeros(0)
     converged = False
+    convergence_cause: str | None = None
     epoch = 0
 
     for epoch in range(epochs):
@@ -278,13 +273,15 @@ def central(
         try:
             step = solve(secondary_derivative, primary_derivative)
         except np.linalg.LinAlgError as e:
-            warn(f"Hessian is singular: {e}")
+            convergence_cause = f"Hessian is singular: {e}"
+            warn(convergence_cause)
             break
 
         delta = float(np.max(np.abs(step)))
 
         if not np.isfinite(delta):
-            warn("Newton step is not finite")
+            convergence_cause = "Newton step is not finite"
+            warn(convergence_cause)
             break
 
         if delta <= 0.000001:
@@ -300,12 +297,17 @@ def central(
         beta = beta - step
 
     n_iterations = epoch + 1
+    central_warnings = []
     if not converged:
-        warn(
+        msg = (
             f"Newton-Raphson did not converge in {n_iterations} iterations; "
             f"SE/p-values may be unreliable; statistics are reported at the "
             f"last evaluated beta"
         )
+        if convergence_cause:
+            msg += f"; cause: {convergence_cause}"
+        warn(msg)
+        central_warnings.append(msg)
 
     # Compute final model results — beta, secondary_derivative and
     # summed_agg1 are all evaluated at the reported beta.
@@ -329,7 +331,7 @@ def central(
         "overall_p_value": model["overall_p_value"],
         "aic": model["aic"],
         "degrees_of_freedom": model["n_params"],
-        "warnings": model["warnings"],
+        "warnings": model["warnings"] + central_warnings,
         "converged": converged,
         "n_iterations": n_iterations,
     }
@@ -382,12 +384,13 @@ def _validate_iteration_result(
 
 
 def _validate_zsum_result(
-    output: dict, expl_vars: list, org_id: int | None = None
+    output: dict, expl_vars: list, time_col: str, org_id: int | None = None
 ) -> None:
     """Validate a ``compute_summed_z`` sub-task result (FR-A3).
 
     Raises ``AlgorithmError`` if the result is not a dict with a ``sum`` key
-    whose entries match ``expl_vars``.
+    whose entries match ``expl_vars``, or a ``times`` key with the per-time
+    event counts (columns ``time_col`` and ``freq``).
     """
     if not isinstance(output, dict) or "sum" not in output:
         raise AlgorithmError(
@@ -404,3 +407,20 @@ def _validate_zsum_result(
             f"Organisation {org_id}: compute_summed_z 'sum' missing "
             f"variables {missing}"
         )
+    if "times" not in output:
+        raise AlgorithmError(
+            f"Organisation {org_id}: compute_summed_z result missing 'times' key"
+        )
+    times_df = pd.DataFrame.from_dict(output["times"])
+    if time_col not in times_df.columns or "freq" not in times_df.columns:
+        raise AlgorithmError(
+            f"Organisation {org_id}: compute_summed_z 'times' must have columns "
+            f"'{time_col}' and 'freq', got {list(times_df.columns)}"
+        )
+    if len(times_df) > 0:
+        freqs = times_df["freq"].to_numpy()
+        if not np.all(np.isfinite(freqs)) or np.any(freqs < 0):
+            raise AlgorithmError(
+                f"Organisation {org_id}: compute_summed_z 'freq' contains "
+                f"non-finite or negative values"
+            )
