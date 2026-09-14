@@ -113,7 +113,8 @@ Build the Docker image::
 - **Never return row-level data** from a partial. Only aggregates leave a
   node.
 - **Every partial keeps its guards**, in order: ``ensure_spawned_by_central``
-  → ``load_privacy_settings`` → ``check_sample_size`` →
+  → ``load_privacy_settings`` → (``validate_expl_vars`` where applicable)
+  → ``drop_incomplete_rows`` → ``check_sample_size`` →
   ``prepare_time_column`` → (work). Do not reorder or skip them.
 - **No new partial** without a sample-size threshold, parent-task guard and
   documentation in ``Privacy.rst``.
@@ -121,9 +122,13 @@ Build the Docker image::
 - **Do not loosen** thresholds or tolerances to make tests pass.
 - Privacy settings are read from node ``algorithm_env`` via ``get_env_var``:
   ``SAMPLE_SIZE_THRESHOLD`` (default 10), ``COXPH_TIME_BIN_WIDTH`` (disabled
-  by default), ``COXPH_MIN_RISK_SET_CHANGE`` (default 5).
-- The parent-task guard fails closed: if the task lookup fails, raise
+  by default), ``COXPH_MIN_RISK_SET_CHANGE`` (default 5, must be >= 1, and
+  ``SAMPLE_SIZE_THRESHOLD + 1 >= COXPH_MIN_RISK_SET_CHANGE``).
+- The parent-task guard fails closed: if the task lookup fails or the token
+  is missing (and the client is not a ``MockAlgorithmClient``), raise
   ``AlgorithmError``, never proceed.
+- Rows with NaN in ``time_col``, ``outcome_col`` or any ``expl_var`` are
+  dropped before the sample-size threshold is checked.
 
 ## Coding conventions
 

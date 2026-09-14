@@ -74,6 +74,22 @@ Variable                        Type        Default
 ``COXPH_MIN_RISK_SET_CHANGE``   int         5
 ============================== =========== ===========
 
+``COXPH_MIN_RISK_SET_CHANGE`` must be at least 1, and
+``SAMPLE_SIZE_THRESHOLD + 1`` must be greater than or equal to it;
+otherwise the node raises ``UserInputError`` at start-up. This prevents
+a configuration where a node passes the sample-size threshold but has
+too few rows for tail censoring to guarantee risk sets of size ``k``.
+
+The parent-task guard fails closed: a client without a decodable
+container token (that is not a ``MockAlgorithmClient``) raises
+``AlgorithmError`` rather than silently skipping the check.
+
+Rows with NaN in ``time_col``, ``outcome_col`` or any explanatory
+variable are dropped before the sample-size threshold is checked, so
+thresholds apply to the analysed rows. Explanatory variables are
+validated on the node: each must be a column, must not overlap
+``time_col``/``outcome_col``, and must be numeric.
+
 Data sharing
 ------------
 
