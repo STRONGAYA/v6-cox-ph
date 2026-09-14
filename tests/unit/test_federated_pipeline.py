@@ -146,10 +146,8 @@ class TestFederatedPipelineVsLifelines:
             coef = model.loc[var, "Coef"]
             se = model.loc[var, "SE"]
             z = model.loc[var, "Z"]
-            # Coef and SE are rounded to 5 decimals, so allow rounding slack;
-            # the original bug produces a ~13 % error on treatment.
             assert (
-                abs(z - coef / se) <= 1e-3
+                abs(z - coef / se) <= 1e-9
             ), f"Z != Coef/SE for {var}: Z={z}, Coef/SE={coef / se}"
 
     def test_aic_close_to_lifelines(self, standard_result):
@@ -196,7 +194,12 @@ class TestNonConvergence:
     """The output reports non-convergence when the epoch budget is exhausted."""
 
     def test_forced_non_convergence(self, monkeypatch, guards_off):
-        """With a single epoch the optimiser cannot converge."""
+        """With a single epoch the optimiser cannot converge.
+
+        FR-A1: the reported Coef is beta_0 (all zeros) because the final
+        Newton step is not applied. SE, Z and AIC are evaluated at the
+        same beta_0.
+        """
         monkeypatch.setattr(central_module, "MAX_ITERATIONS", 1)
 
         df1, df2, _ = _load_datasets()
@@ -212,8 +215,139 @@ class TestNonConvergence:
         assert result["n_iterations"] == 1
         warning_text = " ".join(result["warnings"])
         assert "did not converge" in warning_text
+        assert "last evaluated beta" in warning_text
         # A model is still returned
         assert result["model"] is not None
+
+        # FR-A1: Coef == 0 (beta_0 reported, not beta_1)
+        model = pd.read_json(StringIO(result["model"]))
+        for var in EXPL_VARS:
+            assert (
+                model.loc[var, "Coef"] == 0.0
+            ), f"Non-converged Coef should be 0 (beta_0), got {model.loc[var, 'Coef']}"
+            # Z = Coef / SE = 0 / SE = 0
+            assert model.loc[var, "Z"] == 0.0
+            # SE must be finite (computed from the Hessian at beta_0)
+            assert np.isfinite(model.loc[var, "SE"])
+
+
+@pytest.mark.unit
+class TestAllExcluded:
+    """When every organisation is excluded, the full output schema is returned."""
+
+    def test_all_excluded_full_schema(self, monkeypatch):
+        """FR-A5: all-excluded return has model=None and all schema keys."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "1000")
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+
+        df1, df2, df3 = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+            [{"database": df3, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2, 3])
+
+        assert result["model"] is None
+        assert result["converged"] is False
+        assert result["n_iterations"] == 0
+        assert result["included_organizations"] == []
+        assert len(result["excluded_organizations"]) == 3
+        assert result["aic"] is None
+        assert result["overall_p_value"] is None
+        assert isinstance(result["warnings"], list)
+        assert len(result["warnings"]) > 0
+
+
+@pytest.mark.unit
+class TestSingularHessian:
+    """A singular Hessian produces a graceful result, not a crash."""
+
+    def test_collinear_covariate(self, monkeypatch, guards_off):
+        """FR-A2: collinear covariate -> converged=False, NaN SE, JSON-serialisable."""
+        df1, df2, _ = _load_datasets()
+        df1 = df1.copy()
+        df2 = df2.copy()
+        df1["age2"] = df1["age"]
+        df2["age2"] = df2["age"]
+        collinear_vars = ["age", "age2"]
+
+        client = MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        task = client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": collinear_vars,
+                    "organization_ids": [1, 2],
+                },
+            },
+            organizations=[1],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        result = results[0]
+
+        assert result["converged"] is False
+        model = pd.read_json(StringIO(result["model"]))
+        for var in collinear_vars:
+            assert np.isnan(model.loc[var, "SE"]), f"SE for {var} should be NaN"
+        assert result["model"] is not None
+
+
+@pytest.mark.unit
+class TestSubTaskValidation:
+    """The validation helpers catch malformed sub-task results (FR-A3)."""
+
+    def test_validate_iteration_result_bad_agg1_length(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="agg1 has length"):
+            central._validate_iteration_result(
+                {"agg1": [1.0, 2.0], "agg2": {}, "agg3": []},
+                n_times=5,
+                n_covs=2,
+                expl_vars=["age", "treatment"],
+                org_id=1,
+            )
+
+    def test_validate_iteration_result_missing_key(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="missing key"):
+            central._validate_iteration_result(
+                {"agg1": [1.0]},
+                n_times=1,
+                n_covs=1,
+                expl_vars=["age"],
+                org_id=1,
+            )
+
+    def test_validate_zsum_result_missing_sum(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="missing 'sum'"):
+            central._validate_zsum_result({}, ["age", "treatment"], org_id=1)
+
+    def test_validate_zsum_result_missing_variable(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="missing variables"):
+            central._validate_zsum_result(
+                {"sum": {"age": 10.0}}, ["age", "treatment"], org_id=1
+            )
 
 
 def _per_node_agg1_at_beta_zero(datasets, organization_ids):
