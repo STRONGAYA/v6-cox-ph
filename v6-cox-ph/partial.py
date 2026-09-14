@@ -154,8 +154,17 @@ def compute_summed_z(
 
     df = prepare_time_column(df, time_col, settings, outcome_col)
 
-    z_sum = df[df[outcome_col] == 1][expl_vars].sum().to_dict()
-    return {"sum": z_sum}
+    events = df[df[outcome_col] == 1]
+    z_sum = events[expl_vars].sum().to_dict()
+
+    # Also return per-time event counts from the same NaN-dropped,
+    # censored DataFrame so that central can build aggregated_time_events
+    # that are consistent with z_sum and the risk sets (FR-B4).
+    times = events.groupby(time_col, as_index=False).count()
+    times = times.sort_values(by=time_col)[[time_col, outcome_col]]
+    times["freq"] = times[outcome_col]
+    times = times.drop(columns=outcome_col)
+    return {"sum": z_sum, "times": times.to_dict()}
 
 
 @data(1)
