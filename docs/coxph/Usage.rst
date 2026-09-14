@@ -32,7 +32,12 @@ The central function returns a dictionary with:
 
 The Wald statistic is reported as ``Z = Coef / SE`` and the p-value as
 ``p = 2 * Phi(-|Z|)``. When ``converged`` is ``False`` a warning is appended
-advising that the SE/p-values may be unreliable.
+advising that the SE/p-values may be unreliable; statistics are reported
+at the last evaluated beta (the Newton step is not applied when the
+iteration budget is exhausted, so Coef, SE and AIC stay consistent).
+
+All statistics in the model table are full-precision floats (no
+rounding); presentation rounding is a client concern.
 
 Node configuration (algorithm_env)
 ----------------------------------
