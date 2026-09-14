@@ -474,14 +474,17 @@ def determine_model_acceptance(
     database_label: str,
     kwargs: Dict[str, Any],
     tolerance: float = 2.0,
+    n_total_nodes: int = 3,
 ) -> None:
     """
     Validate federated results against a centralised Cox-PH fit.
 
-    The integration demo network hosts the same labelled CSV on every node,
-    so a task over N organisations fits N identical copies. The lifelines
-    reference is therefore built on the dataset replicated
-    ``len(included_organizations)`` times.
+    The integration demo network splits each labelled CSV across its nodes
+    (``v6 dev create-demo-network`` partitions rows evenly), so the pooled
+    data of the included organisations is the concatenation of their
+    per-node row slices — not the full dataset replicated. The lifelines
+    reference is therefore built on the same row slices that the included
+    organisations actually hold.
 
     Checks (meaningful tolerances that would catch the Z-statistic bug):
 
@@ -502,6 +505,9 @@ def determine_model_acceptance(
         Algorithm kwargs containing time_col, outcome_col, expl_vars.
     tolerance : float
         Unused; kept for backward compatibility with existing callers.
+    n_total_nodes : int
+        Total number of nodes in the demo network (default 3). Used to
+        reconstruct the per-node row slices.
 
     Raises
     ------
@@ -521,10 +527,18 @@ def determine_model_acceptance(
     outcome_col = kwargs["outcome_col"]
     expl_vars = kwargs["expl_vars"]
 
-    # Each included organisation hosts the same labelled CSV, so the pooled
-    # reference is the dataset replicated once per included organisation.
-    n_orgs = len(federated_result["included_organizations"])
-    central_df = pd.concat([df] * n_orgs, ignore_index=True)
+    # The demo network splits the dataset across nodes by row index.
+    # Reconstruct the pooled data of the included organisations by
+    # concatenating their per-node row slices.
+    n_rows = len(df)
+    included_orgs = federated_result["included_organizations"]
+    pooled_parts = []
+    for org_id in included_orgs:
+        node_idx = org_id - 1  # demo network nodes are 1-indexed
+        start = node_idx * n_rows // n_total_nodes
+        end = (node_idx + 1) * n_rows // n_total_nodes
+        pooled_parts.append(df.iloc[start:end])
+    central_df = pd.concat(pooled_parts, ignore_index=True)
     central_df = central_df[[time_col, outcome_col] + expl_vars].copy()
     central_df[outcome_col] = central_df[outcome_col].astype(bool)
 
