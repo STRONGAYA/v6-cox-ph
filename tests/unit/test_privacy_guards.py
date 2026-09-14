@@ -76,9 +76,21 @@ class TestLoadPrivacySettings:
             load_privacy_settings()
 
     def test_invalid_k(self, monkeypatch):
-        """Negative min_risk_set_change raises UserInputError."""
+        """k < 1 raises UserInputError."""
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "0")
+        with pytest.raises(UserInputError):
+            load_privacy_settings()
+
+    def test_invalid_k_negative(self, monkeypatch):
         monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "-1")
         with pytest.raises(UserInputError):
+            load_privacy_settings()
+
+    def test_threshold_plus_one_less_than_k(self, monkeypatch):
+        """T + 1 < k raises UserInputError (FR-B2)."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "3")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "5")
+        with pytest.raises(UserInputError, match="must be"):
             load_privacy_settings()
 
 
@@ -119,6 +131,12 @@ class TestCheckSampleSize:
         # 10 events, threshold 10 -> 10 > 10 is False
         assert check_sample_size(df, "event", settings) is False
 
+    def test_missing_outcome_col_raises(self, settings):
+        """FR-B5: missing outcome_col raises UserInputError."""
+        df = pd.DataFrame({"x": range(20)})
+        with pytest.raises(UserInputError, match="Outcome column"):
+            check_sample_size(df, "event", settings)
+
 
 @pytest.mark.unit
 class TestEnsureSpawnedByCentral:
@@ -146,10 +164,22 @@ class TestEnsureSpawnedByCentral:
         return jwt.encode(payload, key="unused", algorithm="HS256")
 
     def test_mock_client_skipped(self):
-        """A client without _access_token is skipped (mock client)."""
-        client = self._make_client(token=None)
+        """A MockAlgorithmClient is skipped (in-process test)."""
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        client = MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
         # Should not raise
         ensure_spawned_by_central(client)
+
+    def test_non_mock_client_without_token_fails_closed(self):
+        """FR-B1: a non-mock client without _access_token raises AlgorithmError."""
+        client = self._make_client(token=None)
+        with pytest.raises(AlgorithmError, match="No access token"):
+            ensure_spawned_by_central(client)
 
     def test_direct_invocation_rejected(self):
         """A user task (parent is None) raises PrivacyViolation."""
@@ -282,9 +312,11 @@ class TestTailCutoff:
         # sorted: [1,2,3,3,5], k=3 -> [-3] = 3.0
         assert tail_cutoff(times, k=3) == 3.0
 
-    def test_fewer_than_k_returns_none(self):
+    def test_fewer_than_k_raises(self):
+        """FR-B2: fewer than k valid times raises PrivacyViolation."""
         times = pd.Series([1.0, 2.0])
-        assert tail_cutoff(times, k=5) is None
+        with pytest.raises(PrivacyViolation):
+            tail_cutoff(times, k=5)
 
 
 @pytest.mark.unit
@@ -300,7 +332,9 @@ class TestPrepareTimeColumn:
     @pytest.fixture
     def settings_binned(self):
         return PrivacySettings(
-            sample_size_threshold=10, time_bin_width=10.0, min_risk_set_change=5
+            sample_size_threshold=10,
+            time_bin_width=10.0,
+            min_risk_set_change=1,
         )
 
     @pytest.fixture
