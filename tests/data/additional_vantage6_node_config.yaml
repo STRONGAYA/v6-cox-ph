@@ -1,4 +1,9 @@
 # Additional configuration for vantage6 nodes
+# Disable the risk-set jump guard (k=1) for integration exactness tests.
+# The plan states that exactness checks use k=1; the privacy property
+# with default k=5 is verified separately in the unit suite.
+algorithm_env:
+  COXPH_MIN_RISK_SET_CHANGE: 1
 policies:
   allowed_algorithms:
     - ^hello-world$
