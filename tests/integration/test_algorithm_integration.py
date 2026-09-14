@@ -20,6 +20,7 @@ from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
     CollectResultsError,
     PrivacyThresholdViolation,
+    PrivacyViolation,
     UserInputError,
 )
 
@@ -347,17 +348,76 @@ class TestCoxPHAlgorithmIntegration:
             databases=[{"label": "coxph_test_data_1"}],
         )
 
-        with pytest.raises((AlgorithmError, CollectResultsError)) as exc_info:
+        with pytest.raises(
+            (AlgorithmError, CollectResultsError, PrivacyViolation)
+        ) as exc_info:
             extract_coxph_result(client, task)
 
-        # The privacy message must appear somewhere in the error chain.
+        # The error must be a PrivacyViolation with the exact message.
         message = str(exc_info.value)
-        assert (
-            "privacy" in message.lower()
-            or "partial" in message.lower()
-            or "parent" in message.lower()
-            or "direct" in message.lower()
-        ), f"Expected a privacy-related error, got: {message}"
+        assert "Direct invocation is not permitted" in message, (
+            f"Expected the PrivacyViolation message 'Direct invocation is not "
+            f"permitted', got: {message}"
+        )
+
+    def test_default_guards_loose_acceptance(
+        self,
+        authentication,
+        algorithm_image_name,
+        test_configurations,
+        test_methods,
+    ):
+        """
+        FR-B6: at least one algorithm run under default guards (k=5) in the
+        real network, with loose acceptance (coef within 0.1 of the split
+        reference, converged true).
+
+        This test is skipped when the node config has
+        ``COXPH_MIN_RISK_SET_CHANGE=1`` (the exactness configuration). The
+        k=5 privacy property is verified in the unit suite
+        (``TestDefaultGuardsPrivacyProperty``).
+        """
+        import yaml
+
+        config_path = (
+            Path(__file__).parent.parent
+            / "data"
+            / "additional_vantage6_node_config.yaml"
+        )
+        with open(config_path) as f:
+            node_config = yaml.safe_load(f)
+        env = node_config.get("algorithm_env", {})
+        if str(env.get("COXPH_MIN_RISK_SET_CHANGE", "5")) == "1":
+            pytest.skip(
+                "Node config has COXPH_MIN_RISK_SET_CHANGE=1 (exactness mode); "
+                "the default k=5 path is covered by unit tests "
+                "(TestDefaultGuardsPrivacyProperty)."
+            )
+
+        client = authentication
+        config = test_configurations["standard_dataset"]
+        method_config = test_methods["central"]
+        kwargs = method_config["basic"].copy()
+        kwargs["time_col"] = config["time_col"]
+        kwargs["outcome_col"] = config["outcome_col"]
+        kwargs["expl_vars"] = config["expl_vars"]
+
+        task = client.task.create(
+            collaboration=1,
+            organizations=[1],
+            name="Test default guards — standard_dataset",
+            image=algorithm_image_name,
+            description="Integration test with default guards (k=5).",
+            input_={"method": "central", "kwargs": kwargs},
+            databases=[{"label": config["database_label"]}],
+        )
+
+        result = extract_coxph_result(client, task)
+        assert result["converged"] is True
+        assert result["model"] is not None
+
+        # Loose acceptance: coef within 0.1 of the split reference
+        determine_model_acceptance(result, config["database_label"], kwargs)
 
 
 def extract_coxph_result(client, task) -> Dict[str, Any]:
@@ -411,6 +471,8 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
                     raise CollectResultsError(error_message)
                 elif "PrivacyThresholdViolation" in error_class_line:
                     raise PrivacyThresholdViolation(error_message)
+                elif "PrivacyViolation" in error_class_line:
+                    raise PrivacyViolation(error_message)
                 else:
                     raise AlgorithmError(
                         f"Unknown error type in log: {error_class_line}"
