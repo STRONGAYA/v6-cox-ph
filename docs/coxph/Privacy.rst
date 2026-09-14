@@ -96,8 +96,11 @@ Data sharing
 Each data station shares, with the central aggregator only:
 
 - the unique event times and their frequencies (``get_unique_event_times``);
-- the sum of each explanatory variable over the event cases
-  (``compute_summed_z``);
+- the sum of each explanatory variable over the event cases, along with
+  per-time event counts computed from the same NaN-dropped, censored
+  DataFrame (``compute_summed_z``). The event counts are used by the
+  aggregator to build the event-time grid that is consistent with ``z_sum``
+  and the risk sets;
 - per event time ``t``, the risk-set sums ``S0(t) = sum exp(beta . X)``,
   ``S1(t) = sum X * exp(beta . X)`` and ``S2(t) = sum X X^T exp(beta . X)``
   (``perform_iteration``).
