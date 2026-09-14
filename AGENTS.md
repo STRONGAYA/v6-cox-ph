@@ -78,8 +78,10 @@ Lint and format (mirrors ``.github/workflows/test-suite.yml``)::
 
     black --check --target-version py310 v6-cox-ph/ tests/
     flake8 v6-cox-ph/ tests/ --max-line-length=120 --extend-ignore=E203,W503
-    find v6-cox-ph/ -name "*.py" ! -name "__init__.py" \
+    ln -s v6-cox-ph v6_cox_ph
+    find v6_cox_ph/ -name "*.py" ! -name "__init__.py" \
       -exec mypy {} --ignore-missing-imports --follow-imports=silent \;
+    rm v6_cox_ph
 
 Build the Docker image::
 

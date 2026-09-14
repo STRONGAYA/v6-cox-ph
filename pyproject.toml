@@ -9,7 +9,7 @@ description = "Federated Cox Proportional Hazards algorithm for vantage6"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "vantage6-algorithm-tools==4.15",
+    "vantage6-algorithm-tools>=4.14,<4.16",
     "pandas>=2.2.0",
     "numpy",
     "scipy",
@@ -48,3 +48,7 @@ markers = [
     "vantage6: Tests that require Vantage6 infrastructure",
     "docker: Tests that require Docker",
 ]
+
+[tool.mypy]
+ignore_missing_imports = true
+follow_imports = "silent"

@@ -71,7 +71,10 @@ jobs:
 
       - name: Run MyPy type checker
         run: |
-          find v6-cox-ph/ -name "*.py" ! -name "__init__.py" -exec mypy {} --ignore-missing-imports --follow-imports=silent \;
+          ln -s v6-cox-ph v6_cox_ph
+          find v6_cox_ph/ -name "*.py" ! -name "__init__.py" \
+            -exec mypy {} --ignore-missing-imports --follow-imports=silent \;
+          rm v6_cox_ph
 
   security:
     runs-on: ubuntu-latest
