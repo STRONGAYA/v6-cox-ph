@@ -348,12 +348,10 @@ class TestCoxPHAlgorithmIntegration:
             databases=[{"label": "coxph_test_data_1"}],
         )
 
-        with pytest.raises(
-            (AlgorithmError, CollectResultsError, PrivacyViolation)
-        ) as exc_info:
+        with pytest.raises(PrivacyViolation) as exc_info:
             extract_coxph_result(client, task)
 
-        # The error must be a PrivacyViolation with the exact message.
+        # The error must carry the exact privacy message.
         message = str(exc_info.value)
         assert "Direct invocation is not permitted" in message, (
             f"Expected the PrivacyViolation message 'Direct invocation is not "
@@ -368,31 +366,16 @@ class TestCoxPHAlgorithmIntegration:
         test_methods,
     ):
         """
-        FR-B6: at least one algorithm run under default guards (k=5) in the
-        real network, with loose acceptance (coef within 0.1 of the split
-        reference, converged true).
+        FR-B6: at least one algorithm run in the real network with loose
+        acceptance (coef within 0.1 of the split reference, converged true).
 
-        This test is skipped when the node config has
-        ``COXPH_MIN_RISK_SET_CHANGE=1`` (the exactness configuration). The
-        k=5 privacy property is verified in the unit suite
-        (``TestDefaultGuardsPrivacyProperty``).
+        This test runs with whatever ``COXPH_MIN_RISK_SET_CHANGE`` the node
+        config specifies (k=1 for exactness or k=5 for default guards).
+        The k=5 privacy property is verified in the unit suite
+        (``TestDefaultGuardsPrivacyProperty``). The loose 0.1 tolerance
+        accommodates both k values on the small test data.
         """
-        import yaml
-
-        config_path = (
-            Path(__file__).parent.parent
-            / "data"
-            / "additional_vantage6_node_config.yaml"
-        )
-        with open(config_path) as f:
-            node_config = yaml.safe_load(f)
-        env = node_config.get("algorithm_env", {})
-        if str(env.get("COXPH_MIN_RISK_SET_CHANGE", "5")) == "1":
-            pytest.skip(
-                "Node config has COXPH_MIN_RISK_SET_CHANGE=1 (exactness mode); "
-                "the default k=5 path is covered by unit tests "
-                "(TestDefaultGuardsPrivacyProperty)."
-            )
+        from lifelines import CoxPHFitter
 
         client = authentication
         config = test_configurations["standard_dataset"]
@@ -405,9 +388,9 @@ class TestCoxPHAlgorithmIntegration:
         task = client.task.create(
             collaboration=1,
             organizations=[1],
-            name="Test default guards — standard_dataset",
+            name="Test loose acceptance — standard_dataset",
             image=algorithm_image_name,
-            description="Integration test with default guards (k=5).",
+            description="Integration test with loose acceptance.",
             input_={"method": "central", "kwargs": kwargs},
             databases=[{"label": config["database_label"]}],
         )
@@ -416,8 +399,42 @@ class TestCoxPHAlgorithmIntegration:
         assert result["converged"] is True
         assert result["model"] is not None
 
-        # Loose acceptance: coef within 0.1 of the split reference
-        determine_model_acceptance(result, config["database_label"], kwargs)
+        # Build the split reference (same row slices as the demo network)
+        repo_root = Path(__file__).parent.parent.parent
+        dataset_file = repo_root / "tests" / "data" / f"{config['database_label']}.csv"
+        df = pd.read_csv(dataset_file)
+        n_rows = len(df)
+        included_orgs = result["included_organizations"]
+        pooled_parts = []
+        for org_id in included_orgs:
+            node_idx = org_id - 1
+            start = node_idx * n_rows // 3
+            end = (node_idx + 1) * n_rows // 3
+            pooled_parts.append(df.iloc[start:end])
+        central_df = pd.concat(pooled_parts, ignore_index=True)
+        central_df = central_df[
+            [kwargs["time_col"], kwargs["outcome_col"]] + kwargs["expl_vars"]
+        ].copy()
+        central_df[kwargs["outcome_col"]] = central_df[kwargs["outcome_col"]].astype(
+            bool
+        )
+
+        cph = CoxPHFitter()
+        cph.fit(
+            central_df,
+            duration_col=kwargs["time_col"],
+            event_col=kwargs["outcome_col"],
+        )
+
+        # Loose acceptance: coef within 0.1 of the reference
+        fed_df = pd.read_json(StringIO(result["model"]))
+        for var in kwargs["expl_vars"]:
+            fed_coef = fed_df.loc[var, "Coef"]
+            ref_coef = cph.params_[var]
+            assert abs(fed_coef - ref_coef) <= 0.1, (
+                f"Coefficient mismatch for {var}: "
+                f"federated={fed_coef}, reference={ref_coef}"
+            )
 
 
 def extract_coxph_result(client, task) -> Dict[str, Any]:
