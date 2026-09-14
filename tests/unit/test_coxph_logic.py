@@ -20,7 +20,6 @@ from coxph_logic import (  # noqa: E402
     compute_derivatives,
     compute_model_results,
     format_results_dataframe,
-    update_beta,
 )
 
 
@@ -120,30 +119,6 @@ class TestComputeDerivatives:
         # Should still produce valid results (just skipping the first entry)
         assert np.all(np.isfinite(primary))
         assert np.all(np.isfinite(secondary))
-
-
-@pytest.mark.unit
-class TestUpdateBeta:
-    """Tests for the update_beta function."""
-
-    def test_update_beta_returns_beta_and_delta(self):
-        """Test that update_beta returns updated beta and delta."""
-        beta = np.array([0.1, 0.2])
-        primary = np.array([0.01, 0.02])
-        secondary = np.array([[-1.0, 0.0], [0.0, -1.0]])
-        new_beta, delta = update_beta(beta, primary, secondary)
-        assert isinstance(new_beta, np.ndarray)
-        assert isinstance(delta, float)
-        assert new_beta.shape == (2,)
-
-    def test_update_beta_zero_gradient(self):
-        """Test that zero gradient produces no change."""
-        beta = np.array([0.5, -0.3])
-        primary = np.array([0.0, 0.0])
-        secondary = np.array([[-1.0, 0.0], [0.0, -1.0]])
-        new_beta, delta = update_beta(beta, primary, secondary)
-        assert delta == 0.0
-        np.testing.assert_array_almost_equal(new_beta, beta)
 
 
 @pytest.mark.unit

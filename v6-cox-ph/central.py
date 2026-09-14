@@ -6,7 +6,6 @@ The results in a return statement are sent to the vantage6 server (after
 encryption if that is enabled).
 """
 
-import math
 from typing import Optional
 
 import numpy as np
@@ -14,7 +13,8 @@ import pandas as pd
 from scipy.linalg import solve
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
-from vantage6.algorithm.tools.exceptions import UserInputError
+from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
+from vantage6.algorithm.tools.util import error, info, warn
 from vantage6_strongaya_general.miscellaneous import (
     collect_organisation_ids,
     safe_log,
@@ -151,7 +151,19 @@ def central(
             safe_log(
                 "warning", "No organisations meet the minimal sample size threshold."
             )
-            return {"excluded_organizations": excluded_ids, "table": np.nan}
+            return {
+                "included_organizations": [],
+                "excluded_organizations": excluded_ids,
+                "model": None,
+                "overall_p_value": None,
+                "aic": None,
+                "degrees_of_freedom": n_covs,
+                "warnings": [
+                    "No organisations meet the minimal sample size threshold."
+                ],
+                "converged": False,
+                "n_iterations": 0,
+            }
 
     aggregated_time_events = pd.concat(unique_time_events)
     aggregated_time_events = aggregated_time_events.groupby(
@@ -184,7 +196,8 @@ def central(
     safe_log("info", "Results obtained!")
 
     z_sum = None
-    for output in results:
+    for i, output in enumerate(results):
+        _validate_zsum_result(output, expl_vars, org_id=ids[i] if i < len(ids) else i)
         if z_sum is None:
             z_sum = pd.Series(output["sum"])
         else:
@@ -234,7 +247,9 @@ def central(
         summed_agg2 = np.zeros((n_times, n_covs))
         summed_agg3 = np.zeros((n_times, n_covs, n_covs))
 
-        for output in results:
+        for i, output in enumerate(results):
+            org_id = ids[i] if i < len(ids) else i
+            _validate_iteration_result(output, n_times, n_covs, expl_vars, org_id)
             summed_agg1 += np.array(output["agg1"])
             summed_agg2 += np.array(pd.DataFrame.from_dict(output["agg2"]))
             summed_agg3 += np.array([np.array(lst) for lst in output["agg3"]])
@@ -247,16 +262,26 @@ def central(
             z_sum,
         )
 
-        step = solve(secondary_derivative, primary_derivative)
+        try:
+            step = solve(secondary_derivative, primary_derivative)
+        except np.linalg.LinAlgError as e:
+            safe_log("warning", f"Hessian is singular: {e}")
+            break
+
         delta = float(np.max(np.abs(step)))
 
-        if math.isnan(delta):
-            safe_log("warning", "Delta has turned into a NaN")
+        if not np.isfinite(delta):
+            safe_log("warning", "Newton step is not finite")
             break
 
         if delta <= 0.000001:
             safe_log("info", "Betas have settled! Finished iterating!")
             converged = True
+            break
+
+        if epoch == epochs - 1:
+            # FR-A1: do NOT apply the last step so the reported beta,
+            # Hessian and summed_agg1 stay consistent.
             break
 
         beta = beta - step
@@ -265,8 +290,9 @@ def central(
     if not converged:
         safe_log(
             "warning",
-            f"Newton-Raphson did not converge in {epochs} iterations; "
-            f"SE/p-values may be unreliable",
+            f"Newton-Raphson did not converge in {n_iterations} iterations; "
+            f"SE/p-values may be unreliable; statistics are reported at the "
+            f"last evaluated beta",
         )
 
     # Compute final model results — beta, secondary_derivative and
@@ -287,7 +313,7 @@ def central(
     return {
         "included_organizations": ids,
         "excluded_organizations": excluded_ids,
-        "model": results_df.to_json(),
+        "model": results_df.to_json(double_precision=15),
         "overall_p_value": model["overall_p_value"],
         "aic": model["aic"],
         "degrees_of_freedom": model["n_params"],
@@ -295,3 +321,72 @@ def central(
         "converged": converged,
         "n_iterations": n_iterations,
     }
+
+
+def _validate_iteration_result(
+    output: dict, n_times: int, n_covs: int, expl_vars: list, org_id: int
+) -> None:
+    """Validate a ``perform_iteration`` sub-task result (FR-A3).
+
+    Raises ``AlgorithmError`` naming the organisation on any structural or
+    numerical problem.
+    """
+    if not isinstance(output, dict):
+        raise AlgorithmError(
+            f"Organisation {org_id}: perform_iteration returned "
+            f"{type(output).__name__}, expected a dict"
+        )
+    for key in ("agg1", "agg2", "agg3"):
+        if key not in output:
+            raise AlgorithmError(
+                f"Organisation {org_id}: perform_iteration result missing "
+                f"key '{key}'"
+            )
+    agg1 = np.asarray(output["agg1"], dtype=float)
+    if agg1.ndim != 1 or len(agg1) != n_times:
+        raise AlgorithmError(
+            f"Organisation {org_id}: agg1 has length {len(agg1)}, "
+            f"expected {n_times}"
+        )
+    if not np.all(np.isfinite(agg1)):
+        raise AlgorithmError(f"Organisation {org_id}: agg1 contains non-finite values")
+    agg2_df = pd.DataFrame.from_dict(output["agg2"])
+    if list(agg2_df.columns) != list(expl_vars):
+        raise AlgorithmError(
+            f"Organisation {org_id}: agg2 columns {list(agg2_df.columns)} "
+            f"do not match expl_vars {list(expl_vars)}"
+        )
+    if agg2_df.shape[0] != n_times:
+        raise AlgorithmError(
+            f"Organisation {org_id}: agg2 has {agg2_df.shape[0]} rows, "
+            f"expected {n_times}"
+        )
+    agg3 = np.array([np.array(lst) for lst in output["agg3"]])
+    if agg3.shape != (n_times, n_covs, n_covs):
+        raise AlgorithmError(
+            f"Organisation {org_id}: agg3 has shape {agg3.shape}, "
+            f"expected ({n_times}, {n_covs}, {n_covs})"
+        )
+
+
+def _validate_zsum_result(output: dict, expl_vars: list, org_id: int = None) -> None:
+    """Validate a ``compute_summed_z`` sub-task result (FR-A3).
+
+    Raises ``AlgorithmError`` if the result is not a dict with a ``sum`` key
+    whose entries match ``expl_vars``.
+    """
+    if not isinstance(output, dict) or "sum" not in output:
+        raise AlgorithmError(
+            f"Organisation {org_id}: compute_summed_z result missing 'sum' key"
+        )
+    sum_dict = output["sum"]
+    if not isinstance(sum_dict, dict):
+        raise AlgorithmError(
+            f"Organisation {org_id}: compute_summed_z 'sum' is not a dict"
+        )
+    missing = [v for v in expl_vars if v not in sum_dict]
+    if missing:
+        raise AlgorithmError(
+            f"Organisation {org_id}: compute_summed_z 'sum' missing "
+            f"variables {missing}"
+        )

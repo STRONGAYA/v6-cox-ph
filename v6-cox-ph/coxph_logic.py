@@ -7,7 +7,6 @@ separated from the orchestration logic in central.py and partial.py.
 
 import numpy as np
 import pandas as pd
-from scipy.linalg import solve
 from scipy.stats import chi2, norm
 
 from vantage6_strongaya_general.miscellaneous import safe_log
@@ -198,13 +197,13 @@ def compute_model_results(
         safe_log("warning", f"Unexpected error computing AIC: {e}")
         aic = None
 
-    # Results data
+    # Results data — full precision (FR-A4); rounding is a client concern.
     results_data = {
-        "Coef": np.around(beta, 5),
-        "Exp(coef)": np.around(np.exp(beta), 5),
-        "SE": np.around(serrors, 5),
-        "lower_CI": np.around(np.exp(beta - 1.96 * serrors), 5),
-        "upper_CI": np.around(np.exp(beta + 1.96 * serrors), 5),
+        "Coef": beta,
+        "Exp(coef)": np.exp(beta),
+        "SE": serrors,
+        "lower_CI": np.exp(beta - 1.96 * serrors),
+        "upper_CI": np.exp(beta + 1.96 * serrors),
         "Z": zvalues,
         "p-value": pvalues,
     }
@@ -233,7 +232,8 @@ def compute_model_results(
         n_iter_str = str(n_iterations) if n_iterations is not None else "unknown"
         msg = (
             f"Newton-Raphson did not converge in {n_iter_str} iterations; "
-            f"SE/p-values may be unreliable"
+            f"SE/p-values may be unreliable; statistics are reported at the "
+            f"last evaluated beta"
         )
         warnings.append(msg)
 
@@ -272,31 +272,3 @@ def format_results_dataframe(
     results["Var"] = expl_vars
     results = results.set_index("Var")
     return results
-
-
-def update_beta(
-    beta: np.ndarray,
-    primary_derivative: np.ndarray,
-    secondary_derivative: np.ndarray,
-) -> Tuple[np.ndarray, float]:
-    """
-    Perform one Newton-Raphson update step.
-
-    Parameters
-    ----------
-    beta : np.ndarray
-        Current beta coefficients.
-    primary_derivative : np.ndarray
-        First derivative of the partial log-likelihood.
-    secondary_derivative : np.ndarray
-        Second derivative (Hessian) of the partial log-likelihood.
-
-    Returns
-    -------
-    Tuple[np.ndarray, float]
-        Updated beta coefficients and the delta (max absolute change).
-    """
-    beta_old = np.array(beta)
-    beta = beta_old - solve(secondary_derivative, primary_derivative)
-    delta = float(max(abs(beta - beta_old)))
-    return beta, delta
