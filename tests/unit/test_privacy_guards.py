@@ -30,11 +30,13 @@ from privacy_guards import (  # noqa: E402
     PrivacySettings,
     bin_times,
     check_sample_size,
+    drop_incomplete_rows,
     ensure_spawned_by_central,
     guarded_risk_set_masks,
     load_privacy_settings,
     prepare_time_column,
     tail_cutoff,
+    validate_expl_vars,
     validate_iteration_input,
 )
 
@@ -437,3 +439,56 @@ class TestGuardedRiskSetMasks:
         # t=1: 10 at risk. t=11: 0 at risk (removed 10 >= 5)
         assert masks[0].sum() == 10
         assert masks[1].sum() == 0
+
+
+@pytest.mark.unit
+class TestValidateExplVars:
+    """Tests for validate_expl_vars (FR-B3)."""
+
+    def test_valid_vars(self):
+        df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50], "tx": [1]})
+        validate_expl_vars(df, ["age", "tx"], "time", "event")
+
+    def test_missing_column(self):
+        df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
+        with pytest.raises(UserInputError, match="not found"):
+            validate_expl_vars(df, ["age", "missing"], "time", "event")
+
+    def test_overlaps_time_col(self):
+        df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
+        with pytest.raises(UserInputError, match="must not equal time_col"):
+            validate_expl_vars(df, ["time"], "time", "event")
+
+    def test_overlaps_outcome_col(self):
+        df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
+        with pytest.raises(UserInputError, match="must not equal outcome_col"):
+            validate_expl_vars(df, ["event"], "time", "event")
+
+    def test_non_numeric_column(self):
+        df = pd.DataFrame({"time": [1.0], "event": [1], "name": ["alice"]})
+        with pytest.raises(UserInputError, match="must be numeric"):
+            validate_expl_vars(df, ["name"], "time", "event")
+
+
+@pytest.mark.unit
+class TestDropIncompleteRows:
+    """Tests for drop_incomplete_rows (FR-B4)."""
+
+    def test_drops_nan_rows(self):
+        df = pd.DataFrame(
+            {"time": [1.0, np.nan, 3.0], "event": [1, 1, 0], "age": [50, 60, np.nan]}
+        )
+        out = drop_incomplete_rows(df, ["time", "event", "age"])
+        assert len(out) == 1
+        assert out.index.tolist() == [0]
+
+    def test_does_not_modify_input(self):
+        df = pd.DataFrame({"time": [1.0, np.nan], "event": [1, 1]})
+        original = df.copy()
+        drop_incomplete_rows(df, ["time", "event"])
+        pd.testing.assert_frame_equal(df, original)
+
+    def test_nonexistent_col_ignored(self):
+        df = pd.DataFrame({"time": [1.0, 2.0], "event": [1, 0]})
+        out = drop_incomplete_rows(df, ["time", "missing"])
+        assert len(out) == 2

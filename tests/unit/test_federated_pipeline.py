@@ -350,6 +350,37 @@ class TestSubTaskValidation:
             )
 
 
+@pytest.mark.unit
+class TestNaNPolicy:
+    """NaN rows are dropped identically in all partials (FR-B4)."""
+
+    def test_nan_rows_dropped_consistently(self, monkeypatch, guards_off):
+        """A NaN in age on node 1 is dropped in both compute_summed_z and
+        perform_iteration; the federated result matches lifelines on the
+        NaN-free pooled data."""
+        df1, df2, _ = _load_datasets()
+        df1 = df1.copy()
+        # Introduce a NaN in the first row's age column
+        df1.loc[0, "age"] = np.nan
+
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # Build the NaN-free reference
+        df1_clean = df1.dropna(subset=["time", "event", "age", "treatment"])
+        ref = _lifelines_reference(pd.concat([df1_clean, df2]), EXPL_VARS)
+        model = pd.read_json(StringIO(result["model"]))
+        for var in EXPL_VARS:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
+                f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, "
+                f"ref={ref['coef'][var]}"
+            )
+
+
 def _per_node_agg1_at_beta_zero(datasets, organization_ids):
     """Dispatch perform_iteration at beta=0 and return per-node agg1 lists.
 

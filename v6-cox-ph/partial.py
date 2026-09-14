@@ -21,10 +21,12 @@ from vantage6_strongaya_general.privacy_measures import (
 from .miscellaneous import check_data_quality
 from .privacy_guards import (
     check_sample_size,
+    drop_incomplete_rows,
     ensure_spawned_by_central,
     guarded_risk_set_masks,
     load_privacy_settings,
     prepare_time_column,
+    validate_expl_vars,
     validate_iteration_input,
 )
 
@@ -79,6 +81,8 @@ def get_unique_event_times(
     if quality["has_negative_time"]:
         safe_log("warning", "Negative time values detected in the data")
 
+    df = drop_incomplete_rows(df, [time_col, outcome_col])
+
     if not check_sample_size(df, outcome_col, settings):
         safe_log(
             "warning",
@@ -132,6 +136,9 @@ def compute_summed_z(
 
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
+
+    validate_expl_vars(df, expl_vars, time_col, outcome_col)
+    df = drop_incomplete_rows(df, [time_col, outcome_col] + expl_vars)
 
     # STRONG AYA: determine variables to analyse and apply privacy guards.
     # time_col is included because tail censoring needs it.
@@ -190,6 +197,9 @@ def perform_iteration(
 
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
+
+    validate_expl_vars(df, expl_vars, time_col, outcome_col=None)
+    df = drop_incomplete_rows(df, [time_col] + expl_vars)
 
     # STRONG AYA: determine variables to analyse and apply privacy guards
     variables_to_analyse = [time_col] + expl_vars
