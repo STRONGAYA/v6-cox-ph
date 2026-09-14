@@ -365,7 +365,9 @@ def _validate_iteration_result(
         )
 
 
-def _validate_zsum_result(output: dict, expl_vars: list, org_id: int = None) -> None:
+def _validate_zsum_result(
+    output: dict, expl_vars: list, org_id: int | None = None
+) -> None:
     """Validate a ``compute_summed_z`` sub-task result (FR-A3).
 
     Raises ``AlgorithmError`` if the result is not a dict with a ``sum`` key
