@@ -301,6 +301,11 @@ class TestSingularHessian:
         for var in collinear_vars:
             assert np.isnan(model.loc[var, "SE"]), f"SE for {var} should be NaN"
         assert result["model"] is not None
+        # The singular cause must appear in the warnings list
+        warning_text = " ".join(result["warnings"])
+        assert (
+            "singular" in warning_text.lower()
+        ), f"Expected 'singular' in warnings, got: {warning_text}"
 
 
 @pytest.mark.unit
@@ -338,7 +343,7 @@ class TestSubTaskValidation:
 
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="missing 'sum'"):
-            central._validate_zsum_result({}, ["age", "treatment"], org_id=1)
+            central._validate_zsum_result({}, ["age", "treatment"], "time", org_id=1)
 
     def test_validate_zsum_result_missing_variable(self):
         from importlib import import_module
@@ -346,7 +351,22 @@ class TestSubTaskValidation:
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="missing variables"):
             central._validate_zsum_result(
-                {"sum": {"age": 10.0}}, ["age", "treatment"], org_id=1
+                {"sum": {"age": 10.0}, "times": {"time": [1.0], "freq": [1]}},
+                ["age", "treatment"],
+                "time",
+                org_id=1,
+            )
+
+    def test_validate_zsum_result_missing_times(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="missing 'times'"):
+            central._validate_zsum_result(
+                {"sum": {"age": 10.0, "treatment": 5.0}},
+                ["age", "treatment"],
+                "time",
+                org_id=1,
             )
 
 
