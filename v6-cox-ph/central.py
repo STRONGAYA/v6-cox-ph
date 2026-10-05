@@ -123,6 +123,7 @@ def central(
     z_sum = None
     sum_squares = None
     time_event_dfs = []
+    node_privacy_settings = []
     for output in results:
         org_id = _result_org_id(output, ids)
         _validate_zsum_result(output, expl_vars, time_col, org_id=org_id)
@@ -134,6 +135,7 @@ def central(
             sum_squares += pd.Series(output["sum_squares"])
         # Collect per-time event counts (NaN-consistent with z_sum)
         time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
+        node_privacy_settings.append(output["privacy_settings"])
 
     # Build aggregated_time_events from compute_summed_z results: it drops
     # NaN in time, outcome and expl_vars, so its event counts are consistent
@@ -152,6 +154,27 @@ def central(
     n_events = float(aggregated_time_events["freq"].sum())
     centre, scale = pooled_standardisation(z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events)
     info("Dispatching standardised covariates (centre and scale to 2 significant figures).")
+
+    # Aggregate summary of the guards that were active on the nodes (D3):
+    # configuration, not data; no per-node breakdown. A warning is added
+    # when any guard was active, because the estimates are then approximate.
+    max_min_risk_set_change = max(int(s.get("min_risk_set_change") or 1) for s in node_privacy_settings)
+    time_binning = any(s.get("time_bin_width") for s in node_privacy_settings)
+    guards_active = max_min_risk_set_change > 1 or time_binning
+    privacy_guards = {
+        "active": guards_active,
+        "max_min_risk_set_change": max_min_risk_set_change,
+        "time_binning": time_binning,
+    }
+    guards_warning = None
+    if guards_active:
+        guards_warning = (
+            "Privacy guards were active on one or more nodes "
+            f"(maximum minimum risk-set change k={max_min_risk_set_change}, "
+            f"time binning {'on' if time_binning else 'off'}); "
+            "the estimates are approximate."
+        )
+        warn(guards_warning)
 
     # The gradient in the standardised space needs the event-case covariate
     # sums in that space as well.
@@ -275,6 +298,10 @@ def central(
         beta = beta - step
 
     n_iterations = epoch + 1
+    if guards_warning is not None:
+        central_warnings = [guards_warning]
+    else:
+        central_warnings = []
     if accepted is None:
         raise AlgorithmError("The optimiser never accepted an evaluation; no model can be reported.")
     beta = accepted["beta"]
@@ -283,7 +310,6 @@ def central(
     log_likelihood = accepted["log_likelihood"]
     if log_likelihood_null is None:
         log_likelihood_null = log_likelihood
-    central_warnings = []
     if not converged:
         msg = (
             f"Newton-Raphson did not converge in {n_iterations} iterations; "
@@ -345,6 +371,7 @@ def central(
         "algorithm_version": _algorithm_version(),
         "baseline_cumulative_hazard": baseline_cumulative_hazard,
         "survival_curves": survival_curves,
+        "privacy_guards": privacy_guards,
     }
 
 

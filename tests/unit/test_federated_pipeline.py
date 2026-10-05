@@ -1032,3 +1032,139 @@ class TestSurvivalCurves:
                         f"node {node_idx}: risk set {float(value)} < k={k} at grid index {i} "
                         f"(time {grid[i] if i < len(grid) else '?'})"
                     )
+
+
+@pytest.mark.unit
+class TestPrivacyGuardsSummary:
+    """The result carries an aggregate summary of the active guards (D3)."""
+
+    def test_default_guards_summary(self, monkeypatch):
+        """Default guards: active, k=5, no binning, warning appended."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        summary = result["privacy_guards"]
+        assert set(summary.keys()) == {"active", "max_min_risk_set_change", "time_binning"}
+        assert summary["active"] is True
+        assert summary["max_min_risk_set_change"] == 5
+        assert summary["time_binning"] is False
+        assert any("guards were active" in w for w in result["warnings"])
+
+    def test_guards_off_summary(self, guards_off):
+        """Guards disabled: inactive, no warning."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        summary = result["privacy_guards"]
+        assert summary["active"] is False
+        assert summary["max_min_risk_set_change"] == 1
+        assert summary["time_binning"] is False
+        assert not any("guards were active" in w for w in result["warnings"])
+
+    def test_binning_summary(self, monkeypatch):
+        """Time binning shows up as active."""
+        monkeypatch.setenv("COXPH_TIME_BIN_WIDTH", "10")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        summary = result["privacy_guards"]
+        assert summary["active"] is True
+        assert summary["time_binning"] is True
+        assert summary["max_min_risk_set_change"] == 1
+
+
+@pytest.mark.unit
+class TestGuardBiasRegression:
+    """Fixed-seed regression bound on the guards' coefficient bias.
+
+    The bound is derived from the bias study (scripts/bias_study.py): the
+    smoke run (2 repetitions, nodes of 200 and 1000 rows, k in {1, 5, 10},
+    binning on/off) observed a maximum deviation from the k = 1 fit of
+    ~0.04; the bound below carries headroom for the full 50-repetition
+    study to re-derive it (do not loosen it without re-running the study).
+    """
+
+    BETA_TRUE = np.array([0.5, -0.3])
+    BOUND = 0.05
+
+    def _simulate(self, seed: int, n_rows: int = 200) -> list:
+        rng = np.random.default_rng(seed)
+        datasets = []
+        for _ in range(3):
+            X = rng.normal(size=(n_rows, 2))
+            eta = X @ self.BETA_TRUE
+            hazard = 0.02 * np.exp(eta)
+            event_time = rng.exponential(1.0 / hazard)
+            censor_time = rng.uniform(0.0, 60.0)
+            datasets.append(
+                pd.DataFrame(
+                    {
+                        "time": np.minimum(event_time, censor_time),
+                        "event": (event_time <= censor_time).astype(int),
+                        "x1": X[:, 0],
+                        "x2": X[:, 1],
+                    }
+                )
+            )
+        return datasets
+
+    def _run(self, datasets):
+        client = MockAlgorithmClient(
+            datasets=[[{"database": df, "db_type": "csv"}] for df in datasets],
+            module="v6-cox-ph",
+            organization_ids=[1, 2, 3],
+        )
+        task = client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": ["x1", "x2"],
+                    "organization_ids": [1, 2, 3],
+                },
+            },
+            organizations=[1],
+        )
+        return client.wait_for_results(task_id=task["id"])[0]
+
+    def test_default_guards_stay_within_bound(self, monkeypatch):
+        """With default guards the coefficients stay within the study bound."""
+        datasets = self._simulate(20261005)
+        covs = ["x1", "x2"]
+
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        unguarded = self._run(datasets)
+        assert unguarded["converged"] is True
+
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        guarded = self._run(datasets)
+        assert guarded["converged"] is True
+        assert guarded["privacy_guards"]["active"] is True
+
+        unguarded_model = pd.DataFrame(unguarded["model"]).T
+        guarded_model = pd.DataFrame(guarded["model"]).T
+        for var in covs:
+            deviation = abs(guarded_model.loc[var, "Coef"] - unguarded_model.loc[var, "Coef"])
+            assert (
+                deviation <= self.BOUND
+            ), f"Guard bias for {var} is {deviation:.4f}, above the regression bound {self.BOUND}"

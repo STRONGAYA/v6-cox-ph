@@ -69,6 +69,16 @@ test. When the log-likelihood decreases after a Newton step the optimiser
 halves the step and retries; the reported statistics always belong to the
 last accepted evaluation (the iteration budget is 20 round-trips).
 
+Guard-effect summary
+--------------------
+
+The result carries a ``privacy_guards`` object — an aggregate summary of the
+guards that were active on the nodes (configuration, not data; there is no
+per-node breakdown): ``active`` (bool), ``max_min_risk_set_change`` (the
+largest ``k`` any node used) and ``time_binning`` (bool). When any guard was
+active a warning is appended: the estimates are then approximate (see the
+bias study in ``Validation.rst``).
+
 Survival curves
 ----------------
 

@@ -69,6 +69,36 @@ Mask-based (reference)     89.3          716.8 MB
 Vectorised (current)        0.12          28.2 MB
 =========================  ============  =============
 
+Guard bias study
+----------------
+
+``scripts/bias_study.py`` (not collected by pytest) measures how much the
+privacy guards perturb the coefficients: simulated Cox data (known true
+coefficients, three nodes), sizes {200, 1k, 10k} per node, k in {1, 5, 10},
+time binning off/on, 50 repetitions per configuration, parallelised per
+configuration. It reports the mean absolute deviation from the k = 1 fit on
+the same data, the deviation from the true coefficients and the 95 %
+confidence-interval coverage.
+
+Smoke-run results (2 repetitions, sizes 200 and 1000; the table below is
+provisional until the full 50-repetition run is executed with
+``python scripts/bias_study.py --reps 50``)::
+
+    size   k  binning  mean|d vs k=1|  mean|d vs true|  95% CI coverage
+     200   1  off/on            0.000            ~0.07              1.00
+     200   5      off            0.011            0.07              1.00
+     200  10      off            0.025            0.07              1.00
+     200 5/10     on            ~0.04            0.06              1.00
+    1000   5      off            0.002           0.033              ~0.5*
+    1000  10      off            0.005           0.032              ~0.5*
+    1000 5/10     on             0.04           0.027              1.00
+
+  * coverage at 2 repetitions is noise; the full run gives the real rate.
+
+The fixed-seed unit regression ``TestGuardBiasRegression`` bounds the
+default-guards coefficient deviation at 0.05, derived from this study with
+headroom; re-derive the bound after the full run rather than loosening it.
+
 Run the unit suite without Docker::
 
     pytest -m unit
