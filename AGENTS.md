@@ -54,7 +54,9 @@ tests/
   data/                    coxph_test_data_{1,2,3}.csv, node/store configs
   conftest.py              Docker/vantage6 fixtures, markers
 docs/coxph/                Privacy.rst, Validation.rst, Usage.rst, etc.
-.github/workflows/         test-suite.yml (test + lint + security), release.yaml
+.github/workflows/         test-suite.yml (test + lint + security + docker),
+                           security-scan.yml (weekly), release.yaml
+.github/dependabot.yml     pip, Docker and action updates
 ```
 
 ## How the algorithm executes
@@ -223,9 +225,24 @@ deliberately runs glibc and unlocked to test the declared range.
   hatch for a tag that is no longer a branch tip.
 - Update ``docs/coxph`` and ``algorithm_store.json`` whenever a signature or
   output field changes.
-- CI lives in ``.github/workflows``. ``test-suite.yml`` (test, lint,
-  security) runs on pushes to the default branch, on every pull request and
-  on manual dispatch.
+- CI lives in ``.github/workflows`` and runs with ``permissions:
+  contents: read``:
+  - ``test-suite.yml`` (on pushes to the default branch, every pull request
+    and manual dispatch) runs the ``test`` matrix (Python 3.10/3.12 ×
+    vantage6 4.14/4.15), ``lint``, ``security`` (Bandit ``-ll`` and
+    ``pip-audit``; both must be able to fail — a finding is fixed or
+    suppressed with a justified ``# nosec`` comment, never ``|| true``) and
+    a ``docker`` build + import smoke-test job.
+  - ``security-scan.yml`` runs weekly (Mondays): ``pip-audit`` on
+    ``requirements-lock.txt`` (suppressions in ``.pip-audit-ignore``, each
+    with a justification and an expiry date — currently the exact pins
+    ``click``, ``cryptography`` and ``pyjwt`` imposed by
+    ``vantage6-common``), Bandit and Trivy (HIGH/CRITICAL,
+    ``ignore-unfixed``) on the latest released image; failures open a
+    ``security-scan`` issue. Suppressions are never replaced by lowering a
+    severity threshold.
+  - ``.github/dependabot.yml`` keeps pip, Docker (base-image digest) and the
+    pinned action SHAs current; actions are pinned by commit SHA.
 
 ## Do not
 
