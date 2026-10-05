@@ -7,7 +7,7 @@ shared ``prepare_node_data`` step, in this order::
 
     ensure_spawned_by_central -> load_privacy_settings
     -> (validate_expl_vars, where expl_vars are used) -> drop_incomplete_rows
-    -> select_rows (hook) -> check_sample_size
+    -> validate_survival_columns -> select_rows (hook) -> check_sample_size
     -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work)
 
@@ -210,8 +210,8 @@ def prepare_node_data(
 
         ``ensure_spawned_by_central`` -> ``load_privacy_settings``
         -> ``validate_expl_vars`` (when ``expl_vars`` are given)
-        -> ``drop_incomplete_rows`` -> ``select_rows`` (hook)
-        -> ``check_sample_size``
+        -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
+        -> ``select_rows`` (hook) -> ``check_sample_size``
 
     Every partial calls this so that all aggregates central combines come
     from the same row set on each node. The threshold failure behaviour
@@ -255,12 +255,53 @@ def prepare_node_data(
         cols.extend(expl_vars)
     df = drop_incomplete_rows(df, cols)
 
+    validate_survival_columns(df, time_col, outcome_col)
+
     df = select_rows(df)
 
     outcome = outcome_col if need_outcome else None
     threshold_met = check_sample_size(df, outcome, settings)
 
     return df, settings, threshold_met
+
+
+def validate_survival_columns(df: pd.DataFrame, time_col: str, outcome_col: Optional[str]) -> None:
+    """Validate the survival columns on the prepared frame.
+
+    The time column must be numeric, finite and non-negative; the outcome
+    column must be binary (0/1 or boolean). A missing column raises
+    ``UserInputError`` — it is a user-input problem that no fallback may
+    hide. Error messages name columns and dtypes, never data values.
+
+    Raises
+    ------
+    UserInputError
+        On any validation failure.
+    """
+    if time_col not in df.columns:
+        raise UserInputError(f"Time column '{time_col}' not found in data columns.")
+
+    time_values = df[time_col]
+    if not pd.api.types.is_numeric_dtype(time_values):
+        raise UserInputError(f"Time column '{time_col}' must be numeric, got dtype {time_values.dtype}.")
+    if not np.isfinite(time_values.to_numpy(dtype=float)).all():
+        raise UserInputError(f"Time column '{time_col}' contains non-finite values.")
+    if (time_values < 0).any():
+        raise UserInputError(f"Time column '{time_col}' contains negative values.")
+
+    if outcome_col is not None:
+        if outcome_col not in df.columns:
+            raise UserInputError(f"Outcome column '{outcome_col}' not found in data columns.")
+        outcome_values = df[outcome_col]
+        if not (pd.api.types.is_bool_dtype(outcome_values) or pd.api.types.is_numeric_dtype(outcome_values)):
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' must be numeric or boolean, " f"got dtype {outcome_values.dtype}."
+            )
+        if not pd.api.types.is_bool_dtype(outcome_values) and not outcome_values.isin([0, 1]).all():
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' must only contain 0 and 1 "
+                f"(booleans are allowed); recode the data before calling."
+            )
 
 
 def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: PrivacySettings) -> bool:

@@ -14,7 +14,6 @@ from vantage6.algorithm.tools.decorators import algorithm_client, data
 from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
 from vantage6.algorithm.tools.util import info, warn
 
-from .miscellaneous import check_data_quality
 from .privacy_guards import (
     guarded_risk_set_masks,
     prepare_node_data,
@@ -53,19 +52,9 @@ def get_unique_event_times(client: AlgorithmClient, df: pd.DataFrame, time_col: 
 
     df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, [], need_outcome=True)
 
-    # Data-quality flags (missing columns, negative times) are checked on the
-    # prepared frame; the returned marker is the same in both cases.
-    quality = check_data_quality(df, time_col, outcome_col)
-    if not quality["has_time"] or not quality["has_outcome"]:
-        warn(f"Missing required columns: time={quality['has_time']}, " f"outcome={quality['has_outcome']}")
-        return {"N-Threshold not met": client.organization_id}
-
     if not threshold_met:
         warn("Sub-task was not executed because the number of samples " "is too small.")
         return {"N-Threshold not met": client.organization_id}
-
-    if quality["has_negative_time"]:
-        warn("Negative time values detected in the data")
 
     df = prepare_time_column(df, time_col, settings, outcome_col)
 

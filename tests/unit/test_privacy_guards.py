@@ -39,6 +39,7 @@ from privacy_guards import (  # noqa: E402
     tail_cutoff,
     validate_expl_vars,
     validate_iteration_input,
+    validate_survival_columns,
 )
 import privacy_guards  # noqa: E402
 
@@ -317,6 +318,7 @@ class TestPrepareNodeData:
             "load_privacy_settings",
             "validate_expl_vars",
             "drop_incomplete_rows",
+            "validate_survival_columns",
             "select_rows",
             "check_sample_size",
         ]:
@@ -343,6 +345,7 @@ class TestPrepareNodeData:
             "load_privacy_settings",
             "validate_expl_vars",
             "drop_incomplete_rows",
+            "validate_survival_columns",
             "select_rows",
             "check_sample_size",
         ]
@@ -357,6 +360,7 @@ class TestPrepareNodeData:
             "ensure_spawned_by_central",
             "load_privacy_settings",
             "drop_incomplete_rows",
+            "validate_survival_columns",
             "select_rows",
             "check_sample_size",
         ]
@@ -403,6 +407,65 @@ class TestPrepareNodeData:
         df.loc[12, "age"] = np.nan  # row 12 is an event row
         _, _, threshold_met = prepare_node_data(client, df, "time", "event", ["age", "treatment"], need_outcome=True)
         assert threshold_met is False
+
+
+@pytest.mark.unit
+class TestValidateSurvivalColumns:
+    """Tests for validate_survival_columns (input rules, no value echoes)."""
+
+    def _df(self, time=None, event=None):
+        time = [1.0, 2.0, 3.0, 4.0] if time is None else time
+        event = [1, 0, 1, 0] if event is None else event
+        return pd.DataFrame({"time": time, "event": event})
+
+    def test_valid_input_passes(self):
+        validate_survival_columns(self._df(), "time", "event")
+
+    def test_boolean_outcome_passes(self):
+        validate_survival_columns(self._df(event=[True, False, True, False]), "time", "event")
+
+    def test_missing_time_column_raises(self):
+        with pytest.raises(UserInputError, match="Time column 'time' not found"):
+            validate_survival_columns(pd.DataFrame({"event": [1]}), "time", "event")
+
+    def test_missing_outcome_column_raises(self):
+        with pytest.raises(UserInputError, match="Outcome column 'event' not found"):
+            validate_survival_columns(pd.DataFrame({"time": [1.0]}), "time", "event")
+
+    def test_no_outcome_col_skips_outcome_checks(self):
+        df = pd.DataFrame({"time": [1.0, 2.0]})
+        validate_survival_columns(df, "time", None)
+
+    def test_string_time_raises(self):
+        with pytest.raises(UserInputError, match="Time column 'time' must be numeric"):
+            validate_survival_columns(self._df(time=["a", "b", "c", "d"]), "time", "event")
+
+    def test_negative_time_raises(self):
+        with pytest.raises(UserInputError, match="negative"):
+            validate_survival_columns(self._df(time=[1.0, -2.0, 3.0, 4.0]), "time", "event")
+
+    def test_infinite_time_raises(self):
+        with pytest.raises(UserInputError, match="non-finite"):
+            validate_survival_columns(self._df(time=[1.0, np.inf, 3.0, 4.0]), "time", "event")
+
+    def test_outcome_coded_1_2_raises(self):
+        with pytest.raises(UserInputError, match="only contain 0 and 1"):
+            validate_survival_columns(self._df(event=[1, 2, 1, 0]), "time", "event")
+
+    def test_string_outcome_raises(self):
+        with pytest.raises(UserInputError, match="numeric or boolean"):
+            validate_survival_columns(self._df(event=["yes", "no", "yes", "no"]), "time", "event")
+
+    def test_messages_never_echo_values(self):
+        """Error messages name columns and dtypes, never data values."""
+        cases = [
+            (self._df(time=[1.0, -123.456, 3.0, 4.0]), "time", "event", "-123.456"),
+            (self._df(event=[1, 7, 1, 0]), "time", "event", "'7'"),
+        ]
+        for df, time_col, outcome_col, forbidden in cases:
+            with pytest.raises(UserInputError) as exc_info:
+                validate_survival_columns(df, time_col, outcome_col)
+            assert forbidden not in str(exc_info.value)
 
 
 @pytest.mark.unit

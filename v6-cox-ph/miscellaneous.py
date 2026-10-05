@@ -1,14 +1,11 @@
 """
 Miscellaneous utilities for the Cox-PH algorithm.
 
-This module contains:
-- Pydantic models for input validation
-- Helper functions for data quality checks
+This module contains the Pydantic models for input validation.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 from vantage6.algorithm.tools.exceptions import UserInputError
 
@@ -101,46 +98,3 @@ def validate_coxph_input(
         )
     except Exception as e:
         raise UserInputError(f"Invalid Cox-PH input: {e}")
-
-
-def check_data_quality(df: pd.DataFrame, time_col: str, outcome_col: str) -> Dict[str, Any]:
-    """
-    Perform comprehensive data quality checks.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        The data to check.
-    time_col : str
-        Name of the time column.
-    outcome_col : str
-        Name of the outcome column.
-
-    Returns
-    -------
-    Dict[str, Any]
-        Dictionary containing data quality information.
-    """
-    result: Dict[str, Any] = {
-        "has_time": time_col in df.columns,
-        "has_outcome": outcome_col in df.columns,
-        "event_count": 0,
-        "censored_count": 0,
-        "total_count": len(df),
-        "time_range": None,
-        "has_negative_time": False,
-        "outcome_values": [],
-    }
-
-    if result["has_time"]:
-        time_series = df[time_col]
-        result["time_range"] = (float(time_series.min()), float(time_series.max()))
-        result["has_negative_time"] = bool((time_series < 0).any())
-
-    if result["has_outcome"]:
-        outcome_series = df[outcome_col]
-        result["outcome_values"] = outcome_series.unique().tolist()
-        result["event_count"] = int((outcome_series == 1).sum())
-        result["censored_count"] = int((outcome_series == 0).sum())
-
-    return result

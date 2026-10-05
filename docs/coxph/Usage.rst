@@ -14,6 +14,24 @@ The input arguments for the central function consist of:
   the collaboration and you wish to run the algorithm on. When ``None`` all
   organisations are used.
 
+Input rules
+------------
+
+Every node validates its data before sharing anything:
+
+- ``time_col`` must exist and be numeric, finite and non-negative.
+- ``outcome_col`` must exist and be binary: only 0 and 1 (booleans are
+  allowed).
+- Every ``expl_var`` must exist and be numeric (see below), and rows with
+  missing values in any analysed column are dropped before the sample-size
+  threshold is checked.
+
+A column that violates these rules raises ``UserInputError`` and stops the
+whole analysis; there is no silent fallback. Projects whose data uses other
+codings (for example an outcome coded 1/2, or string labels) must recode
+**before** calling the algorithm — recoding belongs in the project layer,
+not in the vanilla algorithm.
+
 Output fields
 -------------
 

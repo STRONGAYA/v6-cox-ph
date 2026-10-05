@@ -176,12 +176,11 @@ deliberately runs glibc and unlocked to test the declared range.
   need_outcome)`` (in ``privacy_guards.py``), which runs the guards in
   order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
   ``validate_expl_vars`` (when ``expl_vars`` are given) →
-  ``drop_incomplete_rows`` → ``select_rows`` (the marked hook for project
-  row selection) → ``check_sample_size``. Do not reorder or skip any of
-  them; the unit tests assert the order. ``validate_iteration_input``
+  ``drop_incomplete_rows`` → ``validate_survival_columns`` →
+  ``select_rows`` (the marked hook for project row selection) →
+  ``check_sample_size``. Do not reorder or skip any of them; the unit
+  tests assert the order. ``validate_iteration_input``
   (``perform_iteration`` only) and ``prepare_time_column`` run afterwards.
-  ``get_unique_event_times`` checks its data-quality flags on the prepared
-  frame.
 - **No new partial** without a sample-size threshold, parent-task guard and
   documentation in ``Privacy.rst``.
 - **Do not log data values or counts**; use ``info``/``warn`` for status

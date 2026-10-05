@@ -1,13 +1,12 @@
 """
 Unit tests for miscellaneous Cox-PH functions.
 
-Tests input validation, data quality checks, and event count checks.
+Tests input validation via the Pydantic model.
 """
 
 import sys
 from pathlib import Path
 
-import pandas as pd
 import pytest
 from vantage6.algorithm.tools.exceptions import UserInputError
 
@@ -16,7 +15,6 @@ algorithm_path = Path(__file__).parent.parent.parent / "v6-cox-ph"
 sys.path.insert(0, str(algorithm_path))
 
 from miscellaneous import (  # noqa: E402
-    check_data_quality,
     validate_coxph_input,
 )
 
@@ -123,59 +121,3 @@ class TestValidateCoxphInput:
         assert validated.time_col == "time"
         assert validated.outcome_col == "event"
         assert validated.expl_vars == ["age"]
-
-
-@pytest.mark.unit
-class TestCheckDataQuality:
-    """Tests for the check_data_quality function."""
-
-    def test_check_data_quality_valid_data(self):
-        """Test data quality checks with valid data."""
-        df = pd.DataFrame(
-            {
-                "time": [5.0, 10.0, 15.0, 20.0],
-                "event": [1, 0, 1, 1],
-                "age": [50, 60, 70, 55],
-            }
-        )
-        result = check_data_quality(df, "time", "event")
-        assert result["has_time"] is True
-        assert result["has_outcome"] is True
-        assert result["event_count"] == 3
-        assert result["censored_count"] == 1
-        assert result["total_count"] == 4
-        assert result["has_negative_time"] is False
-        assert result["time_range"] == (5.0, 20.0)
-
-    def test_check_data_quality_missing_time(self):
-        """Test data quality with missing time column."""
-        df = pd.DataFrame({"event": [1, 0, 1]})
-        result = check_data_quality(df, "time", "event")
-        assert result["has_time"] is False
-        assert result["has_outcome"] is True
-
-    def test_check_data_quality_missing_outcome(self):
-        """Test data quality with missing outcome column."""
-        df = pd.DataFrame({"time": [5.0, 10.0, 15.0]})
-        result = check_data_quality(df, "time", "event")
-        assert result["has_time"] is True
-        assert result["has_outcome"] is False
-
-    def test_check_data_quality_negative_time(self):
-        """Test that negative time values are detected."""
-        df = pd.DataFrame(
-            {
-                "time": [-5.0, 10.0, 15.0],
-                "event": [1, 0, 1],
-            }
-        )
-        result = check_data_quality(df, "time", "event")
-        assert result["has_negative_time"] is True
-
-    def test_check_data_quality_empty_df(self):
-        """Test data quality with an empty DataFrame."""
-        df = pd.DataFrame()
-        result = check_data_quality(df, "time", "event")
-        assert result["has_time"] is False
-        assert result["has_outcome"] is False
-        assert result["total_count"] == 0
