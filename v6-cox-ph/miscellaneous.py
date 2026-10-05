@@ -1,13 +1,30 @@
 """
 Miscellaneous utilities for the Cox-PH algorithm.
 
-This module contains the Pydantic models for input validation.
+This module contains the Pydantic models for the wire contract: user input
+(``CoxPHInput``), the payload central sends to ``perform_iteration``
+(``IterationInput``) and, in a later step, the partial results.
 """
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+import numpy as np
+from pydantic import BaseModel, Field, ValidationInfo, ValidationError, field_validator, model_validator
 from vantage6.algorithm.tools.exceptions import UserInputError
+
+
+def format_validation_error(exc: ValidationError) -> str:
+    """Format a pydantic error without echoing the offending input.
+
+    Pydantic's default message embeds the input value; for wire payloads
+    that value can be an aggregate array, and the message ends up in the
+    container log the researcher reads. One line per error, no input, no URL.
+    """
+    parts = []
+    for error in exc.errors(include_input=False, include_url=False):
+        location = ".".join(str(part) for part in error["loc"])
+        parts.append(f"{location}: {error['msg']}" if location else error["msg"])
+    return "; ".join(parts)
 
 
 class CoxPHInput(BaseModel):
@@ -126,3 +143,75 @@ def validate_coxph_input(
         )
     except Exception as e:
         raise UserInputError(f"Invalid Cox-PH input: {e}")
+
+
+class IterationInput(BaseModel):
+    """
+    Wire payload ``central`` sends to ``perform_iteration`` each round-trip.
+
+    Validated on the node before any aggregate is computed. The expected
+    lengths (one entry per explanatory variable) and the node's privacy
+    settings are not part of the payload: they arrive via the validation
+    ``context`` (``expl_vars``, ``settings``).
+
+    Structure is validated by pydantic; the numeric checks (finiteness,
+    positivity, monotonicity, the bin grid) run through numpy on the plain
+    lists, which is faster than element-wise validation and adds no safety.
+    """
+
+    beta: List[float]
+    centre: List[float]
+    scale: List[float]
+    unique_time_events: List[float]
+
+    @field_validator("beta", "centre", "scale")
+    @classmethod
+    def _finite_vector(cls, v: List[float], info: ValidationInfo) -> List[float]:
+        if not np.all(np.isfinite(np.asarray(v, dtype=float))):
+            raise ValueError(f"{info.field_name} contains non-finite values (NaN or inf).")
+        return v
+
+    @field_validator("scale")
+    @classmethod
+    def _positive_scale(cls, v: List[float]) -> List[float]:
+        if np.any(np.asarray(v, dtype=float) <= 0):
+            raise ValueError("scale must be strictly positive for every explanatory variable.")
+        return v
+
+    @field_validator("unique_time_events")
+    @classmethod
+    def _valid_grid(cls, v: List[float]) -> List[float]:
+        if len(v) == 0:
+            raise ValueError("unique_time_events must not be empty.")
+        grid = np.asarray(v, dtype=float)
+        if not np.all(np.isfinite(grid)):
+            raise ValueError("unique_time_events contains non-finite values.")
+        if not np.all(np.diff(grid) > 0):
+            # Strictly increasing covers both the sortedness and the
+            # no-duplicates rules.
+            raise ValueError("unique_time_events must be strictly increasing (sorted, without duplicates).")
+        return v
+
+    @model_validator(mode="after")
+    def _lengths_and_bin_grid(self, info: ValidationInfo) -> "IterationInput":
+        context = info.context or {}
+        expl_vars = context.get("expl_vars", [])
+        for name in ("beta", "centre", "scale"):
+            vector = getattr(self, name)
+            if len(vector) != len(expl_vars):
+                raise ValueError(
+                    f"{name} must have length {len(expl_vars)} (one per explanatory "
+                    f"variable), got shape {np.asarray(vector).shape}"
+                )
+        settings = context.get("settings")
+        width = getattr(settings, "time_bin_width", None)
+        if width:
+            grid = np.asarray(self.unique_time_events, dtype=float)
+            binned = np.floor(grid / width) * width
+            off_grid = ~np.isclose(binned, grid)
+            if np.any(off_grid):
+                raise ValueError(
+                    f"unique_time_events contains time {grid[off_grid][0]} that is "
+                    f"not on the bin grid (width={width})."
+                )
+        return self

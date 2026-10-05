@@ -6,8 +6,7 @@ and iteration-input validation. The time-binning / tail-censoring / jump-guard
 functions are tested here as well (added in a later step).
 """
 
-import sys
-from pathlib import Path
+from importlib import import_module
 
 import numpy as np
 import pandas as pd
@@ -20,28 +19,26 @@ from vantage6.algorithm.tools.exceptions import (
     UserInputError,
 )
 
-# Add the algorithm module to the path
-algorithm_path = Path(__file__).parent.parent.parent / "v6-cox-ph"
-sys.path.insert(0, str(algorithm_path))
+# The guards module has relative imports (the Pydantic models in
+# miscellaneous.py), so it must be imported through the installed package,
+# never with a sys.path hack + bare-name import.
+privacy_guards = import_module("v6-cox-ph.privacy_guards")
 
-from privacy_guards import (  # noqa: E402
-    DEFAULT_MIN_RISK_SET_CHANGE,
-    DEFAULT_SAMPLE_SIZE_THRESHOLD,
-    PrivacySettings,
-    bin_times,
-    check_sample_size,
-    drop_incomplete_rows,
-    ensure_spawned_by_central,
-    guarded_risk_set_aggregates,
-    load_privacy_settings,
-    prepare_node_data,
-    prepare_time_column,
-    tail_cutoff,
-    validate_expl_vars,
-    validate_iteration_input,
-    validate_survival_columns,
-)
-import privacy_guards  # noqa: E402
+DEFAULT_MIN_RISK_SET_CHANGE = privacy_guards.DEFAULT_MIN_RISK_SET_CHANGE
+DEFAULT_SAMPLE_SIZE_THRESHOLD = privacy_guards.DEFAULT_SAMPLE_SIZE_THRESHOLD
+PrivacySettings = privacy_guards.PrivacySettings
+bin_times = privacy_guards.bin_times
+check_sample_size = privacy_guards.check_sample_size
+drop_incomplete_rows = privacy_guards.drop_incomplete_rows
+ensure_spawned_by_central = privacy_guards.ensure_spawned_by_central
+guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
+load_privacy_settings = privacy_guards.load_privacy_settings
+prepare_node_data = privacy_guards.prepare_node_data
+prepare_time_column = privacy_guards.prepare_time_column
+tail_cutoff = privacy_guards.tail_cutoff
+validate_expl_vars = privacy_guards.validate_expl_vars
+validate_iteration_input = privacy_guards.validate_iteration_input
+validate_survival_columns = privacy_guards.validate_survival_columns
 from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
 
 

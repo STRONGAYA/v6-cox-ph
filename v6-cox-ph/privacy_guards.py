@@ -25,17 +25,19 @@ via ``get_env_var``:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 import jwt
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
     PrivacyViolation,
     UserInputError,
 )
+
+from .miscellaneous import format_validation_error
 from vantage6.algorithm.tools.util import info, warn
 
 # Environment variable names
@@ -48,13 +50,33 @@ DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
 DEFAULT_MIN_RISK_SET_CHANGE = 5
 
 
-@dataclass(frozen=True)
-class PrivacySettings:
-    """Privacy-related settings read from the node environment."""
+class PrivacySettings(BaseModel):
+    """Privacy-related settings read from the node environment.
 
-    sample_size_threshold: int
-    time_bin_width: Optional[float]
-    min_risk_set_change: int
+    A frozen Pydantic model: the bounds (positive threshold, ``k >= 1``,
+    positive bin width) and the threshold-covers-``k`` rule are declared on
+    the fields instead of hand-rolled. The values still come in through
+    vantage6's ``get_env_var`` (which decodes base32-encoded
+    ``algorithm_env``); ``pydantic-settings`` would read ``os.environ``
+    directly and bypass that decoding, so it is not used.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sample_size_threshold: int = Field(gt=0)
+    time_bin_width: Optional[float] = Field(default=None, gt=0)
+    min_risk_set_change: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _threshold_covers_k(self) -> "PrivacySettings":
+        if self.sample_size_threshold + 1 < self.min_risk_set_change:
+            raise ValueError(
+                f"SAMPLE_SIZE_THRESHOLD ({self.sample_size_threshold}) + 1 must be "
+                f">= COXPH_MIN_RISK_SET_CHANGE ({self.min_risk_set_change}); otherwise "
+                f"a node can pass the sample-size threshold but fail to guarantee "
+                f"risk sets of size >= k."
+            )
+        return self
 
 
 def load_privacy_settings() -> PrivacySettings:
@@ -81,29 +103,11 @@ def load_privacy_settings() -> PrivacySettings:
         default=str(DEFAULT_SAMPLE_SIZE_THRESHOLD),
         as_type="int",
     )
-    if sample_size_threshold is None or sample_size_threshold <= 0:
-        raise UserInputError(
-            f"{ENV_SAMPLE_SIZE_THRESHOLD} must be a positive integer, got " f"{sample_size_threshold!r}"
-        )
-
     min_risk_set_change = get_env_var(
         ENV_MIN_RISK_SET_CHANGE,
         default=str(DEFAULT_MIN_RISK_SET_CHANGE),
         as_type="int",
     )
-    if min_risk_set_change is None or min_risk_set_change < 1:
-        raise UserInputError(
-            f"{ENV_MIN_RISK_SET_CHANGE} must be a positive integer (>= 1), got " f"{min_risk_set_change!r}"
-        )
-
-    if sample_size_threshold + 1 < min_risk_set_change:
-        raise UserInputError(
-            f"{ENV_SAMPLE_SIZE_THRESHOLD} ({sample_size_threshold}) + 1 must be "
-            f">= {ENV_MIN_RISK_SET_CHANGE} ({min_risk_set_change}); otherwise "
-            f"a node can pass the sample-size threshold but fail to guarantee "
-            f"risk sets of size >= k."
-        )
-
     time_bin_width_raw = get_env_var(ENV_TIME_BIN_WIDTH, default=None)
     time_bin_width: Optional[float] = None
     if time_bin_width_raw is not None and str(time_bin_width_raw).strip() != "":
@@ -113,14 +117,17 @@ def load_privacy_settings() -> PrivacySettings:
             raise UserInputError(
                 f"{ENV_TIME_BIN_WIDTH} must be a positive float, got " f"{time_bin_width_raw!r}"
             ) from e
-        if time_bin_width <= 0:
-            raise UserInputError(f"{ENV_TIME_BIN_WIDTH} must be a positive float, got " f"{time_bin_width}")
 
-    return PrivacySettings(
-        sample_size_threshold=sample_size_threshold,
-        time_bin_width=time_bin_width,
-        min_risk_set_change=min_risk_set_change,
-    )
+    try:
+        return PrivacySettings(
+            sample_size_threshold=sample_size_threshold,
+            time_bin_width=time_bin_width,
+            min_risk_set_change=min_risk_set_change,
+        )
+    except ValidationError as e:
+        # The offending values are node configuration, not data; echoing them
+        # is what the current messages do and is safe.
+        raise UserInputError(f"Invalid privacy settings: {format_validation_error(e)}") from e
 
 
 def ensure_spawned_by_central(client) -> None:
@@ -451,8 +458,14 @@ def validate_iteration_input(
     expl_vars,
     settings: PrivacySettings,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]:
-    """
-    Validate the wire input to ``perform_iteration``.
+    """Validate the wire input to ``perform_iteration``.
+
+    A thin wrapper around the ``IterationInput`` Pydantic model: the model
+    holds the wire shape (finite vectors, strictly positive scale, a
+    strictly increasing grid, per-variable lengths and the bin-grid rule);
+    this wrapper keeps the historical signature and return types
+    (numpy arrays and a list of floats) and wraps ``ValidationError``
+    into ``UserInputError``.
 
     Parameters
     ----------
@@ -465,7 +478,7 @@ def validate_iteration_input(
     unique_time_events : list[float]
         The sorted event-time grid.
     expl_vars : list[str]
-        Explanatory variable names (used to determine expected length).
+        Explanatory variable names (determine the expected lengths).
     settings : PrivacySettings
         Loaded privacy settings (used for the bin-grid check).
 
@@ -478,80 +491,22 @@ def validate_iteration_input(
     Raises
     ------
     UserInputError
-        If ``beta``, ``centre`` or ``scale`` are not finite or have the wrong
-        length, if ``scale`` is not positive, or if ``unique_time_events`` is
-        unsorted, contains duplicates/NaNs, or is off the bin grid when
-        binning is active.
+        On any validation failure reported by ``IterationInput``.
     """
-    try:
-        beta_arr = np.asarray(beta, dtype=float)
-    except (TypeError, ValueError) as e:
-        raise UserInputError(f"beta could not be converted to float: {e}") from e
+    from .miscellaneous import IterationInput
 
-    if beta_arr.ndim != 1 or len(beta_arr) != len(expl_vars):
-        raise UserInputError(
-            f"beta must have length {len(expl_vars)} (one per explanatory " f"variable), got shape {beta_arr.shape}"
+    try:
+        IterationInput.model_validate(
+            {"beta": beta, "centre": centre, "scale": scale, "unique_time_events": unique_time_events},
+            context={"expl_vars": expl_vars, "settings": settings},
         )
-    if not np.all(np.isfinite(beta_arr)):
-        raise UserInputError("beta contains non-finite values (NaN or inf).")
+    except ValidationError as e:
+        raise UserInputError(format_validation_error(e)) from e
 
-    try:
-        centre_arr = np.asarray(centre, dtype=float)
-    except (TypeError, ValueError) as e:
-        raise UserInputError(f"centre could not be converted to float: {e}") from e
-
-    if centre_arr.ndim != 1 or len(centre_arr) != len(expl_vars):
-        raise UserInputError(
-            f"centre must have length {len(expl_vars)} (one per explanatory " f"variable), got shape {centre_arr.shape}"
-        )
-    if not np.all(np.isfinite(centre_arr)):
-        raise UserInputError("centre contains non-finite values (NaN or inf).")
-
-    try:
-        scale_arr = np.asarray(scale, dtype=float)
-    except (TypeError, ValueError) as e:
-        raise UserInputError(f"scale could not be converted to float: {e}") from e
-
-    if scale_arr.ndim != 1 or len(scale_arr) != len(expl_vars):
-        raise UserInputError(
-            f"scale must have length {len(expl_vars)} (one per explanatory " f"variable), got shape {scale_arr.shape}"
-        )
-    if not np.all(np.isfinite(scale_arr)):
-        raise UserInputError("scale contains non-finite values (NaN or inf).")
-    if np.any(scale_arr <= 0):
-        raise UserInputError("scale must be strictly positive for every explanatory variable.")
-
-    if unique_time_events is None:
-        raise UserInputError("unique_time_events must not be None.")
-
-    try:
-        grid = [float(t) for t in unique_time_events]
-    except (TypeError, ValueError) as e:
-        raise UserInputError(f"unique_time_events must be a list of numbers: {e}") from e
-
-    if len(grid) == 0:
-        raise UserInputError("unique_time_events must not be empty.")
-
-    if not np.all(np.isfinite(grid)):
-        raise UserInputError("unique_time_events contains non-finite values.")
-
-    if grid != sorted(grid):
-        raise UserInputError("unique_time_events must be sorted in ascending order.")
-
-    if len(set(grid)) != len(grid):
-        raise UserInputError("unique_time_events must not contain duplicates.")
-
-    # When binning is active, every grid point must lie on the bin grid.
-    width = settings.time_bin_width
-    if width is not None and width > 0:
-        for t in grid:
-            binned = np.floor(t / width) * width
-            if not np.isclose(binned, t):
-                raise UserInputError(
-                    f"unique_time_events contains time {t} that is not on the " f"bin grid (width={width})."
-                )
-
-    return beta_arr, centre_arr, scale_arr, grid
+    beta_arr = np.asarray(beta, dtype=float)
+    centre_arr = np.asarray(centre, dtype=float)
+    scale_arr = np.asarray(scale, dtype=float)
+    return beta_arr, centre_arr, scale_arr, [float(t) for t in unique_time_events]
 
 
 def bin_times(times: pd.Series, width: float | None) -> pd.Series:

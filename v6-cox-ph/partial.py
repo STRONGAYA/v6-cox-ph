@@ -7,7 +7,6 @@ encryption if that is enabled). From there, they are sent to the partial task
 or directly to the user (if they requested partial results).
 """
 
-import numpy as np
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
@@ -99,7 +98,7 @@ def perform_iteration(
     time_col: str,
     outcome_col: str,
     expl_vars: list,
-    beta: np.ndarray,
+    beta: list,
     centre: list,
     scale: list,
     unique_time_events: list,
@@ -127,8 +126,9 @@ def perform_iteration(
         rows as ``compute_summed_z``.
     expl_vars : list
         A list of explanatory variables to be used in the computation.
-    beta : np.ndarray
-        The current estimate of the beta coefficients (standardised space).
+    beta : list
+        The current estimate of the beta coefficients (standardised space),
+        as it arrives on the wire (a JSON list).
     centre : list
         The pooled covariate means over the event cases.
     scale : list
@@ -150,7 +150,7 @@ def perform_iteration(
     if not threshold_met:
         raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
-    beta, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
+    beta_arr, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
         beta, centre, scale, unique_time_events, expl_vars, settings
     )
 
@@ -159,7 +159,7 @@ def perform_iteration(
     X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 
     agg1, agg2, agg3 = guarded_risk_set_aggregates(
-        df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta
+        df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
     )
 
     return {
