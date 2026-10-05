@@ -111,13 +111,21 @@ Build the Docker image::
 
 - **Never return row-level data** from a partial. Only aggregates leave a
   node.
-- **Every partial keeps its guards**, in order: ``ensure_spawned_by_central``
-  → ``load_privacy_settings`` → (``validate_expl_vars`` where applicable)
-  → ``drop_incomplete_rows`` → ``check_sample_size`` →
-  ``prepare_time_column`` → (work). Do not reorder or skip them.
+- **Every partial keeps its guards**, in order:
+  ``ensure_spawned_by_central`` → ``load_privacy_settings``
+  → ``validate_expl_vars`` (``compute_summed_z``, ``perform_iteration``)
+  → ``drop_incomplete_rows`` → ``check_sample_size``
+  → ``validate_iteration_input`` (``perform_iteration`` only)
+  → ``prepare_time_column`` → (work; ``perform_iteration`` builds its risk
+  sets with ``guarded_risk_set_masks``). ``get_unique_event_times`` also
+  runs ``check_data_quality`` before ``drop_incomplete_rows``. Do not
+  reorder or skip any of them.
 - **No new partial** without a sample-size threshold, parent-task guard and
   documentation in ``Privacy.rst``.
-- **Do not log data values**; use ``info``/``warn`` for status only.
+- **Do not log data values or counts**; use ``info``/``warn`` for status
+  only. The container log is returned to the researcher with the run, so a
+  row or event count, especially a below-threshold one, is a leak. Name the
+  configured threshold, never the actual count.
 - **Do not loosen** thresholds or tolerances to make tests pass.
 - Privacy settings are read from node ``algorithm_env`` via ``get_env_var``:
   ``SAMPLE_SIZE_THRESHOLD`` (default 10), ``COXPH_TIME_BIN_WIDTH`` (disabled

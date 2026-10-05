@@ -5,7 +5,9 @@ These guards are pure functions (DataFrame/array in, DataFrame/array out)
 so they can be unit-tested without vantage6. They are called from all three
 partial functions in the same order::
 
-    ensure_spawned_by_central -> load_privacy_settings -> check_sample_size
+    ensure_spawned_by_central -> load_privacy_settings
+    -> (validate_expl_vars, where expl_vars are used) -> drop_incomplete_rows
+    -> check_sample_size -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work)
 
 The settings are read from node environment variables (``algorithm_env``)
@@ -195,7 +197,10 @@ def check_sample_size(
 ) -> bool:
     """Check whether the node meets the sample-size threshold.
 
-    Both rows and events must be strictly greater than the threshold.
+    Both rows and events must be strictly greater than the threshold. The
+    warning on failure names the threshold but never the actual count: the
+    container log is returned to the researcher with the run, and a
+    below-threshold count is exactly what the threshold protects.
 
     Parameters
     ----------
@@ -215,7 +220,7 @@ def check_sample_size(
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
-        warn(f"Sample size threshold not met: {n_rows} rows <= {threshold}.")
+        warn(f"Sample size threshold not met: row count does not exceed {threshold}.")
         return False
 
     if outcome_col is not None:
@@ -226,7 +231,8 @@ def check_sample_size(
         n_events = int((df[outcome_col] == 1).sum())
         if n_events <= threshold:
             warn(
-                f"Sample size threshold not met: {n_events} events <= " f"{threshold}."
+                f"Sample size threshold not met: event count does not exceed "
+                f"{threshold}."
             )
             return False
 
