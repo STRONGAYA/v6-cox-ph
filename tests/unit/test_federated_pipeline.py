@@ -13,7 +13,6 @@ default guards (``k=5``) and asserts the risk-set privacy property on per-node
 """
 
 import sys
-from io import StringIO
 from pathlib import Path
 from importlib import import_module
 
@@ -132,7 +131,7 @@ class TestFederatedPipelineVsLifelines:
         """Federated coefficients within 2e-3 of lifelines on pooled data."""
         df1, df2, _ = _load_datasets()
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(standard_result["model"]))
+        model = pd.DataFrame(standard_result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
                 f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
@@ -142,7 +141,7 @@ class TestFederatedPipelineVsLifelines:
         """Federated SE within 1e-3 of lifelines."""
         df1, df2, _ = _load_datasets()
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(standard_result["model"]))
+        model = pd.DataFrame(standard_result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "SE"] - ref["se"][var]) <= 1e-3, (
                 f"SE mismatch {var}: fed={model.loc[var, 'SE']}, " f"ref={ref['se'][var]}"
@@ -150,7 +149,7 @@ class TestFederatedPipelineVsLifelines:
 
     def test_z_matches_beta_over_se(self, standard_result):
         """Regression: Z must equal Coef / SE (not the old (exp(beta)-1)/SE)."""
-        model = pd.read_json(StringIO(standard_result["model"]))
+        model = pd.DataFrame(standard_result["model"]).T
         for var in EXPL_VARS:
             coef = model.loc[var, "Coef"]
             se = model.loc[var, "SE"]
@@ -185,8 +184,8 @@ class TestFederatedEqualsPooled:
         pooled_df = pd.concat([df1, df2], ignore_index=True)
         pooled = _run_central([[{"database": pooled_df, "db_type": "csv"}]], [1])
 
-        fed_model = pd.read_json(StringIO(fed["model"]))
-        pooled_model = pd.read_json(StringIO(pooled["model"]))
+        fed_model = pd.DataFrame(fed["model"]).T
+        pooled_model = pd.DataFrame(pooled["model"]).T
         for var in EXPL_VARS:
             np.testing.assert_allclose(
                 fed_model.loc[var, "Coef"],
@@ -227,7 +226,7 @@ class TestNonConvergence:
         assert result["model"] is not None
 
         # FR-A1: Coef == 0 (beta_0 reported, not beta_1)
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert (
                 model.loc[var, "Coef"] == 0.0
@@ -275,7 +274,7 @@ class TestSingularHessian:
         result = results[0]
 
         assert result["converged"] is False
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in collinear_vars:
             assert np.isnan(model.loc[var, "SE"]), f"SE for {var} should be NaN"
         assert result["model"] is not None
@@ -339,7 +338,11 @@ class TestSubTaskValidation:
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="missing 'times'"):
             central._validate_zsum_result(
-                {"sum": {"age": 10.0, "treatment": 5.0}},
+                {
+                    "sum": {"age": 10.0, "treatment": 5.0},
+                    "sum_squares": {"age": 100.0, "treatment": 25.0},
+                    "privacy_settings": {"sample_size_threshold": 10},
+                },
                 ["age", "treatment"],
                 "time",
                 org_id=1,
@@ -377,7 +380,7 @@ class TestNaNPolicy:
         # Build the NaN-free reference
         df1_clean = df1.dropna(subset=["time", "event", "age", "treatment"])
         ref = _lifelines_reference(pd.concat([df1_clean, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
                 f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
@@ -416,8 +419,11 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
             "method": "perform_iteration",
             "kwargs": {
                 "time_col": "time",
+                "outcome_col": "event",
                 "expl_vars": EXPL_VARS,
                 "beta": [0.0, 0.0],
+                "centre": [0.0, 0.0],
+                "scale": [1.0, 1.0],
                 "unique_time_events": grid,
             },
         },
@@ -469,7 +475,7 @@ class TestDefaultGuardsPrivacyProperty:
         ]
         result = _run_central(datasets, [1, 2])
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
                 f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
@@ -593,8 +599,8 @@ class TestOrganizationAttribution:
             ],
             [1, 2],
         )
-        shuffled_model = pd.read_json(StringIO(result["model"]))
-        reference_model = pd.read_json(StringIO(reference["model"]))
+        shuffled_model = pd.DataFrame(result["model"]).T
+        reference_model = pd.DataFrame(reference["model"]).T
         for var in EXPL_VARS:
             np.testing.assert_allclose(shuffled_model.loc[var, "Coef"], reference_model.loc[var, "Coef"], atol=1e-12)
 
@@ -614,3 +620,144 @@ class TestOrganizationAttribution:
         client = self._two_node_client()
         with pytest.raises(AlgorithmError, match="not one of"):
             _run_central_with_client(client, [1, 2])
+
+
+@pytest.mark.unit
+class TestAffineTransform:
+    """The standardisation of the covariates must not change the model."""
+
+    def _uncentred_fit(self, client, organization_ids):
+        """Fit without centring/scaling: dispatch with centre 0 / scale 1."""
+        from importlib import import_module
+
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+
+        # Gather z_sum and the event grid
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=organization_ids,
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        z_sum = None
+        time_event_dfs = []
+        for r in results:
+            if z_sum is None:
+                z_sum = pd.Series(r["sum"])
+            else:
+                z_sum += pd.Series(r["sum"])
+            time_event_dfs.append(pd.DataFrame.from_dict(r["times"]))
+        ate = pd.concat(time_event_dfs).groupby("time", as_index=False).sum()
+        grid = ate["time"].tolist()
+
+        beta = np.zeros(len(EXPL_VARS))
+        for _ in range(20):
+            task = client.task.create(
+                input_={
+                    "method": "perform_iteration",
+                    "kwargs": {
+                        "time_col": "time",
+                        "outcome_col": "event",
+                        "expl_vars": EXPL_VARS,
+                        "beta": beta.tolist(),
+                        "centre": [0.0, 0.0],
+                        "scale": [1.0, 1.0],
+                        "unique_time_events": grid,
+                    },
+                },
+                organizations=organization_ids,
+            )
+            results = client.wait_for_results(task_id=task["id"])
+            n_times = len(grid)
+            agg1 = np.zeros(n_times)
+            agg2 = np.zeros((n_times, len(EXPL_VARS)))
+            agg3 = np.zeros((n_times, len(EXPL_VARS), len(EXPL_VARS)))
+            for r in results:
+                agg1 += np.array(r["agg1"])
+                agg2 += np.array(pd.DataFrame.from_dict(r["agg2"]))
+                agg3 += np.array([np.array(lst) for lst in r["agg3"]])
+            primary, secondary = coxph_logic.compute_derivatives(agg1, agg2, agg3, ate, z_sum)
+            from scipy.linalg import solve
+
+            step = solve(secondary, primary)
+            if float(np.max(np.abs(step))) <= 1e-6:
+                return beta
+            beta = beta - step
+        return beta
+
+    def test_standardised_equals_unstandardised(self, guards_off):
+        """central's standardised fit equals a centre-0/scale-1 fit to 1e-10."""
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+
+        standardised = _run_central(datasets, [1, 2])
+        assert standardised["converged"] is True
+
+        client = MockAlgorithmClient(datasets=datasets, module="v6-cox-ph", organization_ids=[1, 2])
+        unstandardised_beta = self._uncentred_fit(client, [1, 2])
+
+        model = pd.DataFrame(standardised["model"]).T
+        for i, var in enumerate(EXPL_VARS):
+            np.testing.assert_allclose(
+                model.loc[var, "Coef"], unstandardised_beta[i], atol=1e-10, err_msg=f"back-transform mismatch {var}"
+            )
+
+    @pytest.mark.parametrize("transform", ["scale_1e4", "offset_1e4"])
+    def test_extreme_covariates_converge(self, guards_off, transform):
+        """A covariate scaled by 1e4 or offset by 1e4 still converges."""
+        df1, df2, _ = _load_datasets()
+        df1 = df1.copy()
+        df2 = df2.copy()
+        if transform == "scale_1e4":
+            df1["age"] = df1["age"] * 1e4
+            df2["age"] = df2["age"] * 1e4
+        else:
+            df1["age"] = df1["age"] + 1e4
+            df2["age"] = df2["age"] + 1e4
+
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # The model must match lifelines on the same (extreme) data
+        ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
+        model = pd.DataFrame(result["model"]).T
+        for var in EXPL_VARS:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
+                f"coef mismatch {var} ({transform}): fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
+            )
+
+    def test_missing_outcome_rows_equal_removal(self, guards_off):
+        """Rows with a missing outcome give exactly the result of removing them."""
+        df1, df2, _ = _load_datasets()
+        df1 = df1.copy()
+        nan_rows = df1.index[:4]
+        df1.loc[nan_rows, "event"] = np.nan
+
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        with_nan = _run_central(datasets, [1, 2])
+
+        df1_dropped = df1.dropna(subset=["event"])
+        removed = _run_central(
+            [
+                [{"database": df1_dropped, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+
+        with_nan_model = pd.DataFrame(with_nan["model"]).T
+        removed_model = pd.DataFrame(removed["model"]).T
+        for var in EXPL_VARS:
+            np.testing.assert_allclose(with_nan_model.loc[var, "Coef"], removed_model.loc[var, "Coef"], atol=1e-12)

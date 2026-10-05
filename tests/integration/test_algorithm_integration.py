@@ -7,7 +7,6 @@ centralised Cox-PH fit on the combined test data.
 """
 
 import json
-from io import StringIO
 from pathlib import Path
 from typing import Any, Dict
 
@@ -318,8 +317,11 @@ class TestCoxPHAlgorithmIntegration:
                 "perform_iteration",
                 {
                     "time_col": "time",
+                    "outcome_col": "event",
                     "expl_vars": ["age", "treatment"],
                     "beta": [0.0, 0.0],
+                    "centre": [0.0, 0.0],
+                    "scale": [1.0, 1.0],
                     "unique_time_events": [10.0, 20.0, 30.0],
                 },
             ),
@@ -569,7 +571,7 @@ def determine_model_acceptance(
     model_json = federated_result.get("model")
     assert model_json is not None, "Model results should not be None"
 
-    fed_df = pd.read_json(StringIO(model_json))
+    fed_df = pd.DataFrame(model_json).T
 
     # Convergence fields
     assert "converged" in federated_result, "converged should be present"

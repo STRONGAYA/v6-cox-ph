@@ -109,14 +109,21 @@ Data sharing
 
 Each data station shares, with the central aggregator only:
 
-- the sum of each explanatory variable over the event cases, along with
-  per-time event counts computed from the same NaN-dropped, censored
-  DataFrame (``compute_summed_z``). The event counts are used by the
-  aggregator to build the event-time grid that is consistent with ``z_sum``
-  and the risk sets;
+- the sum of each explanatory variable over the event cases, the matching sum
+  of squares (used to derive the pooled covariate spread), the node's privacy
+  settings (configuration, not data), and per-time event counts computed
+  from the same NaN-dropped, censored DataFrame (``compute_summed_z``). The
+  event counts are used by the aggregator to build the event-time grid that
+  is consistent with ``z_sum`` and the risk sets. The sum of squares is a
+  new aggregate leaving the node; it enjoys the same sample-size threshold
+  protection as ``z_sum``;
 - per event time ``t``, the risk-set sums ``S0(t) = sum exp(beta . X)``,
   ``S1(t) = sum X * exp(beta . X)`` and ``S2(t) = sum X X^T exp(beta . X)``
-  (``perform_iteration``).
+  (``perform_iteration``), computed on the standardised covariates
+  ``(x - centre) / scale``. The pooled centre and scale are shared with every
+  node in every iteration, rounded to two significant figures: a node
+  therefore learns a coarse pooled event-case covariate mean and standard
+  deviation, and nothing about any other individual node.
 
 Two directions of sharing exist and both must be assumed visible to the
 researcher that ran ``central``:

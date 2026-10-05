@@ -236,41 +236,63 @@ class TestValidateIterationInput:
     def test_valid_input(self, settings):
         beta = [0.1, -0.2]
         grid = [1.0, 2.0, 3.0]
-        b, g = validate_iteration_input(beta, grid, ["a", "b"], settings)
+        b, c, s, g = validate_iteration_input(beta, [0.0, 0.0], [1.0, 2.0], grid, ["a", "b"], settings)
         np.testing.assert_array_equal(b, [0.1, -0.2])
+        np.testing.assert_array_equal(c, [0.0, 0.0])
+        np.testing.assert_array_equal(s, [1.0, 2.0])
         assert g == [1.0, 2.0, 3.0]
 
     def test_beta_wrong_length(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [1.0], ["a", "b"], settings)
+            validate_iteration_input([0.1, 0.2], [0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
 
     def test_beta_non_finite(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1, np.nan], [1.0], ["a", "b"], settings)
+            validate_iteration_input([0.1, np.nan], [0.0, 0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
 
     def test_unsorted_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [3.0, 1.0], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [3.0, 1.0], ["a"], settings)
 
     def test_duplicate_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [1.0, 1.0], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [1.0, 1.0], ["a"], settings)
 
     def test_nan_in_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [1.0, float("nan")], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [1.0, float("nan")], ["a"], settings)
 
     def test_empty_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [], ["a"], settings)
 
     def test_off_grid_with_binning(self, settings_binned):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [5.0], ["a"], settings_binned)
+            validate_iteration_input([0.1], [0.0], [1.0], [5.0], ["a"], settings_binned)
 
     def test_on_grid_with_binning(self, settings_binned):
-        b, g = validate_iteration_input([0.1], [10.0, 20.0], ["a"], settings_binned)
+        b, c, s, g = validate_iteration_input([0.1], [0.0], [1.0], [10.0, 20.0], ["a"], settings_binned)
         assert g == [10.0, 20.0]
+
+    def test_centre_wrong_length(self, settings):
+        with pytest.raises(UserInputError, match="centre must have length"):
+            validate_iteration_input([0.1, 0.2], [0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
+
+    def test_centre_non_finite(self, settings):
+        with pytest.raises(UserInputError, match="centre contains non-finite"):
+            validate_iteration_input([0.1, 0.2], [np.nan, 0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
+
+    def test_scale_wrong_length(self, settings):
+        with pytest.raises(UserInputError, match="scale must have length"):
+            validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0], [1.0], ["a", "b"], settings)
+
+    def test_scale_non_positive(self, settings):
+        with pytest.raises(UserInputError, match="scale must be strictly positive"):
+            validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0, 0.0], [1.0], ["a", "b"], settings)
+
+    def test_scale_non_finite(self, settings):
+        with pytest.raises(UserInputError, match="scale contains non-finite"):
+            validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0, np.inf], [1.0], ["a", "b"], settings)
 
 
 @pytest.mark.unit

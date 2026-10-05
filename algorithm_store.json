@@ -75,6 +75,11 @@
           "description": "Name of the column containing the time data."
         },
         {
+          "name": "outcome_col",
+          "type": "string",
+          "description": "Name of the column containing the outcome data."
+        },
+        {
           "name": "expl_vars",
           "type": "list",
           "description": "List of explanatory variable names."
@@ -83,6 +88,16 @@
           "name": "beta",
           "type": "list",
           "description": "Current coefficient vector (one entry per explanatory variable)."
+        },
+        {
+          "name": "centre",
+          "type": "list",
+          "description": "Pooled covariate means over the event cases (one entry per explanatory variable)."
+        },
+        {
+          "name": "scale",
+          "type": "list",
+          "description": "Pooled covariate standard deviations over the event cases (one entry per explanatory variable)."
         },
         {
           "name": "unique_time_events",

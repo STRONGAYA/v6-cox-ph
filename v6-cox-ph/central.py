@@ -16,8 +16,8 @@ from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError
 from vantage6.algorithm.tools.util import info, warn
 
-from .coxph_logic import compute_derivatives, compute_model_results
-from .coxph_logic import format_results_dataframe
+from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
+from .coxph_logic import format_results_dataframe, round_sig
 from .miscellaneous import validate_coxph_input
 
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
@@ -116,14 +116,17 @@ def central(
     _require_all_organisations_answered(results, ids)
 
     z_sum = None
+    sum_squares = None
     time_event_dfs = []
     for output in results:
         org_id = _result_org_id(output, ids)
         _validate_zsum_result(output, expl_vars, time_col, org_id=org_id)
         if z_sum is None:
             z_sum = pd.Series(output["sum"])
+            sum_squares = pd.Series(output["sum_squares"])
         else:
             z_sum += pd.Series(output["sum"])
+            sum_squares += pd.Series(output["sum_squares"])
         # Collect per-time event counts (NaN-consistent with z_sum)
         time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
 
@@ -134,6 +137,27 @@ def central(
     aggregated_time_events = aggregated_time_events.groupby(time_col, as_index=False).sum()
 
     unique_time_events = aggregated_time_events[time_col].tolist()
+
+    # Standardisation: the pooled covariate centre and spread over the event
+    # cases, rounded to two significant figures so the nodes learn less. The
+    # partial likelihood is invariant to this shared affine transform; the
+    # nodes' aggregates are computed on (x - centre) / scale and the reported
+    # coefficients are transformed back.
+    assert z_sum is not None and sum_squares is not None
+    n_events = float(aggregated_time_events["freq"].sum())
+    centre_arr = z_sum.to_numpy(dtype=float) / n_events
+    variance = sum_squares.to_numpy(dtype=float) / n_events - centre_arr**2
+    scale_arr = np.sqrt(np.maximum(variance, 0.0))
+    if np.any(scale_arr <= 0):
+        warn("A covariate has no spread over the event cases; using scale 1 for it.")
+        scale_arr = np.where(scale_arr > 0, scale_arr, 1.0)
+    centre = round_sig(centre_arr)
+    scale = round_sig(scale_arr)
+    info("Dispatching standardised covariates (centre and scale to 2 significant figures).")
+
+    # The gradient in the standardised space needs the event-case covariate
+    # sums in that space as well.
+    z_sum_star = pd.Series((z_sum.to_numpy(dtype=float) - centre * n_events) / scale, index=z_sum.index)
 
     beta: np.ndarray = np.zeros(n_covs)
 
@@ -157,8 +181,11 @@ def central(
             "method": "perform_iteration",
             "kwargs": {
                 "time_col": time_col,
+                "outcome_col": outcome_col,
                 "expl_vars": expl_vars,
                 "beta": beta_serialised,
+                "centre": centre.tolist(),
+                "scale": scale.tolist(),
                 "unique_time_events": unique_time_events,
             },
         }
@@ -193,7 +220,7 @@ def central(
             summed_agg2,
             summed_agg3,
             aggregated_time_events,
-            z_sum,
+            z_sum_star,
         )
 
         try:
@@ -236,22 +263,25 @@ def central(
         central_warnings.append(msg)
 
     # Compute final model results — beta, secondary_derivative and
-    # summed_agg1 are all evaluated at the reported beta.
+    # summed_agg1 are all evaluated at the reported beta (in the
+    # standardised space). Back-transform the reported statistics to the
+    # original covariates afterwards.
     model = compute_model_results(
         beta=beta,
         secondary_derivative=secondary_derivative,
-        z_sum=z_sum,
+        z_sum=z_sum_star,
         aggregated_time_events=aggregated_time_events,
         summed_agg1=summed_agg1,
         expl_vars=expl_vars,
         converged=converged,
         n_iterations=n_iterations,
     )
+    model = back_transform_results(model, scale)
 
     results_df = format_results_dataframe(model["results_data"], expl_vars)
 
     return {
-        "model": results_df.to_json(double_precision=15),
+        "model": results_df.to_dict(orient="index"),
         "overall_p_value": model["overall_p_value"],
         "aic": model["aic"],
         "degrees_of_freedom": model["n_params"],
@@ -344,8 +374,9 @@ def _validate_zsum_result(output: dict, expl_vars: list, time_col: str, org_id: 
     """Validate a ``compute_summed_z`` sub-task result (FR-A3).
 
     Raises ``AlgorithmError`` if the result is not a dict with a ``sum`` key
-    whose entries match ``expl_vars``, or a ``times`` key with the per-time
-    event counts (columns ``time_col`` and ``freq``).
+    whose entries match ``expl_vars``, a ``sum_squares`` key with the same
+    entries, a ``times`` key with the per-time event counts (columns
+    ``time_col`` and ``freq``) and a ``privacy_settings`` key.
     """
     if not isinstance(output, dict) or "sum" not in output:
         raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'sum' key")
@@ -355,6 +386,18 @@ def _validate_zsum_result(output: dict, expl_vars: list, time_col: str, org_id: 
     missing = [v for v in expl_vars if v not in sum_dict]
     if missing:
         raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum' missing " f"variables {missing}")
+    if "sum_squares" not in output:
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'sum_squares' key")
+    sum_squares = output["sum_squares"]
+    if not isinstance(sum_squares, dict):
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum_squares' is not a dict")
+    missing_sq = [v for v in expl_vars if v not in sum_squares]
+    if missing_sq:
+        raise AlgorithmError(
+            f"Organisation {org_id}: compute_summed_z 'sum_squares' missing " f"variables {missing_sq}"
+        )
+    if "privacy_settings" not in output:
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'privacy_settings' key")
     if "times" not in output:
         raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'times' key")
     times_df = pd.DataFrame.from_dict(output["times"])

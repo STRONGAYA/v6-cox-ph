@@ -346,16 +346,23 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
 
 def validate_iteration_input(
     beta,
+    centre,
+    scale,
     unique_time_events,
     expl_vars,
     settings: PrivacySettings,
-) -> tuple[np.ndarray, list[float]]:
-    """Validate the wire input to ``perform_iteration``.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]:
+    """
+    Validate the wire input to ``perform_iteration``.
 
     Parameters
     ----------
     beta : array-like
-        Current coefficient vector.
+        Current coefficient vector (standardised space).
+    centre : array-like
+        Pooled covariate means over the event cases.
+    scale : array-like
+        Pooled covariate standard deviations over the event cases.
     unique_time_events : list[float]
         The sorted event-time grid.
     expl_vars : list[str]
@@ -365,16 +372,17 @@ def validate_iteration_input(
 
     Returns
     -------
-    tuple[np.ndarray, list[float]]
-        The validated ``beta`` as a numpy array and the validated
-        ``unique_time_events`` as a list of floats.
+    tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]
+        The validated ``beta``, ``centre`` and ``scale`` as numpy arrays and
+        the validated ``unique_time_events`` as a list of floats.
 
     Raises
     ------
     UserInputError
-        If ``beta`` is not finite or has the wrong length, or if
-        ``unique_time_events`` is unsorted, contains duplicates/NaNs, or is
-        off the bin grid when binning is active.
+        If ``beta``, ``centre`` or ``scale`` are not finite or have the wrong
+        length, if ``scale`` is not positive, or if ``unique_time_events`` is
+        unsorted, contains duplicates/NaNs, or is off the bin grid when
+        binning is active.
     """
     try:
         beta_arr = np.asarray(beta, dtype=float)
@@ -387,6 +395,32 @@ def validate_iteration_input(
         )
     if not np.all(np.isfinite(beta_arr)):
         raise UserInputError("beta contains non-finite values (NaN or inf).")
+
+    try:
+        centre_arr = np.asarray(centre, dtype=float)
+    except (TypeError, ValueError) as e:
+        raise UserInputError(f"centre could not be converted to float: {e}") from e
+
+    if centre_arr.ndim != 1 or len(centre_arr) != len(expl_vars):
+        raise UserInputError(
+            f"centre must have length {len(expl_vars)} (one per explanatory " f"variable), got shape {centre_arr.shape}"
+        )
+    if not np.all(np.isfinite(centre_arr)):
+        raise UserInputError("centre contains non-finite values (NaN or inf).")
+
+    try:
+        scale_arr = np.asarray(scale, dtype=float)
+    except (TypeError, ValueError) as e:
+        raise UserInputError(f"scale could not be converted to float: {e}") from e
+
+    if scale_arr.ndim != 1 or len(scale_arr) != len(expl_vars):
+        raise UserInputError(
+            f"scale must have length {len(expl_vars)} (one per explanatory " f"variable), got shape {scale_arr.shape}"
+        )
+    if not np.all(np.isfinite(scale_arr)):
+        raise UserInputError("scale contains non-finite values (NaN or inf).")
+    if np.any(scale_arr <= 0):
+        raise UserInputError("scale must be strictly positive for every explanatory variable.")
 
     if unique_time_events is None:
         raise UserInputError("unique_time_events must not be None.")
@@ -418,7 +452,7 @@ def validate_iteration_input(
                     f"unique_time_events contains time {t} that is not on the " f"bin grid (width={width})."
                 )
 
-    return beta_arr, grid
+    return beta_arr, centre_arr, scale_arr, grid
 
 
 def bin_times(times: pd.Series, width: float | None) -> pd.Series:

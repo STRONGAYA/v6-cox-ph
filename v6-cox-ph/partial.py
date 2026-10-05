@@ -63,6 +63,9 @@ def compute_summed_z(
 
     events = df[df[outcome_col] == 1]
     z_sum = events[expl_vars].sum().to_dict()
+    # Sum of squares over the event cases: with z_sum this yields the pooled
+    # covariate centre and spread over events without another round-trip.
+    sum_squares = events[expl_vars].pow(2).sum().to_dict()
 
     # Also return per-time event counts from the same NaN-dropped,
     # censored DataFrame so that central can build aggregated_time_events
@@ -71,7 +74,21 @@ def compute_summed_z(
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times["freq"] = times[outcome_col]
     times = times.drop(columns=outcome_col)
-    return {"organization_id": client.organization_id, "sum": z_sum, "times": times.to_dict()}
+
+    # The node's privacy settings (configuration, not data) let central
+    # report which guards were active during the run.
+    privacy_settings = {
+        "sample_size_threshold": settings.sample_size_threshold,
+        "min_risk_set_change": settings.min_risk_set_change,
+        "time_bin_width": settings.time_bin_width,
+    }
+    return {
+        "organization_id": client.organization_id,
+        "sum": z_sum,
+        "sum_squares": sum_squares,
+        "times": times.to_dict(),
+        "privacy_settings": privacy_settings,
+    }
 
 
 @data(1)
@@ -80,12 +97,21 @@ def perform_iteration(
     client: AlgorithmClient,
     df: pd.DataFrame,
     time_col: str,
+    outcome_col: str,
     expl_vars: list,
     beta: np.ndarray,
+    centre: list,
+    scale: list,
     unique_time_events: list,
 ) -> dict:
     """
     Perform an iteration of the algorithm, computing the necessary aggregates.
+
+    The covariates are standardised on the node as ``(x - centre) / scale``
+    before the risk-set aggregates are computed: the partial likelihood is
+    invariant to this shared affine transform, while centring prevents ``exp``
+    overflow from large offsets and scaling fixes the Hessian conditioning
+    from large spreads. Central back-transforms the coefficients it reports.
 
     Parameters
     ----------
@@ -95,10 +121,18 @@ def perform_iteration(
         The DataFrame containing the data.
     time_col : str
         The name of the column containing the time data.
+    outcome_col : str
+        The name of the column containing the outcome data. Rows with a
+        missing outcome are dropped so that tail censoring uses the same
+        rows as ``compute_summed_z``.
     expl_vars : list
         A list of explanatory variables to be used in the computation.
     beta : np.ndarray
-        The current estimate of the beta coefficients.
+        The current estimate of the beta coefficients (standardised space).
+    centre : list
+        The pooled covariate means over the event cases.
+    scale : list
+        The pooled covariate standard deviations over the event cases.
     unique_time_events : list
         A list of unique time events.
 
@@ -109,22 +143,24 @@ def perform_iteration(
     """
     info("Computing aggregates for the derivation of the partial likelihood")
 
-    df, settings, threshold_met = prepare_node_data(client, df, time_col, None, expl_vars, need_outcome=False)
+    df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 
-    # perform_iteration does not have the outcome column available, so the
-    # threshold is checked on rows only.
+    # A node that passed compute_summed_z passes this check as well (the same
+    # rows are analysed); the threshold here is defence in depth.
     if not threshold_met:
         raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
-    beta, unique_time_events = validate_iteration_input(beta, unique_time_events, expl_vars, settings)
+    beta, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
+        beta, centre, scale, unique_time_events, expl_vars, settings
+    )
 
-    df = prepare_time_column(df, time_col, settings)
+    df = prepare_time_column(df, time_col, settings, outcome_col)
 
     num_unique_time_events = len(unique_time_events)
     num_explanatory_vars = len(expl_vars)
 
     masks = guarded_risk_set_masks(df[time_col], unique_time_events, settings.min_risk_set_change)
-    X_all = df[expl_vars].to_numpy(dtype=float)
+    X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 
     agg1: list = []
     agg2: list = []

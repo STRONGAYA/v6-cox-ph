@@ -247,6 +247,52 @@ def compute_model_results(
     }
 
 
+def round_sig(values, digits: int = 2) -> np.ndarray:
+    """Round to ``digits`` significant figures.
+
+    The pooled covariate centre and scale are shared with the nodes;
+    rounding to two significant figures means the nodes learn less about
+    the pooled event-case covariate distribution.
+    """
+    arr = np.asarray(values, dtype=float)
+    rounded = np.zeros_like(arr)
+    nonzero = arr != 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        exponent = np.floor(np.log10(np.abs(arr[nonzero])))
+        factor = 10.0 ** (digits - 1 - exponent)
+        rounded[nonzero] = np.round(arr[nonzero] * factor) / factor
+    return rounded
+
+
+def back_transform_results(model: dict, scale) -> dict:
+    """Map model statistics from the standardised space back to the original
+    covariates.
+
+    ``perform_iteration`` computes its aggregates on ``(x - centre) / scale``;
+    the fitted coefficients in that space map back as ``beta / scale``, the
+    standard errors as ``SE / scale`` and the covariance as
+    ``C / (scale scale^T)``. The Z statistic and p-values are invariant.
+    """
+    scale = np.asarray(scale, dtype=float)
+    coef = np.asarray(model["results_data"]["Coef"], dtype=float) / scale
+    se = np.asarray(model["results_data"]["SE"], dtype=float) / scale
+    covariance = np.asarray(model["covariance"], dtype=float) / np.outer(scale, scale)
+
+    model["results_data"] = {
+        "Coef": coef,
+        "Exp(coef)": np.exp(coef),
+        "SE": se,
+        "lower_CI": np.exp(coef - 1.96 * se),
+        "upper_CI": np.exp(coef + 1.96 * se),
+        # Z and p-values are invariant under the affine transform
+        "Z": model["results_data"]["Z"],
+        "p-value": model["results_data"]["p-value"],
+    }
+    model["covariance"] = covariance
+    model["standard_errors"] = se
+    return model
+
+
 def format_results_dataframe(results_data: Dict[str, Any], expl_vars: List[str]) -> pd.DataFrame:
     """
     Format the results data into a properly indexed DataFrame.

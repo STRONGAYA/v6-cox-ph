@@ -37,8 +37,11 @@ Output fields
 
 The central function returns a dictionary with:
 
-- ``model``: a JSON table indexed by variable name with columns ``Coef``,
+- ``model``: a JSON object indexed by variable name with columns ``Coef``,
   ``Exp(coef)``, ``SE``, ``lower_CI``, ``upper_CI``, ``Z`` and ``p-value``.
+  The coefficients are on the original covariates: nodes fit on the
+  standardised ``(x - centre) / scale`` and the central function transforms
+  the reported statistics back.
 - ``overall_p_value``: the overall Wald test p-value.
 - ``aic``: the Akaike Information Criterion.
 - ``degrees_of_freedom``: the number of model parameters.

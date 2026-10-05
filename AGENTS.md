@@ -83,6 +83,20 @@ user task → central → compute_summed_z
   (``aggregated_time_events``) from the ``times`` returned by
   ``compute_summed_z``. It drops rows with NaN in ``expl_vars``, so its
   counts are consistent with ``z_sum`` and the risk sets.
+- The covariates are standardised before iterating: ``central`` derives the
+  pooled covariate centre and scale over the event cases from ``z_sum`` and
+  the sum of squares (both returned by ``compute_summed_z``, rounded to two
+  significant figures), nodes fit on ``(x - centre) / scale`` and ``central``
+  back-transforms the reported coefficients, standard errors and covariance.
+  The partial likelihood is invariant to this affine transform; centring
+  prevents ``exp`` overflow and scaling fixes the Hessian conditioning.
+- ``compute_summed_z`` also returns the node's privacy settings
+  (configuration, not data); the result summary based on them is built in a
+  later step.
+- ``perform_iteration`` receives ``outcome_col`` and drops rows with a
+  missing outcome, so every partial analyses the same rows; a node that
+  passed ``compute_summed_z`` cannot fail there — its threshold check is
+  defence in depth only.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
   evaluated at the same ``beta``. Results include ``converged`` and
