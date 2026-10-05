@@ -75,9 +75,10 @@ user task → central → get_unique_event_times → compute_summed_z
 
 ## Environment and commands
 
-Python 3.10. Install in editable mode with dev extras::
+Python 3.10. Install in editable mode with the test (``dev``) and lint
+(``lint``) extras::
 
-    pip install -e .[dev]
+    pip install -e .[dev,lint]
 
 Unit tests (no Docker, run in a few seconds)::
 
@@ -85,10 +86,13 @@ Unit tests (no Docker, run in a few seconds)::
     # or
     pytest tests/unit -q
 
-Integration tests (require Docker and the ``v6`` CLI; skip locally, fail in
-CI when infrastructure is absent)::
+Integration tests (require Docker and the ``v6`` CLI). Missing
+infrastructure makes them skip locally but fail when ``CI`` or
+``REQUIRE_INTEGRATION_TESTS`` is set to ``1``/``true``/``yes``; set the latter
+to force failures locally::
 
     pytest tests/integration
+    REQUIRE_INTEGRATION_TESTS=1 pytest tests/integration
 
 Lint and format (mirrors ``.github/workflows/test-suite.yml``; Black reads
 ``line-length = 120`` from ``[tool.black]`` in ``pyproject.toml``)::
@@ -164,8 +168,14 @@ Build the Docker image::
   ``vantage6.algorithm.tools.util``.
 - Raise vantage6 exception types: ``UserInputError``,
   ``PrivacyThresholdViolation``, ``PrivacyViolation``, ``AlgorithmError``.
-- UK English in prose and docstrings (organisation, behaviour, optimise).
-- Black formatting, line length 120, target ``py310``.
+- UK English in prose, comments, docstrings and log messages (organisation,
+  behaviour, optimise). Identifiers keep vantage6's US spelling and must not
+  be "corrected": ``organization_ids``, ``client.organization_id``,
+  ``client.organization.list()``, ``included_organizations`` and
+  ``excluded_organizations`` are part of the wire contract or the vantage6
+  API.
+- Black formatting, line length 120, target ``py310`` (configured in
+  ``[tool.black]`` in ``pyproject.toml``); flake8 uses the same 120 limit.
 
 ## Branches, docs and releases
 
