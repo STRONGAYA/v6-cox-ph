@@ -20,7 +20,7 @@ from importlib import import_module
 import numpy as np
 import pandas as pd
 import pytest
-from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
+from vantage6.algorithm.tools.exceptions import AlgorithmError, PrivacyThresholdViolation
 
 # Add the algorithm module and repo root to the path
 repo_root = Path(__file__).parent.parent.parent
@@ -517,3 +517,100 @@ class TestTimeBinning:
         # The full pipeline still converges.
         result = _run_central(datasets, [1, 2])
         assert result["converged"] is True
+
+
+def _run_central_with_client(client, organization_ids):
+    """Dispatch central through a pre-built (possibly wrapped) client."""
+    task = client.task.create(
+        input_={
+            "method": "central",
+            "kwargs": {
+                "time_col": "time",
+                "outcome_col": "event",
+                "expl_vars": EXPL_VARS,
+                "organization_ids": organization_ids,
+            },
+        },
+        organizations=[organization_ids[0]],
+    )
+    results = client.wait_for_results(task_id=task["id"])
+    return results[0]
+
+
+@pytest.mark.unit
+class TestOrganizationAttribution:
+    """Errors attribute results by their organization_id, not their position."""
+
+    def _two_node_client(self):
+        df1, df2, _ = _load_datasets()
+        return MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+
+    def test_partial_results_carry_organization_id(self, guards_off):
+        """compute_summed_z and perform_iteration return their organisation id."""
+        client = self._two_node_client()
+
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                },
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert sorted(r["organization_id"] for r in results) == [1, 2]
+
+    def test_shuffled_results_attributed_correctly(self, guards_off, monkeypatch):
+        """Reversed result order still yields the correct model."""
+        original_wait = MockAlgorithmClient.wait_for_results
+
+        def reversed_wait(self, task_id, interval=1):
+            return list(reversed(original_wait(self, task_id, interval)))
+
+        # Patch the class so the client copies the mock hands to central are
+        # wrapped as well (central uses those for its sub-task waits).
+        monkeypatch.setattr(MockAlgorithmClient, "wait_for_results", reversed_wait)
+
+        client = self._two_node_client()
+        result = _run_central_with_client(client, [1, 2])
+        assert result["converged"] is True
+
+        # The model must equal the unshuffled run
+        reference = _run_central(
+            [
+                [{"database": _load_datasets()[0], "db_type": "csv"}],
+                [{"database": _load_datasets()[1], "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        shuffled_model = pd.read_json(StringIO(result["model"]))
+        reference_model = pd.read_json(StringIO(reference["model"]))
+        for var in EXPL_VARS:
+            np.testing.assert_allclose(shuffled_model.loc[var, "Coef"], reference_model.loc[var, "Coef"], atol=1e-12)
+
+    def test_unknown_organization_id_raises(self, guards_off, monkeypatch):
+        """A result claiming an organisation that was not dispatched fails closed."""
+        original_wait = MockAlgorithmClient.wait_for_results
+
+        def tampered_wait(self, task_id, interval=1):
+            results = original_wait(self, task_id, interval)
+            for r in results:
+                if isinstance(r, dict):
+                    r["organization_id"] = 99
+            return results
+
+        monkeypatch.setattr(MockAlgorithmClient, "wait_for_results", tampered_wait)
+
+        client = self._two_node_client()
+        with pytest.raises(AlgorithmError, match="not one of"):
+            _run_central_with_client(client, [1, 2])

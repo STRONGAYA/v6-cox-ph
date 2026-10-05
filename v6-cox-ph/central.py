@@ -117,8 +117,9 @@ def central(
 
     z_sum = None
     time_event_dfs = []
-    for i, output in enumerate(results):
-        _validate_zsum_result(output, expl_vars, time_col, org_id=ids[i] if i < len(ids) else i)
+    for output in results:
+        org_id = _result_org_id(output, ids)
+        _validate_zsum_result(output, expl_vars, time_col, org_id=org_id)
         if z_sum is None:
             z_sum = pd.Series(output["sum"])
         else:
@@ -180,8 +181,8 @@ def central(
         summed_agg2 = np.zeros((n_times, n_covs))
         summed_agg3 = np.zeros((n_times, n_covs, n_covs))
 
-        for i, output in enumerate(results):
-            org_id = ids[i] if i < len(ids) else i
+        for output in results:
+            org_id = _result_org_id(output, ids)
             _validate_iteration_result(output, n_times, n_covs, expl_vars, org_id)
             summed_agg1 += np.array(output["agg1"])
             summed_agg2 += np.array(pd.DataFrame.from_dict(output["agg2"]))
@@ -258,6 +259,30 @@ def central(
         "converged": converged,
         "n_iterations": n_iterations,
     }
+
+
+def _result_org_id(output: dict, expected_ids: list) -> int:
+    """Return the organisation a partial result says it came from.
+
+    The order of ``wait_for_results`` is not the dispatch order (the
+    organisation id list is deduplicated and the server orders freely), so
+    results carry their own ``organization_id`` and errors are attributed
+    by it. A result without a known id raises ``AlgorithmError``.
+
+    Raises
+    ------
+    AlgorithmError
+        If the result is not a dict or its ``organization_id`` is not one
+        of the dispatched organisations.
+    """
+    if not isinstance(output, dict):
+        raise AlgorithmError(f"Expected a dict result, got {type(output).__name__}")
+    org_id = output.get("organization_id")
+    if org_id is None or org_id not in expected_ids:
+        raise AlgorithmError(
+            f"Result carries organization_id {org_id!r}, which is not one of " f"the dispatched organisations."
+        )
+    return int(org_id)
 
 
 def _require_all_organisations_answered(results, ids: list) -> None:

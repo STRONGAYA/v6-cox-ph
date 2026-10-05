@@ -71,7 +71,7 @@ def compute_summed_z(
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times["freq"] = times[outcome_col]
     times = times.drop(columns=outcome_col)
-    return {"sum": z_sum, "times": times.to_dict()}
+    return {"organization_id": client.organization_id, "sum": z_sum, "times": times.to_dict()}
 
 
 @data(1)
@@ -147,4 +147,4 @@ def perform_iteration(
     agg2 = pd.DataFrame(agg2).to_dict()
     agg3 = [array.tolist() for array in agg3]
 
-    return {"agg1": agg1, "agg2": agg2, "agg3": agg3}
+    return {"organization_id": client.organization_id, "agg1": agg1, "agg2": agg2, "agg3": agg3}
