@@ -211,8 +211,8 @@ def central(
             org_id = _result_org_id(output, ids)
             _validate_iteration_result(output, n_times, n_covs, expl_vars, org_id)
             summed_agg1 += np.array(output["agg1"])
-            summed_agg2 += np.array(pd.DataFrame.from_dict(output["agg2"]))
-            summed_agg3 += np.array([np.array(lst) for lst in output["agg3"]])
+            summed_agg2 += np.asarray(output["agg2"], dtype=float)
+            summed_agg3 += np.array(output["agg3"])
 
         # The log-likelihood at the current beta, from aggregates that are
         # already collected (no extra round-trip).
@@ -423,13 +423,11 @@ def _validate_iteration_result(output: dict, n_times: int, n_covs: int, expl_var
         raise AlgorithmError(f"Organisation {org_id}: agg1 has length {len(agg1)}, " f"expected {n_times}")
     if not np.all(np.isfinite(agg1)):
         raise AlgorithmError(f"Organisation {org_id}: agg1 contains non-finite values")
-    agg2_df = pd.DataFrame.from_dict(output["agg2"])
-    if list(agg2_df.columns) != list(expl_vars):
-        raise AlgorithmError(
-            f"Organisation {org_id}: agg2 columns {list(agg2_df.columns)} " f"do not match expl_vars {list(expl_vars)}"
-        )
-    if agg2_df.shape[0] != n_times:
-        raise AlgorithmError(f"Organisation {org_id}: agg2 has {agg2_df.shape[0]} rows, " f"expected {n_times}")
+    agg2 = np.asarray(output["agg2"], dtype=float)
+    if agg2.shape != (n_times, n_covs):
+        raise AlgorithmError(f"Organisation {org_id}: agg2 has shape {agg2.shape}, " f"expected ({n_times}, {n_covs})")
+    if not np.all(np.isfinite(agg2)):
+        raise AlgorithmError(f"Organisation {org_id}: agg2 contains non-finite values")
     agg3 = np.array([np.array(lst) for lst in output["agg3"]])
     if agg3.shape != (n_times, n_covs, n_covs):
         raise AlgorithmError(

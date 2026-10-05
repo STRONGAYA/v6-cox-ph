@@ -9,7 +9,8 @@ shared ``prepare_node_data`` step, in this order::
     -> (validate_expl_vars, where expl_vars are used) -> drop_incomplete_rows
     -> validate_survival_columns -> select_rows (hook) -> check_sample_size
     -> (validate_iteration_input, perform_iteration only)
-    -> prepare_time_column -> (function-specific work)
+    -> prepare_time_column -> (function-specific work; perform_iteration
+    builds its risk sets with guarded_risk_set_aggregates)
 
 The settings are read from node environment variables (``algorithm_env``)
 via ``get_env_var``:
@@ -263,6 +264,104 @@ def prepare_node_data(
     threshold_met = check_sample_size(df, outcome, settings)
 
     return df, settings, threshold_met
+
+
+def guarded_risk_set_aggregates(
+    times: pd.Series,
+    grid: list[float],
+    k: int,
+    X: np.ndarray,
+    beta: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorised risk-set aggregates with the minimum-change ("jump") guard.
+
+    Rows are bucketed by grid point with ``searchsorted`` and summed per
+    bucket with ``bincount`` (S0, S1 per covariate, S2 per covariate pair);
+    reverse cumulative sums turn the bucket sums into risk-set sums. The
+    jump guard becomes an *effective grid index* computed from the bucket
+    counts alone: walking the grid while keeping the index ``h`` of the held
+    risk set, ``removed = |R(h)| - |R(j+1)|``; if ``0 < removed < k`` the
+    previous set is held (``h`` stays), otherwise ``h = j+1``. This matches
+    the previous mask implementation exactly (see the reference copy in
+    ``tests/unit/reference_risk_sets.py``).
+
+    Complexity: O(N·p²) compute and O(N·p + T·p²) memory, instead of T×N
+    boolean masks.
+
+    Parameters
+    ----------
+    times : pd.Series
+        The node's (binned, tail-censored) times.
+    grid : list[float]
+        The sorted event-time grid.
+    k : int
+        The minimum risk-set change; ``k <= 1`` disables the guard.
+    X : np.ndarray
+        The (standardised) covariate matrix, shape (N, p).
+    beta : np.ndarray
+        The coefficient vector, shape (p,).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        ``agg1`` (T,), ``agg2`` (T, p) and ``agg3`` (T, p, p): the shared
+        risk-set sums S0(t) = sum exp(beta.x), S1(t) = sum x exp(beta.x) and
+        S2(t) = sum x x^T exp(beta.x) per grid point.
+    """
+    grid_arr = np.asarray(grid, dtype=float)
+    n_times = len(grid_arr)
+    n_covs = X.shape[1]
+
+    times_arr = pd.to_numeric(times, errors="coerce").to_numpy(dtype=float)
+    weights = np.exp(X @ beta)
+
+    # Bucket each row at the largest grid point that does not exceed its
+    # time; a row in bucket b is in the risk sets of grid points 0..b.
+    # Rows before the first grid point land in bucket -1 (in no risk set).
+    finite = np.isfinite(times_arr)
+    bucket = np.searchsorted(grid_arr, times_arr, side="right") - 1
+    in_grid = (bucket >= 0) & finite
+    bucket_clipped = np.where(in_grid, bucket, 0)
+
+    # Per-bucket sums; reverse cumulative sums give the risk-set sums.
+    counts = np.bincount(bucket_clipped[in_grid], minlength=n_times).astype(float)
+
+    s0_bucket = np.bincount(bucket_clipped[in_grid], weights=weights[in_grid], minlength=n_times)
+    s0 = np.cumsum(s0_bucket[::-1])[::-1]
+    count_r = np.cumsum(counts[::-1])[::-1]  # |R(t_j)| per grid point
+
+    s1_bucket = np.empty((n_times, n_covs))
+    for c in range(n_covs):
+        s1_bucket[:, c] = np.bincount(bucket_clipped[in_grid], weights=(weights * X[:, c])[in_grid], minlength=n_times)
+    s1 = np.cumsum(s1_bucket[::-1], axis=0)[::-1]
+
+    s2_bucket = np.empty((n_times, n_covs, n_covs))
+    for c1 in range(n_covs):
+        for c2 in range(c1, n_covs):
+            s2_bucket[:, c1, c2] = np.bincount(
+                bucket_clipped[in_grid], weights=(weights * X[:, c1] * X[:, c2])[in_grid], minlength=n_times
+            )
+            if c2 != c1:
+                s2_bucket[:, c2, c1] = s2_bucket[:, c1, c2]
+    s2 = np.cumsum(s2_bucket[::-1], axis=0)[::-1]
+
+    # Effective grid index from the counts alone (the jump guard).
+    if k is None or k <= 1:
+        effective = np.arange(n_times)
+    else:
+        effective = np.empty(n_times, dtype=int)
+        effective[0] = 0
+        held = 0
+        for j in range(1, n_times):
+            removed = count_r[held] - count_r[j]
+            if not (0 < removed < k):
+                held = j
+            effective[j] = held
+
+    agg1 = s0[effective]
+    agg2 = s1[effective]
+    agg3 = s2[effective]
+    return agg1, agg2, agg3
 
 
 def validate_survival_columns(df: pd.DataFrame, time_col: str, outcome_col: Optional[str]) -> None:
@@ -523,41 +622,6 @@ def prepare_time_column(
                 out.loc[clamp_mask, outcome_col] = 0
 
     return out
-
-
-def guarded_risk_set_masks(times: pd.Series, grid: list[float], k: int) -> list[np.ndarray]:
-    """Compute risk-set masks with the minimum-change ("jump") guard.
-
-    Walking the grid from smallest to largest time, if moving from ``t_i`` to
-    ``t_{i+1}`` would remove fewer than ``k`` (but more than zero)
-    individuals from the risk set, the previous (larger) risk set is held.
-    Consequently consecutive shared aggregates differ by 0 or by at least
-    ``k`` individuals. When ``k <= 1`` the guard is a no-op and the masks are
-    the plain ``times >= t`` masks.
-
-    Returns
-    -------
-    list[np.ndarray]
-        One boolean mask per grid point (aligned with ``grid``).
-    """
-    times_arr = pd.to_numeric(times, errors="coerce").to_numpy()
-
-    if k is None or k <= 1:
-        return [times_arr >= t for t in grid]
-
-    masks: list[np.ndarray] = []
-    current = times_arr >= grid[0]
-    masks.append(current)
-    for t in grid[1:]:
-        cand = times_arr >= t
-        removed = int(current.sum() - cand.sum())
-        if 0 < removed < k:
-            # Hold the previous risk set.
-            masks.append(current)
-        else:
-            current = cand
-            masks.append(current)
-    return masks
 
 
 def validate_expl_vars(df: pd.DataFrame, expl_vars: list, time_col: str, outcome_col: str | None) -> None:

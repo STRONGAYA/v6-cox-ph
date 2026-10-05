@@ -15,7 +15,7 @@ from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
 from vantage6.algorithm.tools.util import info
 
 from .privacy_guards import (
-    guarded_risk_set_masks,
+    guarded_risk_set_aggregates,
     prepare_node_data,
     prepare_time_column,
     validate_iteration_input,
@@ -156,31 +156,15 @@ def perform_iteration(
 
     df = prepare_time_column(df, time_col, settings, outcome_col)
 
-    num_unique_time_events = len(unique_time_events)
-    num_explanatory_vars = len(expl_vars)
-
-    masks = guarded_risk_set_masks(df[time_col], unique_time_events, settings.min_risk_set_change)
     X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 
-    agg1: list = []
-    agg2: list = []
-    agg3: list = []
+    agg1, agg2, agg3 = guarded_risk_set_aggregates(
+        df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta
+    )
 
-    for i in range(num_unique_time_events):
-        mask = masks[i]
-        n_in_set = int(mask.sum())
-        if n_in_set == 0:
-            agg1.append(0)
-            agg2.append(pd.Series(np.zeros(num_explanatory_vars), index=expl_vars))
-            agg3.append(np.zeros((num_explanatory_vars, num_explanatory_vars)))
-        else:
-            X = X_all[mask]
-            ebz = np.exp(X @ beta)
-            agg1.append(float(ebz.sum()))
-            agg2.append(pd.Series((X * ebz[:, None]).sum(axis=0), index=expl_vars))
-            agg3.append((X * ebz[:, None]).T @ X)
-
-    agg2 = pd.DataFrame(agg2).to_dict()
-    agg3 = [array.tolist() for array in agg3]
-
-    return {"organization_id": client.organization_id, "agg1": agg1, "agg2": agg2, "agg3": agg3}
+    return {
+        "organization_id": client.organization_id,
+        "agg1": agg1.tolist(),
+        "agg2": agg2.tolist(),
+        "agg3": agg3.tolist(),
+    }

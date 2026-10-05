@@ -43,7 +43,8 @@ v6-cox-ph/                 algorithm package (the hyphenated name is intentional
                            (both decorated, both guarded)
   coxph_logic.py           pure math: derivatives, Newton step, model results
   privacy_guards.py        pure guards: parent-task check, thresholds, binning,
-                           tail censoring, risk-set jump guard
+                           tail censoring, vectorised risk-set aggregates with
+                           the jump guard
   miscellaneous.py         pydantic input model, data-quality helpers
   __init__.py              exports central and the partials
 algorithm_store.json       wire contract — function names, arguments, types
@@ -199,6 +200,11 @@ deliberately runs glibc and unlocked to test the declared range.
   ``check_sample_size``. Do not reorder or skip any of them; the unit
   tests assert the order. ``validate_iteration_input``
   (``perform_iteration`` only) and ``prepare_time_column`` run afterwards.
+  ``perform_iteration`` builds its aggregates with the vectorised
+  ``guarded_risk_set_aggregates`` (``searchsorted``/``bincount``/reverse
+  cumsum; the jump guard comes from the bucket counts) — the previous mask
+  implementation lives on in ``tests/unit/reference_risk_sets.py`` as the
+  equivalence-test reference. ``agg2`` travels as a plain (T x p) list.
 - **No new partial** without a sample-size threshold, parent-task guard and
   documentation in ``Privacy.rst``.
 - **Do not log data values or counts**; use ``info``/``warn`` for status

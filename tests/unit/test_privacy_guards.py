@@ -32,7 +32,7 @@ from privacy_guards import (  # noqa: E402
     check_sample_size,
     drop_incomplete_rows,
     ensure_spawned_by_central,
-    guarded_risk_set_masks,
+    guarded_risk_set_aggregates,
     load_privacy_settings,
     prepare_node_data,
     prepare_time_column,
@@ -42,6 +42,7 @@ from privacy_guards import (  # noqa: E402
     validate_survival_columns,
 )
 import privacy_guards  # noqa: E402
+from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
 
 
 @pytest.mark.unit
@@ -704,3 +705,68 @@ class TestDropIncompleteRows:
         df = pd.DataFrame({"time": [1.0, 2.0], "event": [1, 0]})
         out = drop_incomplete_rows(df, ["time", "missing"])
         assert len(out) == 2
+
+
+@pytest.mark.unit
+class TestRiskSetEquivalence:
+    """The vectorised aggregates equal the reference mask implementation."""
+
+    def _random_case(self, seed: int, n_rows: int, n_grid: int, n_covs: int, k: int, tie: bool):
+        """Build a random times/grid/covariates case with optional ties."""
+        rng = np.random.default_rng(seed)
+        grid = np.sort(rng.choice(np.arange(1, n_grid + 1) * 1.0, size=n_grid // 2, replace=False))
+        times = rng.uniform(0.5, float(grid[-1]) + 1.0, size=n_rows)
+        if tie:
+            # Put some rows exactly on grid points and duplicate some times
+            on_grid = rng.choice(len(grid), size=min(5, n_rows))
+            times[on_grid] = grid[on_grid]
+            times[: min(3, n_rows)] = times[0]
+        X = rng.normal(size=(n_rows, n_covs))
+        beta = rng.normal(size=n_covs)
+        return pd.Series(times), grid.tolist(), X, beta
+
+    @pytest.mark.parametrize("k", [1, 3, 5])
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_matches_reference(self, k, seed):
+        """agg1/agg2/agg3 equal the mask implementation to rtol=1e-12."""
+        from tests.unit.reference_risk_sets import mask_based_aggregates
+
+        times, grid, X, beta = self._random_case(seed, n_rows=60, n_grid=30, n_covs=3, k=k, tie=True)
+
+        ref1, ref2, ref3 = mask_based_aggregates(times, grid, k, X, beta)
+        new1, new2, new3 = guarded_risk_set_aggregates(times, grid, k, X, beta)
+
+        np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(new2, ref2, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(new3, ref3, rtol=1e-12, atol=1e-14)
+
+    def test_rows_off_grid_and_before_grid(self):
+        """Rows between grid points and before the first grid point count correctly."""
+        from tests.unit.reference_risk_sets import mask_based_aggregates
+
+        times = pd.Series([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 7.5])
+        grid = [1.0, 2.0, 3.0, 5.0]
+        X = np.arange(14, dtype=float).reshape(7, 2)
+        beta = np.array([0.1, -0.2])
+
+        for k in (1, 3):
+            ref1, ref2, ref3 = mask_based_aggregates(times, grid, k, X, beta)
+            new1, new2, new3 = guarded_risk_set_aggregates(times, grid, k, X, beta)
+            np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(new2, ref2, rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(new3, ref3, rtol=1e-12, atol=1e-14)
+
+    def test_empty_risk_sets_match_reference(self):
+        """Grid points beyond all rows give zero aggregates, as the masks did."""
+        from tests.unit.reference_risk_sets import mask_based_aggregates
+
+        times = pd.Series([1.0, 2.0, 3.0])
+        grid = [1.0, 5.0, 9.0]
+        X = np.array([[0.0, 1.0], [1.0, 0.0], [2.0, 2.0]])
+        beta = np.zeros(2)
+
+        ref1, ref2, ref3 = mask_based_aggregates(times, grid, 1, X, beta)
+        new1, new2, new3 = guarded_risk_set_aggregates(times, grid, 1, X, beta)
+        np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
+        # The grid points beyond every row have empty risk sets
+        assert new1[1] == 0.0 and new1[2] == 0.0

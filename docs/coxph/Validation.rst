@@ -47,6 +47,28 @@ coefficients stay within ``0.1`` of lifelines. A binning test
 (``COXPH_TIME_BIN_WIDTH=10``) checks that all shared event times are
 multiples of 10 and the pipeline converges.
 
+Risk-set performance
+--------------------
+
+``perform_iteration`` computes its risk-set aggregates with a vectorised
+``searchsorted``/``bincount``/reverse-cumsum implementation
+(``guarded_risk_set_aggregates``) instead of T x N boolean masks; the jump
+guard is derived from the bucket counts alone. The previous mask
+implementation is kept verbatim as the reference in
+``tests/unit/reference_risk_sets.py`` and randomised equivalence tests
+(ties, rows on and off grid points, ``k`` in {1, 3, 5}) assert agreement
+to ``rtol=1e-12``.
+
+Benchmark (``scripts/benchmark_risk_sets.py``, 100,000 rows x 10,000
+event times x 10 covariates, ``k=5``):
+
+=========================  ============  =============
+Implementation             Time (s)      Peak memory
+=========================  ============  =============
+Mask-based (reference)     89.3          716.8 MB
+Vectorised (current)        0.12          28.2 MB
+=========================  ============  =============
+
 Run the unit suite without Docker::
 
     pytest -m unit
