@@ -51,6 +51,20 @@ user task → central → get_unique_event_times → compute_summed_z
   They run on each node and return aggregates. Their keyword arguments
   **must match** ``algorithm_store.json`` — that file is the wire contract.
   Each partial declares exactly one database there, matching ``@data(1)``.
+- A node that fails the sample-size threshold is handled differently per
+  partial, on purpose. ``get_unique_event_times`` returns the marker
+  ``{"N-Threshold not met": org_id}`` so that ``central`` can exclude that
+  organisation and retry (at most three rounds). ``compute_summed_z`` and
+  ``perform_iteration`` raise ``PrivacyThresholdViolation``, which stops the
+  whole analysis. That can still happen for a node that passed the first
+  check, once rows with NaN in ``expl_vars`` are dropped. Do not "unify" the
+  two without changing ``central`` to match.
+- ``central`` builds the event-time grid and per-time event counts
+  (``aggregated_time_events``) from the ``times`` returned by
+  ``compute_summed_z``, **not** from ``get_unique_event_times``. Only
+  ``compute_summed_z`` also drops rows with NaN in ``expl_vars``, so only its
+  counts are consistent with ``z_sum`` and the risk sets.
+  ``get_unique_event_times`` is used for node exclusion only.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
   evaluated at the same ``beta``. Results include ``converged`` and
@@ -97,8 +111,10 @@ Build the Docker image::
   ``compute_model_results``, the guards and the pipeline all have exact-value
   assertions.
 - ``MockAlgorithmClient`` (from ``vantage6.algorithm.tools.mock_client``)
-  runs ``central`` end-to-end in-process; the parent-task guard is skipped
-  for it (no ``_access_token``). Import the central module via
+  runs ``central`` end-to-end in-process. The parent-task guard skips it by
+  an explicit ``isinstance`` check, **not** because it has no
+  ``_access_token``. Any other client without a token fails closed (see
+  Privacy rules). Import the central module via
   ``import_module("v6-cox-ph.central")`` because the package name has a
   hyphen.
 - ``lifelines.CoxPHFitter`` is the reference, but it uses Efron ties while
