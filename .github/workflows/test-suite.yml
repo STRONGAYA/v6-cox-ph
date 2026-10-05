@@ -2,9 +2,9 @@ name: Test Suite
 
 on:
   push:
-    branches: [main, standard-coxph, phase1-algorithm-improvements, phase2-strong-aya]
+    branches: [standard-coxph]
   pull_request:
-    branches: [main, standard-coxph, phase1-algorithm-improvements, phase2-strong-aya]
+  workflow_dispatch:
 
 permissions:
   contents: write

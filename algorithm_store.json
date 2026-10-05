@@ -1,6 +1,6 @@
 {
   "name": "coxph",
-  "image": "v6-coxph",
+  "image": "ghcr.io/maastrichtu-cds/v6-coxph-standard-coxph",
   "vantage6_version": "4.14",
   "partitioning": "horizontal",
   "functions": [

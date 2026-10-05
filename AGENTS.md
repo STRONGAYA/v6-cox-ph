@@ -12,6 +12,26 @@ A federated Cox proportional hazards model (Breslow ties) for
 data stations. The partials share only aggregated quantities with the
 central aggregator; no row-level data leaves a node.
 
+## Scope
+
+This repository is the **vanilla** Cox-PH algorithm. Project-specific
+features — data filtering, recoding, project privacy tooling, other data
+sources — do not belong here; they go in project branches or forks. Vanilla
+never depends on project code, and project code never flows back.
+
+## Building on this algorithm
+
+Projects build on this algorithm in a fork or a stacked branch. To stay
+compatible with that:
+
+- Any step that removes rows runs **before** ``check_sample_size`` and
+  identically in all three partials, so every aggregate central combines
+  comes from the same row set on each node.
+- Never weaken the vanilla guards: the parent-task guard, the sample-size
+  threshold and the logging rules stay as they are.
+- A change to the wire contract is a **major** version bump, and the commit
+  message starts with ``BREAKING(wire):``.
+
 ## Repository layout
 
 ```
@@ -179,20 +199,20 @@ Build the Docker image::
 
 ## Branches, docs and releases
 
-- ``standard-coxph`` — stable; the default branch and PR target. There is no
-  ``main`` branch.
-- ``phase1-algorithm-improvements`` — mathematical and privacy hardening of
-  the standard algorithm (convergence, result validation, node-side guards).
-- ``phase2-strong-aya`` — STRONG AYA guards and ``safe_log``; keep changes
-  portable across branches.
+- ``standard-coxph`` is the default branch and the PR target.
+- Semantic versioning. A wire-contract change (partial signatures, result
+  keys, ``algorithm_store.json``) is a major bump and its commit message
+  starts with ``BREAKING(wire):``.
+- Releases are git tags. ``release.yaml`` publishes
+  ``ghcr.io/<owner>/<repository>-<branch>:<tag>`` where ``<branch>`` is the
+  branch whose **tip** is the tagged commit; it fails clearly when none or
+  several branches match, and a ``workflow_dispatch`` input is the escape
+  hatch for a tag that is no longer a branch tip.
 - Update ``docs/coxph`` and ``algorithm_store.json`` whenever a signature or
   output field changes.
 - CI lives in ``.github/workflows``. ``test-suite.yml`` (test, lint,
-  security) runs on pushes and PRs to ``standard-coxph``, ``phase1-…``,
-  ``phase2-…`` and ``main`` (kept in case the default branch is renamed).
-  ``release.yaml`` runs when a git tag is pushed and publishes
-  ``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the
-  branch that contains the tagged commit.
+  security) runs on pushes to the default branch, on every pull request and
+  on manual dispatch.
 
 ## Do not
 
