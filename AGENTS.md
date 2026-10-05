@@ -152,14 +152,20 @@ Build the Docker image::
 
 ## Branches, docs and releases
 
-- ``main`` — stable.
-- ``phase1-algorithm-improvements`` — this hardening work (math + privacy).
+- ``standard-coxph`` — stable; the default branch and PR target. There is no
+  ``main`` branch.
+- ``phase1-algorithm-improvements`` — mathematical and privacy hardening of
+  the standard algorithm (convergence, result validation, node-side guards).
 - ``phase2-strong-aya`` — STRONG AYA guards and ``safe_log``; keep changes
   portable across branches.
 - Update ``docs/coxph`` and ``algorithm_store.json`` whenever a signature or
   output field changes.
-- CI lives in ``.github/workflows``: ``test-suite.yml`` (test, lint,
-  security) and ``release.yaml``.
+- CI lives in ``.github/workflows``. ``test-suite.yml`` (test, lint,
+  security) runs on pushes and PRs to ``standard-coxph``, ``phase1-…``,
+  ``phase2-…`` and ``main`` (kept in case the default branch is renamed).
+  ``release.yaml`` runs when a git tag is pushed and publishes
+  ``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the
+  branch that contains the tagged commit.
 
 ## Do not
 
