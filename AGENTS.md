@@ -6,7 +6,8 @@ working in this repository. Read this before touching node-side code.
 ## What this repository is
 
 A federated Cox proportional hazards model (Breslow ties) for
-[vantage6](https://vantage6.ai) 4.x. One Docker image exposes a single
+[vantage6](https://vantage6.ai) 4.14–4.15 (the range pinned in
+``pyproject.toml`` and tested in CI). One Docker image exposes a single
 ``central`` aggregator function and three ``partial`` functions that run on
 data stations. The partials share only aggregated quantities with the
 central aggregator; no row-level data leaves a node.
@@ -49,6 +50,7 @@ user task → central → get_unique_event_times → compute_summed_z
 - The three partials are decorated with ``@data(1)`` and ``@algorithm_client``.
   They run on each node and return aggregates. Their keyword arguments
   **must match** ``algorithm_store.json`` — that file is the wire contract.
+  Each partial declares exactly one database there, matching ``@data(1)``.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
   evaluated at the same ``beta``. Results include ``converged`` and

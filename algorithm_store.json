@@ -1,7 +1,7 @@
 {
   "name": "coxph",
   "image": "v6-coxph",
-  "vantage6_version": "4.3",
+  "vantage6_version": "4.14",
   "partitioning": "horizontal",
   "functions": [
     {
@@ -39,9 +39,6 @@
       "databases": [
         {
           "name": "Database 1"
-        },
-        {
-          "name": "Database 2"
         }
       ],
       "arguments": [
@@ -64,9 +61,6 @@
       "databases": [
         {
           "name": "Database 1"
-        },
-        {
-          "name": "Database 2"
         }
       ],
       "arguments": [
@@ -94,9 +88,6 @@
       "databases": [
         {
           "name": "Database 1"
-        },
-        {
-          "name": "Database 2"
         }
       ],
       "arguments": [
