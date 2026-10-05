@@ -21,7 +21,9 @@ create a Docker image of your algorithm.
 
 The easiest way to create a Docker image is to use the GitHub Actions pipeline to
 automatically build and push the Docker image. All that you need to do is push a
-commit to the ``main`` branch.
+git tag. The ``release.yaml`` workflow publishes the image as
+``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the branch
+that contains the tagged commit (e.g. ``standard-coxph``).
 
 #### Manually
 

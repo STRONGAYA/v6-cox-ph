@@ -5,7 +5,9 @@ These guards are pure functions (DataFrame/array in, DataFrame/array out)
 so they can be unit-tested without vantage6. They are called from all three
 partial functions in the same order::
 
-    ensure_spawned_by_central -> load_privacy_settings -> check_sample_size
+    ensure_spawned_by_central -> load_privacy_settings
+    -> (validate_expl_vars, where expl_vars are used) -> drop_incomplete_rows
+    -> check_sample_size -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work)
 
 The settings are read from node environment variables (``algorithm_env``)
@@ -79,8 +81,7 @@ def load_privacy_settings() -> PrivacySettings:
     )
     if sample_size_threshold is None or sample_size_threshold <= 0:
         raise UserInputError(
-            f"{ENV_SAMPLE_SIZE_THRESHOLD} must be a positive integer, got "
-            f"{sample_size_threshold!r}"
+            f"{ENV_SAMPLE_SIZE_THRESHOLD} must be a positive integer, got " f"{sample_size_threshold!r}"
         )
 
     min_risk_set_change = get_env_var(
@@ -90,8 +91,7 @@ def load_privacy_settings() -> PrivacySettings:
     )
     if min_risk_set_change is None or min_risk_set_change < 1:
         raise UserInputError(
-            f"{ENV_MIN_RISK_SET_CHANGE} must be a positive integer (>= 1), got "
-            f"{min_risk_set_change!r}"
+            f"{ENV_MIN_RISK_SET_CHANGE} must be a positive integer (>= 1), got " f"{min_risk_set_change!r}"
         )
 
     if sample_size_threshold + 1 < min_risk_set_change:
@@ -109,14 +109,10 @@ def load_privacy_settings() -> PrivacySettings:
             time_bin_width = float(time_bin_width_raw)
         except (TypeError, ValueError) as e:
             raise UserInputError(
-                f"{ENV_TIME_BIN_WIDTH} must be a positive float, got "
-                f"{time_bin_width_raw!r}"
+                f"{ENV_TIME_BIN_WIDTH} must be a positive float, got " f"{time_bin_width_raw!r}"
             ) from e
         if time_bin_width <= 0:
-            raise UserInputError(
-                f"{ENV_TIME_BIN_WIDTH} must be a positive float, got "
-                f"{time_bin_width}"
-            )
+            raise UserInputError(f"{ENV_TIME_BIN_WIDTH} must be a positive float, got " f"{time_bin_width}")
 
     return PrivacySettings(
         sample_size_threshold=sample_size_threshold,
@@ -155,8 +151,7 @@ def ensure_spawned_by_central(client) -> None:
     token = getattr(client, "_access_token", None)
     if token is None:
         raise AlgorithmError(
-            "No access token found on client; cannot verify parent task. "
-            "Refusing to proceed (fail closed)."
+            "No access token found on client; cannot verify parent task. " "Refusing to proceed (fail closed)."
         )
 
     try:
@@ -170,16 +165,12 @@ def ensure_spawned_by_central(client) -> None:
         )
         task_id = payload["sub"]["task_id"]
     except Exception as e:
-        raise AlgorithmError(
-            f"Could not decode task identity from container token: {e}"
-        ) from e
+        raise AlgorithmError(f"Could not decode task identity from container token: {e}") from e
 
     try:
         task = client.task.get(task_id)
     except Exception as e:
-        raise AlgorithmError(
-            f"Could not look up task {task_id} for parent-task guard: {e}"
-        ) from e
+        raise AlgorithmError(f"Could not look up task {task_id} for parent-task guard: {e}") from e
 
     parent = task.get("parent") if isinstance(task, dict) else None
     if not parent:
@@ -190,12 +181,13 @@ def ensure_spawned_by_central(client) -> None:
     safe_log("info", "Parent-task guard passed: task has a parent.")
 
 
-def check_sample_size(
-    df: pd.DataFrame, outcome_col: Optional[str], settings: PrivacySettings
-) -> bool:
+def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: PrivacySettings) -> bool:
     """Check whether the node meets the sample-size threshold.
 
-    Both rows and events must be strictly greater than the threshold.
+    Both rows and events must be strictly greater than the threshold. The
+    warning on failure names the threshold but never the actual count: the
+    container log is returned to the researcher with the run, and a
+    below-threshold count is exactly what the threshold protects.
 
     Parameters
     ----------
@@ -215,22 +207,15 @@ def check_sample_size(
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
-        safe_log(
-            "warning", f"Sample size threshold not met: {n_rows} rows <= {threshold}."
-        )
+        safe_log("warning", f"Sample size threshold not met: row count does not exceed {threshold}.")
         return False
 
     if outcome_col is not None:
         if outcome_col not in df.columns:
-            raise UserInputError(
-                f"Outcome column '{outcome_col}' not found in data columns."
-            )
+            raise UserInputError(f"Outcome column '{outcome_col}' not found in data columns.")
         n_events = int((df[outcome_col] == 1).sum())
         if n_events <= threshold:
-            safe_log(
-                "warning",
-                f"Sample size threshold not met: {n_events} events <= " f"{threshold}.",
-            )
+            safe_log("warning", f"Sample size threshold not met: event count does not exceed {threshold}.")
             return False
 
     return True
@@ -275,8 +260,7 @@ def validate_iteration_input(
 
     if beta_arr.ndim != 1 or len(beta_arr) != len(expl_vars):
         raise UserInputError(
-            f"beta must have length {len(expl_vars)} (one per explanatory "
-            f"variable), got shape {beta_arr.shape}"
+            f"beta must have length {len(expl_vars)} (one per explanatory " f"variable), got shape {beta_arr.shape}"
         )
     if not np.all(np.isfinite(beta_arr)):
         raise UserInputError("beta contains non-finite values (NaN or inf).")
@@ -287,9 +271,7 @@ def validate_iteration_input(
     try:
         grid = [float(t) for t in unique_time_events]
     except (TypeError, ValueError) as e:
-        raise UserInputError(
-            f"unique_time_events must be a list of numbers: {e}"
-        ) from e
+        raise UserInputError(f"unique_time_events must be a list of numbers: {e}") from e
 
     if len(grid) == 0:
         raise UserInputError("unique_time_events must not be empty.")
@@ -310,8 +292,7 @@ def validate_iteration_input(
             binned = np.floor(t / width) * width
             if not np.isclose(binned, t):
                 raise UserInputError(
-                    f"unique_time_events contains time {t} that is not on the "
-                    f"bin grid (width={width})."
+                    f"unique_time_events contains time {t} that is not on the " f"bin grid (width={width})."
                 )
 
     return beta_arr, grid
@@ -350,8 +331,7 @@ def tail_cutoff(times: pd.Series, k: int) -> float | None:
     vals = pd.to_numeric(times, errors="coerce").dropna().to_numpy()
     if len(vals) < k:
         raise PrivacyViolation(
-            f"Tail censoring requires at least {k} valid times but only "
-            f"{len(vals)} are available."
+            f"Tail censoring requires at least {k} valid times but only " f"{len(vals)} are available."
         )
     return float(np.sort(vals)[-k])
 
@@ -388,9 +368,7 @@ def prepare_time_column(
     return out
 
 
-def guarded_risk_set_masks(
-    times: pd.Series, grid: list[float], k: int
-) -> list[np.ndarray]:
+def guarded_risk_set_masks(times: pd.Series, grid: list[float], k: int) -> list[np.ndarray]:
     """Compute risk-set masks with the minimum-change ("jump") guard.
 
     Walking the grid from smallest to largest time, if moving from ``t_i`` to
@@ -425,9 +403,7 @@ def guarded_risk_set_masks(
     return masks
 
 
-def validate_expl_vars(
-    df: pd.DataFrame, expl_vars: list, time_col: str, outcome_col: str | None
-) -> None:
+def validate_expl_vars(df: pd.DataFrame, expl_vars: list, time_col: str, outcome_col: str | None) -> None:
     """Validate explanatory variables on the node (FR-B3).
 
     Checks that every name in ``expl_vars`` is a column of ``df``, does not
@@ -442,24 +418,13 @@ def validate_expl_vars(
     """
     for var in expl_vars:
         if var not in df.columns:
-            raise UserInputError(
-                f"Explanatory variable '{var}' not found in data columns."
-            )
+            raise UserInputError(f"Explanatory variable '{var}' not found in data columns.")
         if var == time_col:
-            raise UserInputError(
-                f"Explanatory variable '{var}' must not equal time_col "
-                f"'{time_col}'."
-            )
+            raise UserInputError(f"Explanatory variable '{var}' must not equal time_col " f"'{time_col}'.")
         if outcome_col is not None and var == outcome_col:
-            raise UserInputError(
-                f"Explanatory variable '{var}' must not equal outcome_col "
-                f"'{outcome_col}'."
-            )
+            raise UserInputError(f"Explanatory variable '{var}' must not equal outcome_col " f"'{outcome_col}'.")
         if not pd.api.types.is_numeric_dtype(df[var]):
-            raise UserInputError(
-                f"Explanatory variable '{var}' must be numeric, got "
-                f"dtype {df[var].dtype}."
-            )
+            raise UserInputError(f"Explanatory variable '{var}' must be numeric, got " f"dtype {df[var].dtype}.")
 
 
 def drop_incomplete_rows(df: pd.DataFrame, cols: list) -> pd.DataFrame:

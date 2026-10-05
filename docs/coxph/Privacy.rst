@@ -8,9 +8,11 @@ The partial functions run on each data station and share only aggregated
 quantities with the central aggregator. Several guards protect against the
 main leakage channels of the federated design. All guards are implemented in
 ``v6-cox-ph/privacy_guards.py`` and applied in the same order in every
-partial: parent-task check, settings load, sample-size threshold, time-column
-preparation (binning, tail censoring), and the risk-set jump guard
-(``perform_iteration`` only).
+partial: parent-task check, settings load, explanatory-variable validation
+(``compute_summed_z`` and ``perform_iteration``), NaN row dropping,
+sample-size threshold, iteration-input validation (``perform_iteration``
+only), time-column preparation (binning, tail censoring), and the risk-set
+jump guard (``perform_iteration`` only).
 
 Parent-task guard
 ~~~~~~~~~~~~~~~~~
@@ -59,6 +61,14 @@ In ``perform_iteration``, walking the requested time grid, if moving from
 individuals from the node's risk set, the node keeps using ``R(t_i)``
 ("hold"). Consecutive shared aggregates therefore differ by 0 or by at
 least ``k`` individuals.
+
+Logging
+~~~~~~~
+
+The algorithm container log is returned to the server with the run and can
+be read by the researcher. Partials therefore log status only: never data
+values, and never counts. A failed sample-size check names the configured
+threshold but not the number of rows or events the node actually has.
 
 Configuration
 ~~~~~~~~~~~~~

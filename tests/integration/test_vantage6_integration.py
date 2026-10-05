@@ -112,9 +112,7 @@ def cleanup_vantage6_network(
                             docker_client.containers.get(container_id)
                             time.sleep(1)
                         except docker.errors.NotFound:
-                            print(
-                                f"Container {container_id[:12]} removed by another process"
-                            )
+                            print(f"Container {container_id[:12]} removed by another process")
                             return True
                     print(f"Container {container_id[:12]} removal timed out")
                     return False
@@ -128,14 +126,8 @@ def cleanup_vantage6_network(
         # Clean up remaining containers in parallel for speed
         if containers_to_cleanup:
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [
-                    executor.submit(cleanup_container, cid)
-                    for cid in containers_to_cleanup
-                ]
-                results = [  # noqa: F841
-                    f.result()
-                    for f in concurrent.futures.as_completed(futures, timeout=60)
-                ]
+                futures = [executor.submit(cleanup_container, cid) for cid in containers_to_cleanup]
+                results = [f.result() for f in concurrent.futures.as_completed(futures, timeout=60)]  # noqa: F841
 
         return True
 
@@ -154,9 +146,7 @@ class TestVantage6DeveloperNetwork:
 
         # Check that Docker containers are running
         created_containers = vantage6_network_session["created_containers"]
-        assert (
-            len(created_containers) >= 4
-        ), f"Expected at least 4 new containers, found {len(created_containers)}"
+        assert len(created_containers) >= 4, f"Expected at least 4 new containers, found {len(created_containers)}"
 
         # Categorise containers and check their expected states
         service_containers = []
@@ -183,18 +173,14 @@ class TestVantage6DeveloperNetwork:
             ), f"Service container {container.name} should be running: {container.status}"
 
         # Task containers can be in various states (running, exited)
-        print(
-            f"Found {len(service_containers)} service containers and {len(task_containers)} task containers"
-        )
+        print(f"Found {len(service_containers)} service containers and {len(task_containers)} task containers")
 
         # Ensure we have at least the core service containers
         assert (
             len(service_containers) >= 3
         ), f"Expected at least 3 service containers (server, UI, node), found {len(service_containers)}"
 
-    def _identify_container_types(
-        self, docker_client, created_containers: List[str]
-    ) -> Dict[str, List]:
+    def _identify_container_types(self, docker_client, created_containers: List[str]) -> Dict[str, List]:
         """Identify server and node containers from created containers."""
         server_containers = []
         node_containers = []
@@ -221,9 +207,7 @@ class TestVantage6DeveloperNetwork:
             "other": other_containers,
         }
 
-    def _check_container_logs_for_connection(
-        self, container, search_patterns: List[str]
-    ) -> Tuple[bool, List[str]]:
+    def _check_container_logs_for_connection(self, container, search_patterns: List[str]) -> Tuple[bool, List[str]]:
         """Check container logs for connection-related messages."""
         try:
             logs = container.logs(tail=-100).decode("utf-8", errors="ignore")
@@ -239,9 +223,7 @@ class TestVantage6DeveloperNetwork:
             print(f"Failed to get logs for {container.name}: {e}")
             return False, []
 
-    def _check_network_connectivity(
-        self, docker_client, node_container, server_container
-    ) -> bool:
+    def _check_network_connectivity(self, docker_client, node_container, server_container) -> bool:
         """Check if node container can reach server container."""
         try:
             # Get server container's IP address
@@ -279,9 +261,7 @@ class TestVantage6DeveloperNetwork:
 
         server_container = server_containers[0]  # Use first server container
 
-        print(
-            f"Testing connections between {len(node_containers)} nodes and server {server_container.name}"
-        )
+        print(f"Testing connections between {len(node_containers)} nodes and server {server_container.name}")
 
         # Patterns to look for in server logs indicating node connections
         server_connection_patterns = [
@@ -313,18 +293,14 @@ class TestVantage6DeveloperNetwork:
         retry_interval = 15  # Time between retry attempts (seconds)
         start_time = time.time()
 
-        print(
-            f"Checking node connections with retry logic (max {max_retry_time}s, {retry_interval}s intervals)"
-        )
+        print(f"Checking node connections with retry logic (max {max_retry_time}s, {retry_interval}s intervals)")
 
         while True:
             elapsed_time = time.time() - start_time
 
             # Check server logs for node connections
-            server_has_connections, server_patterns = (
-                self._check_container_logs_for_connection(
-                    server_container, server_connection_patterns
-                )
+            server_has_connections, server_patterns = self._check_container_logs_for_connection(
+                server_container, server_connection_patterns
             )
 
             if server_has_connections:
@@ -342,26 +318,18 @@ class TestVantage6DeveloperNetwork:
                     continue
 
                 # Check node logs for connection indicators
-                node_connected, node_patterns = (
-                    self._check_container_logs_for_connection(
-                        node_container, node_connection_patterns
-                    )
+                node_connected, node_patterns = self._check_container_logs_for_connection(
+                    node_container, node_connection_patterns
                 )
 
                 # Check network connectivity
-                network_reachable = self._check_network_connectivity(
-                    docker_client, node_container, server_container
-                )
+                network_reachable = self._check_network_connectivity(docker_client, node_container, server_container)
 
                 if node_connected:
-                    print(
-                        f"Node {node_container.name} shows connection: {node_patterns}"
-                    )
+                    print(f"Node {node_container.name} shows connection: {node_patterns}")
                     connected_nodes += 1
                 elif network_reachable:
-                    print(
-                        f"Node {node_container.name} can reach server but no clear connection logs"
-                    )
+                    print(f"Node {node_container.name} can reach server but no clear connection logs")
                     connected_nodes += 1
 
             # Success condition: at least one node connected
@@ -409,17 +377,13 @@ class TestVantage6DeveloperNetwork:
                 health = container.attrs.get("State", {}).get("Health", {})
                 if health:
                     health_status = health.get("Status", "unknown")
-                    print(
-                        f"{container_type.title()} {container.name} health: {health_status}"
-                    )
+                    print(f"{container_type.title()} {container.name} health: {health_status}")
 
                     # If health check is configured, it should be healthy
                     if health_status in ["starting", "healthy"]:
                         continue  # These are acceptable states
                     elif health_status == "unhealthy":
-                        pytest.fail(
-                            f"{container_type.title()} container {container.name} is unhealthy"
-                        )
+                        pytest.fail(f"{container_type.title()} container {container.name} is unhealthy")
 
 
 @pytest.mark.integration
@@ -436,13 +400,9 @@ class TestAlgorithmImage:
         try:
             image = docker_client.images.get(algorithm_image["tag"])
             assert image.id == algorithm_image["id"]
-            print(
-                f"Algorithm image verified: {algorithm_image['tag']} ({algorithm_image['id'][:12]})"
-            )
+            print(f"Algorithm image verified: {algorithm_image['tag']} ({algorithm_image['id'][:12]})")
         except docker.errors.ImageNotFound:
-            pytest.fail(
-                f"Built algorithm image {algorithm_image['tag']} not found in Docker"
-            )
+            pytest.fail(f"Built algorithm image {algorithm_image['tag']} not found in Docker")
 
     def test_algorithm_image_can_run(self, algorithm_image, docker_client):
         """Test that the algorithm image can be instantiated."""

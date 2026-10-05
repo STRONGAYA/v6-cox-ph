@@ -327,9 +327,7 @@ class TestPrepareTimeColumn:
 
     @pytest.fixture
     def settings_default(self):
-        return PrivacySettings(
-            sample_size_threshold=10, time_bin_width=None, min_risk_set_change=5
-        )
+        return PrivacySettings(sample_size_threshold=10, time_bin_width=None, min_risk_set_change=5)
 
     @pytest.fixture
     def settings_binned(self):
@@ -341,9 +339,7 @@ class TestPrepareTimeColumn:
 
     @pytest.fixture
     def settings_k1(self):
-        return PrivacySettings(
-            sample_size_threshold=10, time_bin_width=None, min_risk_set_change=1
-        )
+        return PrivacySettings(sample_size_threshold=10, time_bin_width=None, min_risk_set_change=1)
 
     def test_no_binning_no_censor(self, settings_k1):
         df = pd.DataFrame({"time": [1.0, 5.0, 10.0], "event": [1, 0, 1]})
@@ -427,9 +423,7 @@ class TestGuardedRiskSetMasks:
         sizes = [int(m.sum()) for m in masks]
         for i in range(1, len(sizes)):
             change = sizes[i - 1] - sizes[i]
-            assert (
-                change == 0 or change >= 5
-            ), f"change {change} at index {i} (sizes={sizes})"
+            assert change == 0 or change >= 5, f"change {change} at index {i} (sizes={sizes})"
 
     def test_tail_goes_to_empty_only_from_ge_k(self):
         """The final transition to an empty risk set must remove >= k."""
@@ -475,9 +469,7 @@ class TestDropIncompleteRows:
     """Tests for drop_incomplete_rows (FR-B4)."""
 
     def test_drops_nan_rows(self):
-        df = pd.DataFrame(
-            {"time": [1.0, np.nan, 3.0], "event": [1, 1, 0], "age": [50, 60, np.nan]}
-        )
+        df = pd.DataFrame({"time": [1.0, np.nan, 3.0], "event": [1, 1, 0], "age": [50, 60, np.nan]})
         out = drop_incomplete_rows(df, ["time", "event", "age"])
         assert len(out) == 1
         assert out.index.tolist() == [0]

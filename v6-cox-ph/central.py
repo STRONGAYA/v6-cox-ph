@@ -14,7 +14,6 @@ from scipy.linalg import solve
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
-from vantage6.algorithm.tools.util import error, info, warn
 from vantage6_strongaya_general.miscellaneous import (
     collect_organisation_ids,
     safe_log,
@@ -108,13 +107,9 @@ def central(
         if n_loops > 2:
             safe_log(
                 "error",
-                "Sample size violations should be eliminated yet criteria "
-                "are not met. Exiting",
+                "Sample size violations should be eliminated yet criteria " "are not met. Exiting",
             )
-            raise ValueError(
-                "Sample size violations should be eliminated yet criteria "
-                "are not met. Exiting"
-            )
+            raise ValueError("Sample size violations should be eliminated yet criteria " "are not met. Exiting")
 
         n_loops += 1
         safe_log("info", "Creating subtask for all selected organisations")
@@ -148,9 +143,7 @@ def central(
         if len(_excluded_ids) == 0:
             n_threshold_met = True
         elif len(ids) == 0:
-            safe_log(
-                "warning", "No organisations meet the minimal sample size threshold."
-            )
+            safe_log("warning", "No organisations meet the minimal sample size threshold.")
             return {
                 "included_organizations": [],
                 "excluded_organizations": excluded_ids,
@@ -158,9 +151,7 @@ def central(
                 "overall_p_value": None,
                 "aic": None,
                 "degrees_of_freedom": n_covs,
-                "warnings": [
-                    "No organisations meet the minimal sample size threshold."
-                ],
+                "warnings": ["No organisations meet the minimal sample size threshold."],
                 "converged": False,
                 "n_iterations": 0,
             }
@@ -191,9 +182,7 @@ def central(
     z_sum = None
     time_event_dfs = []
     for i, output in enumerate(results):
-        _validate_zsum_result(
-            output, expl_vars, time_col, org_id=ids[i] if i < len(ids) else i
-        )
+        _validate_zsum_result(output, expl_vars, time_col, org_id=ids[i] if i < len(ids) else i)
         if z_sum is None:
             z_sum = pd.Series(output["sum"])
         else:
@@ -207,9 +196,7 @@ def central(
     # event counts from compute_summed_z are consistent with z_sum and the
     # risk sets (FR-B4).
     aggregated_time_events = pd.concat(time_event_dfs)
-    aggregated_time_events = aggregated_time_events.groupby(
-        time_col, as_index=False
-    ).sum()
+    aggregated_time_events = aggregated_time_events.groupby(time_col, as_index=False).sum()
 
     unique_time_events = aggregated_time_events[time_col].tolist()
 
@@ -340,9 +327,7 @@ def central(
     }
 
 
-def _validate_iteration_result(
-    output: dict, n_times: int, n_covs: int, expl_vars: list, org_id: int
-) -> None:
+def _validate_iteration_result(output: dict, n_times: int, n_covs: int, expl_vars: list, org_id: int) -> None:
     """Validate a ``perform_iteration`` sub-task result (FR-A3).
 
     Raises ``AlgorithmError`` naming the organisation on any structural or
@@ -350,45 +335,31 @@ def _validate_iteration_result(
     """
     if not isinstance(output, dict):
         raise AlgorithmError(
-            f"Organisation {org_id}: perform_iteration returned "
-            f"{type(output).__name__}, expected a dict"
+            f"Organisation {org_id}: perform_iteration returned " f"{type(output).__name__}, expected a dict"
         )
     for key in ("agg1", "agg2", "agg3"):
         if key not in output:
-            raise AlgorithmError(
-                f"Organisation {org_id}: perform_iteration result missing "
-                f"key '{key}'"
-            )
+            raise AlgorithmError(f"Organisation {org_id}: perform_iteration result missing " f"key '{key}'")
     agg1 = np.asarray(output["agg1"], dtype=float)
     if agg1.ndim != 1 or len(agg1) != n_times:
-        raise AlgorithmError(
-            f"Organisation {org_id}: agg1 has length {len(agg1)}, "
-            f"expected {n_times}"
-        )
+        raise AlgorithmError(f"Organisation {org_id}: agg1 has length {len(agg1)}, " f"expected {n_times}")
     if not np.all(np.isfinite(agg1)):
         raise AlgorithmError(f"Organisation {org_id}: agg1 contains non-finite values")
     agg2_df = pd.DataFrame.from_dict(output["agg2"])
     if list(agg2_df.columns) != list(expl_vars):
         raise AlgorithmError(
-            f"Organisation {org_id}: agg2 columns {list(agg2_df.columns)} "
-            f"do not match expl_vars {list(expl_vars)}"
+            f"Organisation {org_id}: agg2 columns {list(agg2_df.columns)} " f"do not match expl_vars {list(expl_vars)}"
         )
     if agg2_df.shape[0] != n_times:
-        raise AlgorithmError(
-            f"Organisation {org_id}: agg2 has {agg2_df.shape[0]} rows, "
-            f"expected {n_times}"
-        )
+        raise AlgorithmError(f"Organisation {org_id}: agg2 has {agg2_df.shape[0]} rows, " f"expected {n_times}")
     agg3 = np.array([np.array(lst) for lst in output["agg3"]])
     if agg3.shape != (n_times, n_covs, n_covs):
         raise AlgorithmError(
-            f"Organisation {org_id}: agg3 has shape {agg3.shape}, "
-            f"expected ({n_times}, {n_covs}, {n_covs})"
+            f"Organisation {org_id}: agg3 has shape {agg3.shape}, " f"expected ({n_times}, {n_covs}, {n_covs})"
         )
 
 
-def _validate_zsum_result(
-    output: dict, expl_vars: list, time_col: str, org_id: int | None = None
-) -> None:
+def _validate_zsum_result(output: dict, expl_vars: list, time_col: str, org_id: int | None = None) -> None:
     """Validate a ``compute_summed_z`` sub-task result (FR-A3).
 
     Raises ``AlgorithmError`` if the result is not a dict with a ``sum`` key
@@ -396,24 +367,15 @@ def _validate_zsum_result(
     event counts (columns ``time_col`` and ``freq``).
     """
     if not isinstance(output, dict) or "sum" not in output:
-        raise AlgorithmError(
-            f"Organisation {org_id}: compute_summed_z result missing 'sum' key"
-        )
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'sum' key")
     sum_dict = output["sum"]
     if not isinstance(sum_dict, dict):
-        raise AlgorithmError(
-            f"Organisation {org_id}: compute_summed_z 'sum' is not a dict"
-        )
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum' is not a dict")
     missing = [v for v in expl_vars if v not in sum_dict]
     if missing:
-        raise AlgorithmError(
-            f"Organisation {org_id}: compute_summed_z 'sum' missing "
-            f"variables {missing}"
-        )
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum' missing " f"variables {missing}")
     if "times" not in output:
-        raise AlgorithmError(
-            f"Organisation {org_id}: compute_summed_z result missing 'times' key"
-        )
+        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'times' key")
     times_df = pd.DataFrame.from_dict(output["times"])
     if time_col not in times_df.columns or "freq" not in times_df.columns:
         raise AlgorithmError(
@@ -424,6 +386,5 @@ def _validate_zsum_result(
         freqs = times_df["freq"].to_numpy()
         if not np.all(np.isfinite(freqs)) or np.any(freqs < 0):
             raise AlgorithmError(
-                f"Organisation {org_id}: compute_summed_z 'freq' contains "
-                f"non-finite or negative values"
+                f"Organisation {org_id}: compute_summed_z 'freq' contains " f"non-finite or negative values"
             )

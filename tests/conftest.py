@@ -21,8 +21,7 @@ CI_ENVIRONMENT_VARIABLES = ("CI", "REQUIRE_INTEGRATION_TESTS")
 def _running_in_ci():
     """Determine whether the tests are run in a CI environment."""
     return any(
-        os.environ.get(variable, "").strip().lower() in ("1", "true", "yes")
-        for variable in CI_ENVIRONMENT_VARIABLES
+        os.environ.get(variable, "").strip().lower() in ("1", "true", "yes") for variable in CI_ENVIRONMENT_VARIABLES
     )
 
 
@@ -154,9 +153,7 @@ def extra_node_config_file(algorithm_image):
 
     # Retrieve the node configuration
     tests_directory = Path(__file__).parent
-    config_file_path = os.path.join(
-        tests_directory, "data", "additional_vantage6_node_config.yaml"
-    )
+    config_file_path = os.path.join(tests_directory, "data", "additional_vantage6_node_config.yaml")
 
     # Read existing content before modification
     original_content = ""
@@ -216,9 +213,7 @@ def vantage6_network_session(docker_client, extra_node_config_file):
 
     # Check if vantage6 CLI is available
     try:
-        result = subprocess.run(
-            ["v6", "--help"], capture_output=True, text=True, timeout=10
-        )
+        result = subprocess.run(["v6", "--help"], capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
             _skip_or_fail(
                 f"Vantage6 CLI not available (exit code {result.returncode}):\n"
@@ -228,22 +223,16 @@ def vantage6_network_session(docker_client, extra_node_config_file):
     except subprocess.TimeoutExpired:
         _skip_or_fail("Vantage6 CLI check timed out (10s)")
     except FileNotFoundError:
-        _skip_or_fail(
-            "Vantage6 CLI not found in PATH. Install with: pip install vantage6"
-        )
+        _skip_or_fail("Vantage6 CLI not found in PATH. Install with: pip install vantage6")
 
     try:
         # Clean-up of any existing network first
         print("Cleaning up any existing Vantage6 networks...")
-        cleanup_vantage6_network(
-            {"created_containers": set()}, docker_client, force_remove_existing=True
-        )
+        cleanup_vantage6_network({"created_containers": set()}, docker_client, force_remove_existing=True)
         time.sleep(5)
 
         # Capture containers before creating the network
-        containers_before = set(
-            container.id for container in docker_client.containers.list(all=True)
-        )
+        containers_before = set(container.id for container in docker_client.containers.list(all=True))
 
         # Get test data directory
         tests_directory = Path(__file__).parent
@@ -286,15 +275,10 @@ def vantage6_network_session(docker_client, extra_node_config_file):
             else:
                 print(f"Warning: Dataset file {dataset_path} not found, skipping...")
 
-        create_result = subprocess.run(
-            create_args, timeout=300, capture_output=True, text=True
-        )
+        create_result = subprocess.run(create_args, timeout=300, capture_output=True, text=True)
 
         if create_result.returncode != 0:
-            error_msg = (
-                f"Failed to create demo network "
-                f"(exit code {create_result.returncode}):\n"
-            )
+            error_msg = f"Failed to create demo network " f"(exit code {create_result.returncode}):\n"
             error_msg += f"STDOUT: {create_result.stdout}\n"
             error_msg += f"STDERR: {create_result.stderr}"
             _skip_or_fail(error_msg)
@@ -308,10 +292,7 @@ def vantage6_network_session(docker_client, extra_node_config_file):
         )
 
         if start_result.returncode != 0:
-            error_msg = (
-                f"Failed to start demo network "
-                f"(exit code {start_result.returncode}):\n"
-            )
+            error_msg = f"Failed to start demo network " f"(exit code {start_result.returncode}):\n"
             error_msg += f"STDOUT: {start_result.stdout}\n"
             error_msg += f"STDERR: {start_result.stderr}"
             _skip_or_fail(error_msg)
@@ -325,9 +306,7 @@ def vantage6_network_session(docker_client, extra_node_config_file):
 
         for elapsed in range(0, max_wait, wait_interval):
             time.sleep(wait_interval)
-            containers_after = set(
-                container.id for container in docker_client.containers.list(all=True)
-            )
+            containers_after = set(container.id for container in docker_client.containers.list(all=True))
             new_containers = containers_after - containers_before
 
             if len(new_containers) >= 4:
@@ -347,17 +326,12 @@ def vantage6_network_session(docker_client, extra_node_config_file):
                 if service_containers >= 3:
                     stable_count += 1
                     if stable_count >= required_stable_checks:
-                        print(
-                            f"Network stable and ready after "
-                            f"{elapsed + wait_interval} seconds"
-                        )
+                        print(f"Network stable and ready after " f"{elapsed + wait_interval} seconds")
                         break
                 else:
                     stable_count = 0
 
-        containers_after = set(
-            container.id for container in docker_client.containers.list(all=True)
-        )
+        containers_after = set(container.id for container in docker_client.containers.list(all=True))
         network_info["created_containers"] = containers_after - containers_before
         network_info["status"] = "running"
 
@@ -368,10 +342,7 @@ def vantage6_network_session(docker_client, extra_node_config_file):
                 "containers created (expected at least 4)"
             )
 
-        print(
-            f"Network started with "
-            f"{len(network_info['created_containers'])} new containers"
-        )
+        print(f"Network started with " f"{len(network_info['created_containers'])} new containers")
 
         yield network_info
 
@@ -430,13 +401,8 @@ def authentication(vantage6_network_session, docker_client) -> Client:
             break
         except Exception as e:
             if attempt == max_retries - 1:
-                _skip_or_fail(
-                    f"Failed to authenticate after {max_retries} attempts: {e}"
-                )
-            print(
-                f"Authentication attempt {attempt + 1} failed, "
-                f"retrying... Error: {e}"
-            )
+                _skip_or_fail(f"Failed to authenticate after {max_retries} attempts: {e}")
+            print(f"Authentication attempt {attempt + 1} failed, " f"retrying... Error: {e}")
             time.sleep(5)
 
     # Verify authentication
@@ -497,9 +463,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "unit: Unit tests for algorithm functions")
     config.addinivalue_line("markers", "integration: Integration tests with Vantage6")
     config.addinivalue_line("markers", "slow: Tests that take a long time to run")
-    config.addinivalue_line(
-        "markers", "vantage6: Tests that require Vantage6 infrastructure"
-    )
+    config.addinivalue_line("markers", "vantage6: Tests that require Vantage6 infrastructure")
     config.addinivalue_line("markers", "docker: Tests that require Docker")
 
 

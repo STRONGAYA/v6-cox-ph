@@ -54,36 +54,24 @@ def sample_aggs():
 class TestComputeDerivatives:
     """Tests for the compute_derivatives function."""
 
-    def test_compute_derivatives_returns_arrays(
-        self, sample_aggs, sample_aggregated_time_events, sample_z_sum
-    ):
+    def test_compute_derivatives_returns_arrays(self, sample_aggs, sample_aggregated_time_events, sample_z_sum):
         """Test that compute_derivatives returns numpy arrays."""
         agg1, agg2, agg3 = sample_aggs
-        primary, secondary = compute_derivatives(
-            agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum
-        )
+        primary, secondary = compute_derivatives(agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum)
         assert isinstance(primary, np.ndarray)
         assert isinstance(secondary, np.ndarray)
 
-    def test_compute_derivatives_shape(
-        self, sample_aggs, sample_aggregated_time_events, sample_z_sum
-    ):
+    def test_compute_derivatives_shape(self, sample_aggs, sample_aggregated_time_events, sample_z_sum):
         """Test that derivatives have correct shapes."""
         agg1, agg2, agg3 = sample_aggs
-        primary, secondary = compute_derivatives(
-            agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum
-        )
+        primary, secondary = compute_derivatives(agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum)
         assert primary.shape == (2,)
         assert secondary.shape == (2, 2)
 
-    def test_compute_derivatives_known_values(
-        self, sample_aggs, sample_aggregated_time_events, sample_z_sum
-    ):
+    def test_compute_derivatives_known_values(self, sample_aggs, sample_aggregated_time_events, sample_z_sum):
         """Test derivatives against manually computed values."""
         agg1, agg2, agg3 = sample_aggs
-        primary, secondary = compute_derivatives(
-            agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum
-        )
+        primary, secondary = compute_derivatives(agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum)
 
         # Manual computation for first event time (index 0, freq=2):
         # s1 = 2 * ([2, 4] / 5) = [0.8, 1.6]
@@ -100,9 +88,7 @@ class TestComputeDerivatives:
             atol=1e-6,
         )
 
-    def test_compute_derivatives_skips_invalid_s1(
-        self, sample_aggregated_time_events, sample_z_sum
-    ):
+    def test_compute_derivatives_skips_invalid_s1(self, sample_aggregated_time_events, sample_z_sum):
         """Test that invalid s1 values are skipped."""
         agg1 = np.array([0.0, 8.0, 3.0])  # First entry is 0 (invalid)
         agg2 = np.array([[2.0, 4.0], [3.0, 6.0], [1.0, 2.0]])
@@ -113,9 +99,7 @@ class TestComputeDerivatives:
                 [[0.5, 1.0], [1.0, 2.0]],
             ]
         )
-        primary, secondary = compute_derivatives(
-            agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum
-        )
+        primary, secondary = compute_derivatives(agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum)
         # Should still produce valid results (just skipping the first entry)
         assert np.all(np.isfinite(primary))
         assert np.all(np.isfinite(secondary))
@@ -183,9 +167,7 @@ class TestComputeModelResults:
     def test_compute_model_results_z_values(self, model_fixture):
         """Test Z-values against manually computed values."""
         result, *_ = model_fixture
-        np.testing.assert_allclose(
-            result["zvalues"], [1.5411035, -0.82704293], atol=1e-6
-        )
+        np.testing.assert_allclose(result["zvalues"], [1.5411035, -0.82704293], atol=1e-6)
 
     def test_compute_model_results_p_values(self, model_fixture):
         """Test p-values are 2*Phi(-|Z|)."""

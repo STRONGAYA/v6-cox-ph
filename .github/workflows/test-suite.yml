@@ -2,9 +2,9 @@ name: Test Suite
 
 on:
   push:
-    branches: [main, phase1-algorithm-improvements, phase2-strong-aya]
+    branches: [main, standard-coxph, phase1-algorithm-improvements, phase2-strong-aya]
   pull_request:
-    branches: [main, phase1-algorithm-improvements, phase2-strong-aya]
+    branches: [main, standard-coxph, phase1-algorithm-improvements, phase2-strong-aya]
 
 permissions:
   contents: write

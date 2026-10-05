@@ -33,9 +33,7 @@ from .privacy_guards import (
 
 @data(1)
 @algorithm_client
-def get_unique_event_times(
-    client: AlgorithmClient, df: pd.DataFrame, time_col: str, outcome_col: str
-) -> dict:
+def get_unique_event_times(client: AlgorithmClient, df: pd.DataFrame, time_col: str, outcome_col: str) -> dict:
     """
     Retrieve unique event times from the provided DataFrame.
 
@@ -73,8 +71,7 @@ def get_unique_event_times(
     if not quality["has_time"] or not quality["has_outcome"]:
         safe_log(
             "warning",
-            f"Missing required columns: time={quality['has_time']}, "
-            f"outcome={quality['has_outcome']}",
+            f"Missing required columns: time={quality['has_time']}, " f"outcome={quality['has_outcome']}",
         )
         return {"N-Threshold not met": client.organization_id}
 
@@ -146,9 +143,7 @@ def compute_summed_z(
     df = mask_unnecessary_variables(df, variables_to_analyse)
 
     if not check_sample_size(df, outcome_col, settings):
-        raise PrivacyThresholdViolation(
-            "Sample size threshold not met: refusing to share aggregates."
-        )
+        raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
     df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
@@ -200,9 +195,7 @@ def perform_iteration(
     dict
         A dictionary containing the aggregates computed during the iteration.
     """
-    safe_log(
-        "info", "Computing aggregates for the derivation of the partial likelihood"
-    )
+    safe_log("info", "Computing aggregates for the derivation of the partial likelihood")
 
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
@@ -217,22 +210,16 @@ def perform_iteration(
     # perform_iteration does not have the outcome column available, so the
     # threshold is checked on rows only.
     if not check_sample_size(df, outcome_col=None, settings=settings):
-        raise PrivacyThresholdViolation(
-            "Sample size threshold not met: refusing to share aggregates."
-        )
+        raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
-    beta, unique_time_events = validate_iteration_input(
-        beta, unique_time_events, expl_vars, settings
-    )
+    beta, unique_time_events = validate_iteration_input(beta, unique_time_events, expl_vars, settings)
 
     df = prepare_time_column(df, time_col, settings)
 
     num_unique_time_events = len(unique_time_events)
     num_explanatory_vars = len(expl_vars)
 
-    masks = guarded_risk_set_masks(
-        df[time_col], unique_time_events, settings.min_risk_set_change
-    )
+    masks = guarded_risk_set_masks(df[time_col], unique_time_events, settings.min_risk_set_change)
     X_all = df[expl_vars].to_numpy(dtype=float)
 
     agg1: list = []
