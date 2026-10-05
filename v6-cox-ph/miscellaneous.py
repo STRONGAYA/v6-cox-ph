@@ -3,13 +3,23 @@ Miscellaneous utilities for the Cox-PH algorithm.
 
 This module contains the Pydantic models for the wire contract: user input
 (``CoxPHInput``), the payload central sends to ``perform_iteration``
-(``IterationInput``) and, in a later step, the partial results.
+(``IterationInput``) and the partial results (``SummedZResult``,
+``IterationResult``), which the partials build and central validates.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-from pydantic import BaseModel, Field, ValidationInfo, ValidationError, field_validator, model_validator
+import pandas as pd
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from vantage6.algorithm.tools.exceptions import UserInputError
 
 
@@ -214,4 +224,94 @@ class IterationInput(BaseModel):
                     f"unique_time_events contains time {grid[off_grid][0]} that is "
                     f"not on the bin grid (width={width})."
                 )
+        return self
+
+
+class SummedZResult(BaseModel):
+    """
+    Result of the ``compute_summed_z`` sub-task.
+
+    Built on the node (no context) and returned as ``model_dump()``;
+    validated by central with the runtime context (``expected_ids``,
+    ``expl_vars``, ``time_col``). The context checks only run when the
+    context provides them. ``extra="forbid"``: central and the partials
+    ship in one image, so an unexpected key is contract drift, not forward
+    compatibility.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: int = Field(strict=True)
+    sum: Dict[str, float]
+    sum_squares: Dict[str, float]
+    times: Dict[str, Any]
+    privacy_settings: Dict[str, Any]
+
+    @model_validator(mode="after")
+    def _matches_request(self, info: ValidationInfo) -> "SummedZResult":
+        context = info.context or {}
+        expected_ids = context.get("expected_ids")
+        if expected_ids is not None and self.organization_id not in expected_ids:
+            raise ValueError(f"organization_id {self.organization_id!r} is not one of the dispatched organisations.")
+        expl_vars = context.get("expl_vars")
+        if expl_vars is not None:
+            for name in ("sum", "sum_squares"):
+                missing = [v for v in expl_vars if v not in getattr(self, name)]
+                if missing:
+                    raise ValueError(f"'{name}' missing variables {missing}")
+        time_col = context.get("time_col")
+        if time_col is not None:
+            times_df = pd.DataFrame.from_dict(self.times)
+            if time_col not in times_df.columns or "freq" not in times_df.columns:
+                raise ValueError(f"'times' must have columns '{time_col}' and 'freq', got {list(times_df.columns)}")
+            if len(times_df) > 0:
+                freqs = times_df["freq"].to_numpy()
+                if not np.all(np.isfinite(freqs)) or np.any(freqs < 0):
+                    raise ValueError("'freq' contains non-finite or negative values")
+        return self
+
+
+class IterationResult(BaseModel):
+    """
+    Result of the ``perform_iteration`` sub-task.
+
+    Built on the node (no context) and returned as ``model_dump()``;
+    validated by central with the runtime context (``expected_ids``,
+    ``n_times``, ``n_covs``). The context checks only run when the context
+    provides them. ``extra="forbid"`` as on ``SummedZResult``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization_id: int = Field(strict=True)
+    agg1: List
+    agg2: List
+    agg3: List
+
+    @model_validator(mode="after")
+    def _shapes_and_finiteness(self, info: ValidationInfo) -> "IterationResult":
+        context = info.context or {}
+        expected_ids = context.get("expected_ids")
+        if expected_ids is not None and self.organization_id not in expected_ids:
+            raise ValueError(f"organization_id {self.organization_id!r} is not one of the dispatched organisations.")
+        n_times = context.get("n_times")
+        n_covs = context.get("n_covs")
+        if n_times is None or n_covs is None:
+            return self
+        agg1 = np.asarray(self.agg1, dtype=float)
+        if agg1.ndim != 1 or len(agg1) != n_times:
+            raise ValueError(f"agg1 has length {len(agg1)}, expected {n_times}")
+        if not np.all(np.isfinite(agg1)):
+            raise ValueError("agg1 contains non-finite values")
+        agg2 = np.asarray(self.agg2, dtype=float)
+        if agg2.shape != (n_times, n_covs):
+            raise ValueError(f"agg2 has shape {agg2.shape}, expected ({n_times}, {n_covs})")
+        if not np.all(np.isfinite(agg2)):
+            raise ValueError("agg2 contains non-finite values")
+        agg3 = np.asarray(self.agg3, dtype=float)
+        if agg3.shape != (n_times, n_covs, n_covs):
+            raise ValueError(f"agg3 has shape {agg3.shape}, expected ({n_times}, {n_covs}, {n_covs})")
+        # Stricter than 2.0.0, which did not check agg3 for finiteness.
+        if not np.all(np.isfinite(agg3)):
+            raise ValueError("agg3 contains non-finite values")
         return self

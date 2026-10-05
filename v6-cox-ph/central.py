@@ -6,10 +6,11 @@ The results in a return statement are sent to the vantage6 server (after
 encryption if that is enabled).
 """
 
-from typing import Optional
+from typing import Optional, TypeVar
 
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel, ValidationError
 from scipy.linalg import solve
 from scipy.stats import chi2
 from vantage6.algorithm.client import AlgorithmClient
@@ -21,11 +22,13 @@ from .coxph_logic import back_transform_results, compute_derivatives, compute_mo
 from .coxph_logic import partial_log_likelihood, pooled_standardisation
 from .coxph_logic import survival_curves as survival_curves_from_aggregates
 from .coxph_logic import format_results_dataframe
-from .miscellaneous import validate_coxph_input
+from .miscellaneous import IterationResult, SummedZResult, format_validation_error, validate_coxph_input
 
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
 # it to force non-convergence.
 MAX_ITERATIONS = 20
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
 @algorithm_client
@@ -125,17 +128,18 @@ def central(
     time_event_dfs = []
     node_privacy_settings = []
     for output in results:
-        org_id = _result_org_id(output, ids)
-        _validate_zsum_result(output, expl_vars, time_col, org_id=org_id)
+        result = _parse_result(
+            SummedZResult, output, {"expected_ids": ids, "expl_vars": expl_vars, "time_col": time_col}
+        )
         if z_sum is None:
-            z_sum = pd.Series(output["sum"])
-            sum_squares = pd.Series(output["sum_squares"])
+            z_sum = pd.Series(result.sum)
+            sum_squares = pd.Series(result.sum_squares)
         else:
-            z_sum += pd.Series(output["sum"])
-            sum_squares += pd.Series(output["sum_squares"])
+            z_sum += pd.Series(result.sum)
+            sum_squares += pd.Series(result.sum_squares)
         # Collect per-time event counts (NaN-consistent with z_sum)
-        time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
-        node_privacy_settings.append(output["privacy_settings"])
+        time_event_dfs.append(pd.DataFrame.from_dict(result.times))
+        node_privacy_settings.append(result.privacy_settings)
 
     # Build aggregated_time_events from compute_summed_z results: it drops
     # NaN in time, outcome and expl_vars, so its event counts are consistent
@@ -231,11 +235,12 @@ def central(
         summed_agg3 = np.zeros((n_times, n_covs, n_covs))
 
         for output in results:
-            org_id = _result_org_id(output, ids)
-            _validate_iteration_result(output, n_times, n_covs, expl_vars, org_id)
-            summed_agg1 += np.array(output["agg1"])
-            summed_agg2 += np.asarray(output["agg2"], dtype=float)
-            summed_agg3 += np.array(output["agg3"])
+            iteration_result = _parse_result(
+                IterationResult, output, {"expected_ids": ids, "n_times": n_times, "n_covs": n_covs}
+            )
+            summed_agg1 += np.asarray(iteration_result.agg1, dtype=float)
+            summed_agg2 += np.asarray(iteration_result.agg2, dtype=float)
+            summed_agg3 += np.asarray(iteration_result.agg3, dtype=float)
 
         # The log-likelihood at the current beta, from aggregates that are
         # already collected (no extra round-trip).
@@ -385,28 +390,38 @@ def _algorithm_version() -> str:
         return "unknown"
 
 
-def _result_org_id(output: dict, expected_ids: list) -> int:
-    """Return the organisation a partial result says it came from.
+def _parse_result(model_cls: type[_ModelT], output: object, context: dict) -> _ModelT:
+    """Validate a partial sub-task result with its Pydantic wire model.
 
     The order of ``wait_for_results`` is not the dispatch order (the
     organisation id list is deduplicated and the server orders freely), so
     results carry their own ``organization_id`` and errors are attributed
-    by it. A result without a known id raises ``AlgorithmError``.
+    by it. A result whose id is missing or unknown fails closed before
+    validation, because there is no organisation to attribute a
+    validation error to. The runtime context (dispatched ids, expected
+    shapes) is not part of the payload and travels via ``context``; see
+    the models in ``miscellaneous``.
 
     Raises
     ------
     AlgorithmError
-        If the result is not a dict or its ``organization_id`` is not one
-        of the dispatched organisations.
+        If the result is not a dict, its ``organization_id`` is not one of
+        the dispatched organisations, or it fails the model's validation.
     """
     if not isinstance(output, dict):
         raise AlgorithmError(f"Expected a dict result, got {type(output).__name__}")
     org_id = output.get("organization_id")
-    if org_id is None or org_id not in expected_ids:
+    if org_id is None or org_id not in context.get("expected_ids", []):
         raise AlgorithmError(
             f"Result carries organization_id {org_id!r}, which is not one of " f"the dispatched organisations."
         )
-    return int(org_id)
+    try:
+        return model_cls.model_validate(output, context=context)
+    except ValidationError as e:
+        # The formatted message never echoes the offending input: for a
+        # result model that input can be an aggregate array, and the
+        # message ends up in the container log the researcher reads.
+        raise AlgorithmError(f"Organisation {org_id}: {format_validation_error(e)}") from None
 
 
 def _require_all_organisations_answered(results, ids: list) -> None:
@@ -430,77 +445,3 @@ def _require_all_organisations_answered(results, ids: list) -> None:
             f"Only {len(valid)} of {len(ids)} organisations returned a result; "
             f"refusing to aggregate a subset. The run fails closed."
         )
-
-
-def _validate_iteration_result(output: dict, n_times: int, n_covs: int, expl_vars: list, org_id: int) -> None:
-    """Validate a ``perform_iteration`` sub-task result (FR-A3).
-
-    Raises ``AlgorithmError`` naming the organisation on any structural or
-    numerical problem.
-    """
-    if not isinstance(output, dict):
-        raise AlgorithmError(
-            f"Organisation {org_id}: perform_iteration returned " f"{type(output).__name__}, expected a dict"
-        )
-    for key in ("agg1", "agg2", "agg3"):
-        if key not in output:
-            raise AlgorithmError(f"Organisation {org_id}: perform_iteration result missing " f"key '{key}'")
-    agg1 = np.asarray(output["agg1"], dtype=float)
-    if agg1.ndim != 1 or len(agg1) != n_times:
-        raise AlgorithmError(f"Organisation {org_id}: agg1 has length {len(agg1)}, " f"expected {n_times}")
-    if not np.all(np.isfinite(agg1)):
-        raise AlgorithmError(f"Organisation {org_id}: agg1 contains non-finite values")
-    agg2 = np.asarray(output["agg2"], dtype=float)
-    if agg2.shape != (n_times, n_covs):
-        raise AlgorithmError(f"Organisation {org_id}: agg2 has shape {agg2.shape}, " f"expected ({n_times}, {n_covs})")
-    if not np.all(np.isfinite(agg2)):
-        raise AlgorithmError(f"Organisation {org_id}: agg2 contains non-finite values")
-    agg3 = np.array([np.array(lst) for lst in output["agg3"]])
-    if agg3.shape != (n_times, n_covs, n_covs):
-        raise AlgorithmError(
-            f"Organisation {org_id}: agg3 has shape {agg3.shape}, " f"expected ({n_times}, {n_covs}, {n_covs})"
-        )
-
-
-def _validate_zsum_result(output: dict, expl_vars: list, time_col: str, org_id: int | None = None) -> None:
-    """Validate a ``compute_summed_z`` sub-task result (FR-A3).
-
-    Raises ``AlgorithmError`` if the result is not a dict with a ``sum`` key
-    whose entries match ``expl_vars``, a ``sum_squares`` key with the same
-    entries, a ``times`` key with the per-time event counts (columns
-    ``time_col`` and ``freq``) and a ``privacy_settings`` key.
-    """
-    if not isinstance(output, dict) or "sum" not in output:
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'sum' key")
-    sum_dict = output["sum"]
-    if not isinstance(sum_dict, dict):
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum' is not a dict")
-    missing = [v for v in expl_vars if v not in sum_dict]
-    if missing:
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum' missing " f"variables {missing}")
-    if "sum_squares" not in output:
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'sum_squares' key")
-    sum_squares = output["sum_squares"]
-    if not isinstance(sum_squares, dict):
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z 'sum_squares' is not a dict")
-    missing_sq = [v for v in expl_vars if v not in sum_squares]
-    if missing_sq:
-        raise AlgorithmError(
-            f"Organisation {org_id}: compute_summed_z 'sum_squares' missing " f"variables {missing_sq}"
-        )
-    if "privacy_settings" not in output:
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'privacy_settings' key")
-    if "times" not in output:
-        raise AlgorithmError(f"Organisation {org_id}: compute_summed_z result missing 'times' key")
-    times_df = pd.DataFrame.from_dict(output["times"])
-    if time_col not in times_df.columns or "freq" not in times_df.columns:
-        raise AlgorithmError(
-            f"Organisation {org_id}: compute_summed_z 'times' must have columns "
-            f"'{time_col}' and 'freq', got {list(times_df.columns)}"
-        )
-    if len(times_df) > 0:
-        freqs = times_df["freq"].to_numpy()
-        if not np.all(np.isfinite(freqs)) or np.any(freqs < 0):
-            raise AlgorithmError(
-                f"Organisation {org_id}: compute_summed_z 'freq' contains " f"non-finite or negative values"
-            )

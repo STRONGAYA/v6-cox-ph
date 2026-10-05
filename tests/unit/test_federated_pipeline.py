@@ -285,68 +285,174 @@ class TestSingularHessian:
 
 @pytest.mark.unit
 class TestSubTaskValidation:
-    """The validation helpers catch malformed sub-task results (FR-A3)."""
+    """The result parser catches malformed sub-task results (FR-A3).
 
-    def test_validate_iteration_result_bad_agg1_length(self):
+    Structural errors (missing keys) surface in pydantic's wording
+    (``Field required``); the semantic checks (shape, finiteness, unknown
+    organisation, missing variables) keep their custom wording.
+    """
+
+    def test_parse_iteration_result_bad_agg1_length(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="agg1 has length"):
-            central._validate_iteration_result(
-                {"agg1": [1.0, 2.0], "agg2": {}, "agg3": []},
-                n_times=5,
-                n_covs=2,
-                expl_vars=["age", "treatment"],
-                org_id=1,
+            central._parse_result(
+                central.IterationResult,
+                {"organization_id": 1, "agg1": [1.0, 2.0], "agg2": [], "agg3": []},
+                context={"expected_ids": [1], "n_times": 5, "n_covs": 2},
             )
 
-    def test_validate_iteration_result_missing_key(self):
+    def test_parse_iteration_result_missing_key(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
-        with pytest.raises(Exception, match="missing key"):
-            central._validate_iteration_result(
-                {"agg1": [1.0]},
-                n_times=1,
-                n_covs=1,
-                expl_vars=["age"],
-                org_id=1,
+        with pytest.raises(Exception, match="Field required"):
+            central._parse_result(
+                central.IterationResult,
+                {"organization_id": 1, "agg1": [1.0]},
+                context={"expected_ids": [1], "n_times": 1, "n_covs": 1},
             )
 
-    def test_validate_zsum_result_missing_sum(self):
+    def test_parse_zsum_result_missing_sum(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
-        with pytest.raises(Exception, match="missing 'sum'"):
-            central._validate_zsum_result({}, ["age", "treatment"], "time", org_id=1)
+        with pytest.raises(Exception, match="Field required"):
+            central._parse_result(
+                central.SummedZResult,
+                {"organization_id": 1},
+                context={"expected_ids": [1], "expl_vars": ["age", "treatment"], "time_col": "time"},
+            )
 
-    def test_validate_zsum_result_missing_variable(self):
+    def test_parse_zsum_result_missing_variable(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="missing variables"):
-            central._validate_zsum_result(
-                {"sum": {"age": 10.0}, "times": {"time": [1.0], "freq": [1]}},
-                ["age", "treatment"],
-                "time",
-                org_id=1,
+            central._parse_result(
+                central.SummedZResult,
+                {
+                    "organization_id": 1,
+                    "sum": {"age": 10.0},
+                    "sum_squares": {"age": 100.0, "treatment": 25.0},
+                    "times": {"time": [1.0], "freq": [1]},
+                    "privacy_settings": {"sample_size_threshold": 10},
+                },
+                context={"expected_ids": [1], "expl_vars": ["age", "treatment"], "time_col": "time"},
             )
 
-    def test_validate_zsum_result_missing_times(self):
+    def test_parse_zsum_result_missing_times(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
-        with pytest.raises(Exception, match="missing 'times'"):
-            central._validate_zsum_result(
+        with pytest.raises(Exception, match="Field required"):
+            central._parse_result(
+                central.SummedZResult,
                 {
+                    "organization_id": 1,
                     "sum": {"age": 10.0, "treatment": 5.0},
                     "sum_squares": {"age": 100.0, "treatment": 25.0},
                     "privacy_settings": {"sample_size_threshold": 10},
                 },
-                ["age", "treatment"],
-                "time",
-                org_id=1,
+                context={"expected_ids": [1], "expl_vars": ["age", "treatment"], "time_col": "time"},
             )
+
+    def test_parse_result_unknown_organization(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="not one of"):
+            central._parse_result(
+                central.IterationResult,
+                {"organization_id": 99, "agg1": [1.0], "agg2": [[1.0]], "agg3": [[[1.0]]]},
+                context={"expected_ids": [1], "n_times": 1, "n_covs": 1},
+            )
+
+    def test_parse_result_not_a_dict(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="Expected a dict result"):
+            central._parse_result(central.SummedZResult, [1, 2, 3], context={"expected_ids": [1]})
+
+
+@pytest.mark.unit
+class TestWireContractPinning:
+    """The partials' result dicts carry exactly the wire-model keys.
+
+    The partials build their results from ``SummedZResult`` /
+    ``IterationResult`` and return ``model_dump()``; these tests pin the
+    dumped key sets against literals so the wire contract is asserted next
+    to ``algorithm_store.json``.
+    """
+
+    def _client(self):
+        df1, df2, _ = _load_datasets()
+        return MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+
+    def test_compute_summed_z_result_keys(self, guards_off):
+        client = self._client()
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert results, "compute_summed_z returned no results"
+        for r in results:
+            assert set(r.keys()) == {"organization_id", "sum", "sum_squares", "times", "privacy_settings"}
+            assert set(r["times"].keys()) == {"time", "freq"}
+            assert set(r["privacy_settings"].keys()) == {
+                "sample_size_threshold",
+                "min_risk_set_change",
+                "time_bin_width",
+            }
+
+    def test_perform_iteration_result_keys(self, guards_off):
+        client = self._client()
+        grid_task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        grid = sorted(
+            {
+                t
+                for r in client.wait_for_results(task_id=grid_task["id"])
+                for t in pd.DataFrame.from_dict(r["times"])["time"].tolist()
+            }
+        )
+        task = client.task.create(
+            input_={
+                "method": "perform_iteration",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                    "beta": [0.0, 0.0],
+                    "centre": [0.0, 0.0],
+                    "scale": [1.0, 1.0],
+                    "unique_time_events": grid,
+                },
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert results, "perform_iteration returned no results"
+        for r in results:
+            assert set(r.keys()) == {"organization_id", "agg1", "agg2", "agg3"}
 
 
 @pytest.mark.unit

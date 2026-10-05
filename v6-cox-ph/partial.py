@@ -13,6 +13,7 @@ from vantage6.algorithm.tools.decorators import algorithm_client, data
 from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
 from vantage6.algorithm.tools.util import info
 
+from .miscellaneous import IterationResult, SummedZResult
 from .privacy_guards import (
     guarded_risk_set_aggregates,
     prepare_node_data,
@@ -81,13 +82,15 @@ def compute_summed_z(
         "min_risk_set_change": settings.min_risk_set_change,
         "time_bin_width": settings.time_bin_width,
     }
-    return {
-        "organization_id": client.organization_id,
-        "sum": z_sum,
-        "sum_squares": sum_squares,
-        "times": times.to_dict(),
-        "privacy_settings": privacy_settings,
-    }
+    # The result dict is built from the wire model, so its keys and nesting
+    # are pinned in one place (SummedZResult).
+    return SummedZResult(
+        organization_id=client.organization_id,
+        sum=z_sum,
+        sum_squares=sum_squares,
+        times=times.to_dict(),
+        privacy_settings=privacy_settings,
+    ).model_dump()
 
 
 @data(1)
@@ -162,9 +165,11 @@ def perform_iteration(
         df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
     )
 
-    return {
-        "organization_id": client.organization_id,
-        "agg1": agg1.tolist(),
-        "agg2": agg2.tolist(),
-        "agg3": agg3.tolist(),
-    }
+    # The result dict is built from the wire model, so its keys and nesting
+    # are pinned in one place (IterationResult).
+    return IterationResult(
+        organization_id=client.organization_id,
+        agg1=agg1.tolist(),
+        agg2=agg2.tolist(),
+        agg3=agg3.tolist(),
+    ).model_dump()
