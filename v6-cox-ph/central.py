@@ -11,18 +11,20 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from scipy.linalg import solve
+from scipy.stats import chi2
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError
 from vantage6.algorithm.tools.util import info, warn
 
 from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
+from .coxph_logic import partial_log_likelihood
 from .coxph_logic import format_results_dataframe, round_sig
 from .miscellaneous import validate_coxph_input
 
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
 # it to force non-convergence.
-MAX_ITERATIONS = 10
+MAX_ITERATIONS = 20
 
 
 @algorithm_client
@@ -161,13 +163,14 @@ def central(
 
     beta: np.ndarray = np.zeros(n_covs)
 
-    # Variables that must stay consistent with the reported beta: the
-    # secondary derivative (Hessian) and summed_agg1 are evaluated at the
-    # same beta that is ultimately reported. By testing convergence *before*
-    # applying the Newton step we keep all three in sync without an extra
-    # round-trip.
-    secondary_derivative: np.ndarray = np.zeros((n_covs, n_covs))
-    summed_agg1: np.ndarray = np.zeros(0)
+    # The reported beta, Hessian and summed_agg1 are always evaluated at the
+    # same beta: the last *accepted* evaluation. A decrease of the
+    # log-likelihood is only detectable at the next round-trip, so the
+    # previous accepted state is kept and step-halving backs off toward it.
+    accepted: dict | None = None  # beta / secondary / summed_agg1 / log_likelihood
+    log_likelihood_null: float | None = None
+    step_halvings = 0
+    last_step: np.ndarray | None = None
     converged = False
     convergence_cause: str | None = None
     epoch = 0
@@ -215,6 +218,22 @@ def central(
             summed_agg2 += np.array(pd.DataFrame.from_dict(output["agg2"]))
             summed_agg3 += np.array([np.array(lst) for lst in output["agg3"]])
 
+        # The log-likelihood at the current beta, from aggregates that are
+        # already collected (no extra round-trip).
+        ll_here = partial_log_likelihood(beta, z_sum_star, aggregated_time_events, summed_agg1)
+        if log_likelihood_null is None and not beta.any():
+            log_likelihood_null = ll_here
+
+        if accepted is not None and ll_here < accepted["log_likelihood"] - 1e-12:
+            # The step away from the accepted beta decreased the likelihood:
+            # halve it and retry from the accepted point. The accepted state
+            # is reported if the budget runs out mid-halving.
+            step_halvings += 1
+            warn("Newton step decreased the log-likelihood; halving the step.")
+            last_step = np.asarray(last_step, dtype=float) * 0.5
+            beta = accepted["beta"] - last_step
+            continue
+
         primary_derivative, secondary_derivative = compute_derivatives(
             summed_agg1,
             summed_agg2,
@@ -222,6 +241,15 @@ def central(
             aggregated_time_events,
             z_sum_star,
         )
+
+        # Accept this evaluation: the reported beta, Hessian and summed_agg1
+        # stay evaluated at the same beta.
+        accepted = {
+            "beta": beta,
+            "secondary": secondary_derivative,
+            "summed_agg1": summed_agg1,
+            "log_likelihood": ll_here,
+        }
 
         try:
             step = solve(secondary_derivative, primary_derivative)
@@ -247,9 +275,18 @@ def central(
             # Hessian and summed_agg1 stay consistent.
             break
 
+        last_step = step
         beta = beta - step
 
     n_iterations = epoch + 1
+    if accepted is None:
+        raise AlgorithmError("The optimiser never accepted an evaluation; no model can be reported.")
+    beta = accepted["beta"]
+    secondary_derivative = accepted["secondary"]
+    summed_agg1 = accepted["summed_agg1"]
+    log_likelihood = accepted["log_likelihood"]
+    if log_likelihood_null is None:
+        log_likelihood_null = log_likelihood
     central_warnings = []
     if not converged:
         msg = (
@@ -280,6 +317,7 @@ def central(
 
     results_df = format_results_dataframe(model["results_data"], expl_vars)
 
+    lr_statistic = 2 * (log_likelihood - log_likelihood_null)
     return {
         "model": results_df.to_dict(orient="index"),
         "overall_p_value": model["overall_p_value"],
@@ -288,7 +326,24 @@ def central(
         "warnings": model["warnings"] + central_warnings,
         "converged": converged,
         "n_iterations": n_iterations,
+        "log_likelihood": log_likelihood,
+        "log_likelihood_null": log_likelihood_null,
+        "lr_statistic": lr_statistic,
+        "lr_p_value": float(chi2.sf(lr_statistic, n_covs)),
+        "n_events": int(aggregated_time_events["freq"].sum()),
+        "covariance": np.asarray(model["covariance"]).tolist(),
+        "algorithm_version": _algorithm_version(),
     }
+
+
+def _algorithm_version() -> str:
+    """The installed algorithm package version, for result traceability."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("v6-cox-ph")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _result_org_id(output: dict, expected_ids: list) -> int:

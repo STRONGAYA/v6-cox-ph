@@ -761,3 +761,100 @@ class TestAffineTransform:
         removed_model = pd.DataFrame(removed["model"]).T
         for var in EXPL_VARS:
             np.testing.assert_allclose(with_nan_model.loc[var, "Coef"], removed_model.loc[var, "Coef"], atol=1e-12)
+
+
+def _breslow_log_likelihood(df, expl_vars, beta):
+    """An independent Breslow partial log-likelihood on pooled data."""
+    times = df["time"].to_numpy()
+    events = df["event"].to_numpy()
+    eta = df[expl_vars].to_numpy(dtype=float) @ np.asarray(beta, dtype=float)
+    ll = 0.0
+    for t in np.unique(times[events == 1]):
+        event_mask = (times == t) & (events == 1)
+        d_t = int(event_mask.sum())
+        risk = times >= t
+        s0 = float(np.exp(eta[risk]).sum())
+        ll += float(eta[event_mask].sum()) - d_t * float(np.log(s0))
+    return ll
+
+
+@pytest.mark.unit
+class TestOptimiser:
+    """The central optimiser: log-likelihood, LR test and step-halving."""
+
+    def test_log_likelihood_matches_direct_breslow(self, guards_off):
+        """The reported log-likelihood equals a direct Breslow fit (guards off)."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        assert result["converged"] is True
+        model = pd.DataFrame(result["model"]).T
+        beta = model["Coef"].to_numpy(dtype=float)
+        direct = _breslow_log_likelihood(pd.concat([df1, df2]), EXPL_VARS, beta)
+        assert (
+            abs(result["log_likelihood"] - direct) <= 1e-9
+        ), f"log-likelihood mismatch: reported={result['log_likelihood']}, direct={direct}"
+
+    def test_likelihood_ratio_fields_consistent(self, guards_off):
+        """ll > ll_null, the LR statistic and p-value are consistent."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        ll = result["log_likelihood"]
+        ll_null = result["log_likelihood_null"]
+        assert ll > ll_null
+        assert result["n_events"] == int((pd.concat([df1, df2])["event"] == 1).sum())
+        assert abs(result["lr_statistic"] - 2 * (ll - ll_null)) <= 1e-9
+        assert 0.0 <= result["lr_p_value"] <= 1.0
+        assert result["covariance"] is not None
+        cov = np.asarray(result["covariance"], dtype=float)
+        assert cov.shape == (len(EXPL_VARS), len(EXPL_VARS))
+        assert result["algorithm_version"] not in ("", None)
+
+    def test_step_halving_triggers(self, guards_off, monkeypatch):
+        """An oversized Newton step is detected and halved."""
+        original_solve = central_module.solve
+        calls = {"n": 0}
+
+        def overshooting_solve(a, b):
+            step = original_solve(a, b)
+            if calls["n"] == 0:
+                # Triple the very first step: the next evaluation must show a
+                # likelihood decrease and engage the step-halving.
+                calls["n"] += 1
+                return 3.0 * step
+            return step
+
+        monkeypatch.setattr(central_module, "solve", overshooting_solve)
+
+        warnings_seen = []
+        monkeypatch.setattr(central_module, "warn", lambda msg: warnings_seen.append(msg))
+
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        assert any(
+            "halving the step" in w for w in warnings_seen
+        ), f"Expected step-halving warning, saw: {warnings_seen}"
+        assert result["converged"] is True
+
+        # The recovered model still matches lifelines
+        ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
+        model = pd.DataFrame(result["model"]).T
+        for var in EXPL_VARS:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3

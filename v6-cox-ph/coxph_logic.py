@@ -247,6 +247,38 @@ def compute_model_results(
     }
 
 
+def partial_log_likelihood(
+    beta: np.ndarray,
+    z_sum: "pd.Series | np.ndarray",
+    aggregated_time_events: pd.DataFrame,
+    summed_agg1: np.ndarray,
+) -> float:
+    """
+    The Breslow partial log-likelihood at ``beta``, from pooled aggregates.
+
+    ``ell(beta) = beta . z_sum - sum_j d_j * log S0(t_j)`` where ``d_j`` is the
+    pooled event count at grid time ``t_j`` and ``S0(t_j)`` the aggregated
+    risk-set sum at the same ``beta``. Everything it needs is already
+    collected, so no extra round-trip is required.
+
+    Raises
+    ------
+    AlgorithmError
+        If any risk-set sum is not positive or not finite.
+    """
+    beta = np.asarray(beta, dtype=float)
+    s0 = np.asarray(summed_agg1, dtype=float)
+    if len(s0) != len(aggregated_time_events):
+        raise AlgorithmError(
+            f"Length mismatch: aggregated_time_events has {len(aggregated_time_events)} "
+            f"rows but summed_agg1 has {len(s0)} entries"
+        )
+    if np.any(s0 <= 0) or not np.all(np.isfinite(s0)):
+        raise AlgorithmError("A risk-set sum S0 is not positive; cannot evaluate the log-likelihood.")
+    freqs = aggregated_time_events["freq"].to_numpy(dtype=float)
+    return float(np.dot(beta, np.asarray(z_sum, dtype=float)) - np.sum(freqs * np.log(s0)))
+
+
 def round_sig(values, digits: int = 2) -> np.ndarray:
     """Round to ``digits`` significant figures.
 

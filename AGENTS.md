@@ -99,10 +99,15 @@ user task → central → compute_summed_z
   defence in depth only.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
-  evaluated at the same ``beta``. Results include ``converged`` and
-  ``n_iterations``.
+  evaluated at the same ``beta`` — the last *accepted* evaluation. The
+  log-likelihood is computed centrally each iteration from the aggregates
+  already collected; when it decreases the Newton step is halved and the
+  previous accepted state is kept (a decrease is only visible at the next
+  round-trip). Results include ``converged`` and ``n_iterations``, plus
+  ``log_likelihood``, ``log_likelihood_null``, ``lr_statistic``,
+  ``lr_p_value``, ``n_events``, ``covariance`` and ``algorithm_version``.
 - Results must be JSON-serialisable (they travel over the vantage6 wire).
-- ``MAX_ITERATIONS`` (module-level in ``central.py``) controls the epoch
+- ``MAX_ITERATIONS`` (module-level in ``central.py``, 20) controls the epoch
   budget; tests monkeypatch it to force non-convergence.
 
 ## Environment and commands

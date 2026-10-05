@@ -48,6 +48,22 @@ The central function returns a dictionary with:
 - ``warnings``: a list of human-readable warning strings.
 - ``converged`` (bool): whether the Newton-Raphson optimiser converged.
 - ``n_iterations`` (int): the number of iterations performed.
+- ``log_likelihood`` (float): the Breslow partial log-likelihood at the
+  reported coefficients.
+- ``log_likelihood_null`` (float): the log-likelihood at ``beta = 0``.
+- ``lr_statistic`` / ``lr_p_value`` (float): the likelihood-ratio test
+  statistic ``2 * (ll - ll_null)`` and its chi-squared p-value with
+  ``degrees_of_freedom`` degrees of freedom.
+- ``n_events`` (int): the pooled number of event cases.
+- ``covariance``: the covariance matrix of the coefficients (original
+  covariate scale).
+- ``algorithm_version`` (str): the algorithm package version the result was
+  computed with.
+
+``overall_p_value`` is the Wald test; ``lr_p_value`` is the likelihood-ratio
+test. When the log-likelihood decreases after a Newton step the optimiser
+halves the step and retries; the reported statistics always belong to the
+last accepted evaluation (the iteration budget is 20 round-trips).
 
 The Wald statistic is reported as ``Z = Coef / SE`` and the p-value as
 ``p = 2 * Phi(-|Z|)``. When ``converged`` is ``False`` a warning is appended
