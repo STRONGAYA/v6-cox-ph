@@ -8,7 +8,7 @@ working in this repository. Read this before touching node-side code.
 A federated Cox proportional hazards model (Breslow ties) for
 [vantage6](https://vantage6.ai) 4.14–4.15 (the range pinned in
 ``pyproject.toml`` and tested in CI). One Docker image exposes a single
-``central`` aggregator function and three ``partial`` functions that run on
+``central`` aggregator function and two ``partial`` functions that run on
 data stations. The partials share only aggregated quantities with the
 central aggregator; no row-level data leaves a node.
 
@@ -39,8 +39,8 @@ compatible with that:
 ```
 v6-cox-ph/                 algorithm package (the hyphenated name is intentional)
   central.py               aggregator: dispatches sub-tasks, Newton-Raphson loop
-  partial.py               node-side: get_unique_event_times, compute_summed_z,
-                           perform_iteration (all decorated, all guarded)
+  partial.py               node-side: compute_summed_z, perform_iteration
+                           (both decorated, both guarded)
   coxph_logic.py           pure math: derivatives, Newton step, model results
   privacy_guards.py        pure guards: parent-task check, thresholds, binning,
                            tail censoring, risk-set jump guard
@@ -64,31 +64,25 @@ docs/coxph/                Privacy.rst, Validation.rst, Usage.rst, etc.
 ## How the algorithm executes
 
 ```
-user task → central → get_unique_event_times → compute_summed_z
+user task → central → compute_summed_z
            → perform_iteration × N (Newton–Raphson)
 ```
 
 - ``central`` is decorated with ``@algorithm_client`` and is the only function
   a user should call. It validates input, collects organisation IDs,
   dispatches sub-tasks, runs the Newton–Raphson loop, and returns the model.
-- The three partials are decorated with ``@data(1)`` and ``@algorithm_client``.
+- The two partials are decorated with ``@data(1)`` and ``@algorithm_client``.
   They run on each node and return aggregates. Their keyword arguments
   **must match** ``algorithm_store.json`` — that file is the wire contract.
   Each partial declares exactly one database there, matching ``@data(1)``.
-- A node that fails the sample-size threshold is handled differently per
-  partial, on purpose. ``get_unique_event_times`` returns the marker
-  ``{"N-Threshold not met": org_id}`` so that ``central`` can exclude that
-  organisation and retry (at most three rounds). ``compute_summed_z`` and
-  ``perform_iteration`` raise ``PrivacyThresholdViolation``, which stops the
-  whole analysis. That can still happen for a node that passed the first
-  check, once rows with NaN in ``expl_vars`` are dropped. Do not "unify" the
-  two without changing ``central`` to match.
+- A node that fails the sample-size threshold raises
+  ``PrivacyThresholdViolation`` in every partial, which stops the whole
+  analysis; there is no automatic exclusion and no retry round. Researchers
+  select organisations explicitly via ``organization_ids``.
 - ``central`` builds the event-time grid and per-time event counts
   (``aggregated_time_events``) from the ``times`` returned by
-  ``compute_summed_z``, **not** from ``get_unique_event_times``. Only
-  ``compute_summed_z`` also drops rows with NaN in ``expl_vars``, so only its
+  ``compute_summed_z``. It drops rows with NaN in ``expl_vars``, so its
   counts are consistent with ``z_sum`` and the risk sets.
-  ``get_unique_event_times`` is used for node exclusion only.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
   evaluated at the same ``beta``. Results include ``converged`` and
@@ -161,8 +155,8 @@ deliberately runs glibc and unlocked to test the declared range.
 - ``lifelines.CoxPHFitter`` is the reference, but it uses Efron ties while
   this algorithm uses Breslow ties — expect small differences and use the
   tolerances already in the tests.
-- Test data lives in ``tests/data/``. Node 3 has too few events and is the
-  small-node exclusion case.
+- Test data lives in ``tests/data/``. Node 3 has too few events: a run that
+  includes it fails closed with ``PrivacyThresholdViolation``.
 - Exactness tests disable the risk-set guards with
   ``COXPH_MIN_RISK_SET_CHANGE=1``; the default-guard test asserts the
   privacy property separately.
@@ -208,10 +202,9 @@ deliberately runs glibc and unlocked to test the declared range.
   ``PrivacyThresholdViolation``, ``PrivacyViolation``, ``AlgorithmError``.
 - UK English in prose, comments, docstrings and log messages (organisation,
   behaviour, optimise). Identifiers keep vantage6's US spelling and must not
-  be "corrected": ``organization_ids``, ``client.organization_id``,
-  ``client.organization.list()``, ``included_organizations`` and
-  ``excluded_organizations`` are part of the wire contract or the vantage6
-  API.
+  be "corrected": ``organization_ids``, ``client.organization_id`` and
+  ``client.organization.list()`` are part of the wire contract or the
+  vantage6 API.
 - Black formatting, line length 120, target ``py310`` (configured in
   ``[tool.black]`` in ``pyproject.toml``); flake8 uses the same 120 limit.
 

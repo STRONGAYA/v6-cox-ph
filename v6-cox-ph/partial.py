@@ -12,7 +12,7 @@ import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
 from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
-from vantage6.algorithm.tools.util import info, warn
+from vantage6.algorithm.tools.util import info
 
 from .privacy_guards import (
     guarded_risk_set_masks,
@@ -20,49 +20,6 @@ from .privacy_guards import (
     prepare_time_column,
     validate_iteration_input,
 )
-
-
-@data(1)
-@algorithm_client
-def get_unique_event_times(client: AlgorithmClient, df: pd.DataFrame, time_col: str, outcome_col: str) -> dict:
-    """
-    Retrieve unique event times from the provided DataFrame.
-
-    If the number of samples is too small, the sub-task is halted and
-    returns the organisation ID.
-
-    Parameters
-    ----------
-    client : AlgorithmClient
-        The client instance used to interact with the vantage6 server.
-    df : pd.DataFrame
-        The DataFrame containing the data.
-    time_col : str
-        The name of the column containing the time data.
-    outcome_col : str
-        The name of the column containing the outcome data.
-
-    Returns
-    -------
-    dict
-        A dictionary containing unique event times, or a message
-        indicating that the subtask was not executed for privacy reasons.
-    """
-    info("Computing unique event times")
-
-    df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, [], need_outcome=True)
-
-    if not threshold_met:
-        warn("Sub-task was not executed because the number of samples " "is too small.")
-        return {"N-Threshold not met": client.organization_id}
-
-    df = prepare_time_column(df, time_col, settings, outcome_col)
-
-    times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
-    times = times.sort_values(by=time_col)[[time_col, outcome_col]]
-    times["freq"] = times[outcome_col]
-    times = times.drop(columns=outcome_col)
-    return {"times": times.to_dict()}
 
 
 @data(1)

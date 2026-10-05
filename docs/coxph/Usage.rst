@@ -43,8 +43,6 @@ The central function returns a dictionary with:
 - ``aic``: the Akaike Information Criterion.
 - ``degrees_of_freedom``: the number of model parameters.
 - ``warnings``: a list of human-readable warning strings.
-- ``included_organizations`` / ``excluded_organizations``: the organisations
-  that passed / failed the sample-size threshold.
 - ``converged`` (bool): whether the Newton-Raphson optimiser converged.
 - ``n_iterations`` (int): the number of iterations performed.
 

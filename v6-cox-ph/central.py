@@ -14,7 +14,7 @@ from scipy.linalg import solve
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError
-from vantage6.algorithm.tools.util import error, info, warn
+from vantage6.algorithm.tools.util import info, warn
 
 from .coxph_logic import compute_derivatives, compute_model_results
 from .coxph_logic import format_results_dataframe
@@ -39,10 +39,10 @@ def central(
     This function orchestrates the federated computation by:
     1. Validating input parameters
     2. Collecting organisation IDs
-    3. Dispatching subtasks to compute unique event times
-    4. Dispatching subtasks to compute summed Z statistics
-    5. Iteratively optimising beta coefficients using Newton-Raphson
-    6. Computing final model statistics and returning results
+    3. Dispatching subtasks to compute summed Z statistics (and with them the
+       event-time grid)
+    4. Iteratively optimising beta coefficients using Newton-Raphson
+    5. Computing final model statistics and returning results
 
     Parameters
     ----------
@@ -56,6 +56,9 @@ def central(
         List of explanatory variable names to include in the model.
     organization_ids : list, optional
         List of organisation IDs to include. If None, all organisations are used.
+        Organisations that do not meet the sample-size threshold fail the
+        whole run with ``PrivacyThresholdViolation`` — select them explicitly
+        here rather than relying on automatic exclusion.
 
     Returns
     -------
@@ -83,73 +86,10 @@ def central(
     else:
         ids = list(organization_ids)
 
-    excluded_ids = []
     info(f"Sending task to organisations {ids}")
 
     n_covs = len(expl_vars)
     epochs = MAX_ITERATIONS
-
-    # Subtask: get unique event times
-    info("Defining input parameters for subtask — get unique event times")
-    input_ = {
-        "method": "get_unique_event_times",
-        "kwargs": {
-            "time_col": time_col,
-            "outcome_col": outcome_col,
-        },
-    }
-
-    n_loops = 0
-    n_threshold_met = False
-    while not n_threshold_met:
-        _excluded_ids = []
-        if n_loops > 2:
-            error("Sample size violations should be eliminated yet criteria " "are not met. Exiting")
-            raise AlgorithmError("Sample size violations should be eliminated yet criteria " "are not met. Exiting")
-
-        n_loops += 1
-        info("Creating subtask for all selected organisations")
-        task = client.task.create(
-            input_=input_,
-            organizations=ids,
-            name="Unique event times",
-            description="Getting unique event times and their counts",
-        )
-
-        info("Waiting for results")
-        results = client.wait_for_results(task_id=task.get("id"))
-        info("Results obtained!")
-
-        unique_time_events = []
-        for output in results:
-            if "N-Threshold not met" in output:
-                warn(
-                    f"Insufficient samples for organisation "
-                    f"{output['N-Threshold not met']}. Excluding from analysis."
-                )
-                ids.remove(output["N-Threshold not met"])
-                excluded_ids.append(output["N-Threshold not met"])
-                _excluded_ids.append(output["N-Threshold not met"])
-                continue
-
-            output = pd.DataFrame.from_dict(output["times"])
-            unique_time_events.append(output)
-
-        if len(_excluded_ids) == 0:
-            n_threshold_met = True
-        elif len(ids) == 0:
-            warn("No organisations meet the minimal sample size threshold.")
-            return {
-                "included_organizations": [],
-                "excluded_organizations": excluded_ids,
-                "model": None,
-                "overall_p_value": None,
-                "aic": None,
-                "degrees_of_freedom": n_covs,
-                "warnings": ["No organisations meet the minimal sample size threshold."],
-                "converged": False,
-                "n_iterations": 0,
-            }
 
     # Subtask: compute summed Z
     info("Defining input parameters for subtask — compute summed Z")
@@ -173,6 +113,7 @@ def central(
     info("Waiting for results")
     results = client.wait_for_results(task_id=task.get("id"))
     info("Results obtained!")
+    _require_all_organisations_answered(results, ids)
 
     z_sum = None
     time_event_dfs = []
@@ -185,11 +126,9 @@ def central(
         # Collect per-time event counts (NaN-consistent with z_sum)
         time_event_dfs.append(pd.DataFrame.from_dict(output["times"]))
 
-    # Build aggregated_time_events from compute_summed_z results, not from
-    # get_unique_event_times. The latter drops NaN only in time/outcome
-    # columns, while compute_summed_z also drops NaN in expl_vars — so
-    # event counts from compute_summed_z are consistent with z_sum and the
-    # risk sets (FR-B4).
+    # Build aggregated_time_events from compute_summed_z results: it drops
+    # NaN in time, outcome and expl_vars, so its event counts are consistent
+    # with z_sum and the risk sets (FR-B4).
     aggregated_time_events = pd.concat(time_event_dfs)
     aggregated_time_events = aggregated_time_events.groupby(time_col, as_index=False).sum()
 
@@ -234,6 +173,7 @@ def central(
         info("Waiting for results")
         results = client.wait_for_results(task_id=task.get("id"))
         info("Results obtained!")
+        _require_all_organisations_answered(results, ids)
 
         n_times = len(unique_time_events)
         summed_agg1 = np.zeros(n_times)
@@ -310,8 +250,6 @@ def central(
     results_df = format_results_dataframe(model["results_data"], expl_vars)
 
     return {
-        "included_organizations": ids,
-        "excluded_organizations": excluded_ids,
         "model": results_df.to_json(double_precision=15),
         "overall_p_value": model["overall_p_value"],
         "aic": model["aic"],
@@ -320,6 +258,29 @@ def central(
         "converged": converged,
         "n_iterations": n_iterations,
     }
+
+
+def _require_all_organisations_answered(results, ids: list) -> None:
+    """Fail closed unless every dispatched organisation returned a result.
+
+    ``wait_for_results`` returns the decoded results of the runs that have
+    one; a node whose run failed (for example
+    ``PrivacyThresholdViolation``) is simply absent from the list.
+    Aggregating the survivors would silently compute a model over a subset
+    of the collaboration — the run must fail instead (D4). The message
+    names the counts, never the data.
+
+    Raises
+    ------
+    AlgorithmError
+        When fewer results came back than organisations were dispatched.
+    """
+    valid = [r for r in results if isinstance(r, dict)]
+    if len(valid) != len(ids):
+        raise AlgorithmError(
+            f"Only {len(valid)} of {len(ids)} organisations returned a result; "
+            f"refusing to aggregate a subset. The run fails closed."
+        )
 
 
 def _validate_iteration_result(output: dict, n_times: int, n_covs: int, expl_vars: list, org_id: int) -> None:

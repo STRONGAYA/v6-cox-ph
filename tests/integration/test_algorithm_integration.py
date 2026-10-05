@@ -38,6 +38,7 @@ def test_methods():
                 "time_col": None,
                 "outcome_col": None,
                 "expl_vars": None,
+                "organization_ids": None,
             },
             "organisation_selection": {
                 "time_col": None,
@@ -72,14 +73,24 @@ def test_configurations():
             "expl_vars": ["age", "treatment"],
             "organisation_subset": [1, 2, 3],
         },
-        "standard_dataset_bad_actor": {
+        "standard_dataset_single_org": {
             "database_label": "coxph_test_data_1",
             "time_col": "time",
             "outcome_col": "event",
             "expl_vars": ["age", "treatment"],
             "organisation_subset": [1],
+        },
+        "standard_dataset_below_threshold": {
+            "database_label": "coxph_test_data_3",
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": ["age", "treatment"],
+            "organisation_subset": [1, 2, 3],
             "expected_failure": True,
-            "failure_reason": ("Single organisation may not meet sample size threshold."),
+            "failure_reason": (
+                "Every node holds a below-threshold slice of the rare dataset; "
+                "the run fails closed instead of excluding them."
+            ),
             "expected_error_type": [
                 CollectResultsError,
                 PrivacyThresholdViolation,
@@ -131,6 +142,7 @@ class TestCoxPHAlgorithmIntegration:
         "config_name",
         [
             "standard_dataset",
+            "standard_dataset_below_threshold",
             "standard_dataset_incorrect_input",
             "rare_dataset",
         ],
@@ -158,6 +170,7 @@ class TestCoxPHAlgorithmIntegration:
         kwargs["time_col"] = config["time_col"]
         kwargs["outcome_col"] = config["outcome_col"]
         kwargs["expl_vars"] = config["expl_vars"]
+        kwargs["organization_ids"] = config["organisation_subset"]
 
         task = client.task.create(
             collaboration=1,
@@ -182,7 +195,8 @@ class TestCoxPHAlgorithmIntegration:
         "config_name",
         [
             "standard_dataset",
-            "standard_dataset_bad_actor",
+            "standard_dataset_single_org",
+            "standard_dataset_below_threshold",
             "standard_dataset_incorrect_input",
             "rare_dataset",
         ],
@@ -238,7 +252,8 @@ class TestCoxPHAlgorithmIntegration:
         "config_name",
         [
             "standard_dataset",
-            "standard_dataset_bad_actor",
+            "standard_dataset_single_org",
+            "standard_dataset_below_threshold",
             "standard_dataset_incorrect_input",
             "rare_dataset",
         ],
@@ -291,10 +306,6 @@ class TestCoxPHAlgorithmIntegration:
     @pytest.mark.parametrize(
         "method,kwargs",
         [
-            (
-                "get_unique_event_times",
-                {"time_col": "time", "outcome_col": "event"},
-            ),
             (
                 "compute_summed_z",
                 {
@@ -461,10 +472,6 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
 
     result = json.loads(result["data"][0]["result"])
 
-    # Check if the algorithm returned an "all excluded" result (no model)
-    if result.get("model") is None:
-        raise AlgorithmError("All organisations were excluded — no model could be computed.")
-
     return result
 
 
@@ -503,16 +510,19 @@ def determine_model_acceptance(
     Validate federated results against a centralised Cox-PH fit.
 
     The integration demo network splits each labelled CSV across its nodes
-    (``v6 dev create-demo-network`` partitions rows evenly), so the pooled
-    data of the included organisations is the concatenation of their
-    per-node row slices — not the full dataset replicated. The lifelines
-    reference is therefore built on the same row slices that the included
-    organisations actually hold.
+    (``v6 dev create-demo-network`` partitions rows evenly into
+    ``n_total_nodes`` slices). The mapping from organisation id to node
+    slice is a property of the network creation and cannot be assumed to
+    be the identity. The lifelines reference is therefore built on
+    *candidate* row-slice combinations: the union of all slices when every
+    organisation is selected, or every possible combination of that many
+    slices for a subset. The federated coefficients must match at least
+    one candidate.
 
     Checks (meaningful tolerances that would catch the Z-statistic bug):
 
-    - coefficients within 0.05 of the reference
-    - SE within 10 % relative of the reference
+    - coefficients within 0.05 of a candidate reference
+    - SE within 10 % relative of the same candidate
     - Z == Coef / SE to 1e-4
     - p == 2 * norm.cdf(-|Z|)
     - AIC finite
@@ -525,7 +535,8 @@ def determine_model_acceptance(
     database_label : str
         Label of the test dataset to validate against.
     kwargs : Dict[str, Any]
-        Algorithm kwargs containing time_col, outcome_col, expl_vars.
+        Algorithm kwargs containing time_col, outcome_col, expl_vars and
+        organization_ids.
     tolerance : float
         Unused; kept for backward compatibility with existing callers.
     n_total_nodes : int
@@ -535,8 +546,11 @@ def determine_model_acceptance(
     Raises
     ------
     AssertionError
-        If federated coefficients deviate from centralised fit beyond tolerance.
+        If federated coefficients deviate from every candidate reference
+        beyond tolerance.
     """
+    from itertools import combinations
+
     from lifelines import CoxPHFitter
 
     repo_root = Path(__file__).parent.parent.parent
@@ -549,24 +563,7 @@ def determine_model_acceptance(
     time_col = kwargs["time_col"]
     outcome_col = kwargs["outcome_col"]
     expl_vars = kwargs["expl_vars"]
-
-    # The demo network splits the dataset across nodes by row index.
-    # Reconstruct the pooled data of the included organisations by
-    # concatenating their per-node row slices.
-    n_rows = len(df)
-    included_orgs = federated_result["included_organizations"]
-    pooled_parts = []
-    for org_id in included_orgs:
-        node_idx = org_id - 1  # demo network nodes are 1-indexed
-        start = node_idx * n_rows // n_total_nodes
-        end = (node_idx + 1) * n_rows // n_total_nodes
-        pooled_parts.append(df.iloc[start:end])
-    central_df = pd.concat(pooled_parts, ignore_index=True)
-    central_df = central_df[[time_col, outcome_col] + expl_vars].copy()
-    central_df[outcome_col] = central_df[outcome_col].astype(bool)
-
-    cph = CoxPHFitter()
-    cph.fit(central_df, duration_col=time_col, event_col=outcome_col)
+    selected_orgs = kwargs["organization_ids"]
 
     # Extract federated coefficients from the result
     model_json = federated_result.get("model")
@@ -579,21 +576,10 @@ def determine_model_acceptance(
     assert "n_iterations" in federated_result, "n_iterations should be present"
 
     for var in expl_vars:
-        assert var in cph.params_.index, f"{var} missing from lifelines params"
         assert var in fed_df.index, f"{var} missing from federated result"
 
-        central_coef = cph.params_[var]
         fed_coef = fed_df.loc[var, "Coef"]
-        assert abs(fed_coef - central_coef) <= 0.05, (
-            f"Coefficient mismatch for {var}: " f"federated={fed_coef}, centralised={central_coef}"
-        )
-
-        central_se = cph.standard_errors_[var]
         fed_se = fed_df.loc[var, "SE"]
-        rel_se_diff = abs(fed_se - central_se) / central_se if central_se else 0
-        assert rel_se_diff <= 0.10, (
-            f"SE mismatch for {var}: federated={fed_se}, " f"centralised={central_se}, relative diff={rel_se_diff}"
-        )
 
         # Z must equal Coef / SE (regression check for the old bug)
         z = fed_df.loc[var, "Z"]
@@ -602,8 +588,57 @@ def determine_model_acceptance(
         # p must equal 2 * Phi(-|Z|)
         expected_p = 2 * norm.cdf(-abs(z))
         pval = fed_df.loc[var, "p-value"]
-        assert abs(pval - expected_p) <= 1e-6, f"p-value mismatch for {var}: got {pval}, expected {expected_p}"
+        assert abs(pval - expected_p) <= 1e-6, f"p-value mismatch for {var}: got={pval}, expected={expected_p}"
 
     assert np.isfinite(federated_result["aic"]), "AIC should be finite"
 
-    print("All model acceptance checks passed")
+    # The demo network splits the dataset across nodes by row index
+    # (start = i * n // nodes). Build the candidate reference frames for the
+    # number of organisations selected: the union of all slices when every
+    # organisation participates, otherwise every combination of that many
+    # slices (the org -> slice mapping varies per network creation).
+    n_rows = len(df)
+    slices = [df.iloc[i * n_rows // n_total_nodes : (i + 1) * n_rows // n_total_nodes] for i in range(n_total_nodes)]
+    if len(selected_orgs) >= n_total_nodes:
+        candidates = [pd.concat(slices, ignore_index=True)]
+    else:
+        candidates = [
+            pd.concat([slices[i] for i in comb], ignore_index=True)
+            for comb in combinations(range(n_total_nodes), len(selected_orgs))
+        ]
+
+    matches = 0
+    for cand in candidates:
+        central_df = cand[[time_col, outcome_col] + expl_vars].copy()
+        central_df[outcome_col] = central_df[outcome_col].astype(bool)
+
+        cph = CoxPHFitter()
+        try:
+            cph.fit(central_df, duration_col=time_col, event_col=outcome_col)
+        except Exception:
+            continue  # a candidate with too few events cannot be fitted
+
+        ok = True
+        details = []
+        for var in expl_vars:
+            central_coef = cph.params_[var]
+            central_se = cph.standard_errors_[var]
+            if abs(fed_df.loc[var, "Coef"] - central_coef) > 0.05:
+                ok = False
+                details.append(f"coef {var}: fed={fed_df.loc[var, 'Coef']}, ref={central_coef}")
+                continue
+            rel_se_diff = abs(fed_df.loc[var, "SE"] - central_se) / central_se if central_se else 0
+            if rel_se_diff > 0.10:
+                ok = False
+                details.append(f"SE {var}: fed={fed_df.loc[var, 'SE']}, ref={central_se}, rel={rel_se_diff}")
+        if ok:
+            matches += 1
+        else:
+            print("Candidate rejected: " + "; ".join(details))
+
+    assert matches, (
+        "Federated coefficients matched none of the candidate reference fits "
+        f"({len(candidates)} candidates for {len(selected_orgs)} selected organisations)."
+    )
+
+    print(f"All model acceptance checks passed (matched {matches} of {len(candidates)} candidate references)")

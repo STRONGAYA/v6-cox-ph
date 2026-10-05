@@ -33,28 +33,6 @@
       ]
     },
     {
-      "name": "get_unique_event_times",
-      "description": "Retrieve unique event times and their frequencies from the node data.",
-      "type": "federated",
-      "databases": [
-        {
-          "name": "Database 1"
-        }
-      ],
-      "arguments": [
-        {
-          "name": "time_col",
-          "type": "string",
-          "description": "Name of the column containing the time data."
-        },
-        {
-          "name": "outcome_col",
-          "type": "string",
-          "description": "Name of the column containing the outcome data."
-        }
-      ]
-    },
-    {
       "name": "compute_summed_z",
       "description": "Compute the sum of the explanatory variables over the event cases.",
       "type": "federated",

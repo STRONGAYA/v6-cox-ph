@@ -25,7 +25,7 @@ Docker-free federated pipeline test
 
 ``tests/unit/test_federated_pipeline.py`` drives ``central`` in-process
 through ``MockAlgorithmClient`` on the three-node test data and compares
-with ``lifelines.CoxPHFitter`` fitted on the pooled data of the included
+with ``lifelines.CoxPHFitter`` fitted on the pooled data of the selected
 organisations. With the risk-set guards disabled
 (``COXPH_MIN_RISK_SET_CHANGE=1``) it asserts:
 
@@ -34,7 +34,8 @@ organisations. With the risk-set guards disabled
 - ``Z == Coef / SE`` (regression check);
 - AIC within ``0.1``;
 - ``converged is True`` and ``n_iterations <= 10``;
-- node 3 (too few events) is excluded;
+- a run that includes node 3 (too few events) fails with
+  ``PrivacyThresholdViolation`` — organisations are selected explicitly;
 - federated (2 nodes) equals pooled single-node coefficients to ``1e-8``;
 - forced non-convergence (``epochs = 1``) reports ``converged=False`` with a
   warning.
@@ -57,9 +58,15 @@ Integration tests
 
 ``tests/integration/test_algorithm_integration.py`` dispatches real tasks
 through a ``v6 dev`` network. ``determine_model_acceptance`` builds the
-lifelines reference by concatenating the per-node row slices of the
-included organisations (the demo network partitions each CSV across nodes
-by row index) and asserts:
+lifelines reference on the per-node row slices (the demo network partitions
+each CSV across nodes by row index). The organisation-to-slice mapping is a
+property of the network creation, so the reference is built on candidate
+slice combinations and the federated coefficients must match at least one
+candidate. The demo nodes run with ``COXPH_MIN_RISK_SET_CHANGE=1`` and
+``SAMPLE_SIZE_THRESHOLD=5`` (see ``tests/data/
+additional_vantage6_node_config.yaml``); the fail-closed threshold
+behaviour is exercised through the ``coxph_test_data_3`` scenarios. The
+assertions include:
 
 - coefficients within ``0.05`` of the reference;
 - SE within 10 % relative;

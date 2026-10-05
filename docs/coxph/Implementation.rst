@@ -12,8 +12,7 @@ The central part is responsible for the orchestration and aggregation of the alg
 ~~~~~~~~~~~~~~~~
 The central part is responsible for the following tasks:
 
-- Request the unique event times and their counts in each data station.
-- Request the summed z-statistics for the explanatory variables (i.e. the predictors) in each data station.
+- Request the summed z-statistics for the explanatory variables (i.e. the predictors) and, with them, the per-time event counts in each data station.
 - Orchestrate iterations in the data stations to retrieve intermediate model parameters.
 - Pass the intermediate model parameters to the compute_derivatives function.
 - Compute the aggregated model parameters.
@@ -28,10 +27,6 @@ Partials
 Partials are the computations that are executed on each node. The partials have access
 to the data that is stored on the node. The partials are executed in parallel on each
 node.
-
-``get_unique_event_times``
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-This function retrieves unique event times and their counts from the selected database.
 
 ``compute_summed_z``
 ~~~~~~~~~~~~~~~~~~~~

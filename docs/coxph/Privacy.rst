@@ -30,10 +30,12 @@ Sample-size threshold
 ~~~~~~~~~~~~~~~~~~~~~
 
 Each node must have strictly more than ``SAMPLE_SIZE_THRESHOLD`` rows **and**
-events (default 10). ``get_unique_event_times`` returns
-``{"N-Threshold not met": org_id}`` on failure (the central function then
-excludes that organisation); ``compute_summed_z`` and ``perform_iteration``
-raise ``PrivacyThresholdViolation``.
+events (default 10). A node below the threshold raises
+``PrivacyThresholdViolation`` and the whole analysis stops: there is no
+automatic exclusion. Researchers select the organisations explicitly via
+``organization_ids``. The failing node is identifiable from the run status —
+the same information today's exclusion marker used to leak — which is an
+accepted consequence of failing closed.
 
 Time binning
 ~~~~~~~~~~~~
@@ -41,7 +43,9 @@ Time binning
 When ``COXPH_TIME_BIN_WIDTH`` is set to a positive value, event times are
 coarsened to a regular grid ``floor(t / w) * w`` before anything else, so
 event times, ``z_sum`` and risk sets are all on the same grid. Binning is
-disabled by default.
+disabled by default: it is the node administrator's choice, and it should
+be enabled when exact event dates are sensitive (a coarse grid cannot be
+reversed to an exact date).
 
 Tail (administrative) censoring
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -105,7 +109,6 @@ Data sharing
 
 Each data station shares, with the central aggregator only:
 
-- the unique event times and their frequencies (``get_unique_event_times``);
 - the sum of each explanatory variable over the event cases, along with
   per-time event counts computed from the same NaN-dropped, censored
   DataFrame (``compute_summed_z``). The event counts are used by the
@@ -115,9 +118,21 @@ Each data station shares, with the central aggregator only:
   ``S1(t) = sum X * exp(beta . X)`` and ``S2(t) = sum X X^T exp(beta . X)``
   (``perform_iteration``).
 
-Event times are not shared between data stations. The aggregated model
-coefficients are shared with the data stations by the central aggregator
-during the iteration process.
+Two directions of sharing exist and both must be assumed visible to the
+researcher that ran ``central``:
+
+- **Node → central.** The pooled event-time grid is sent to *every* node in
+  every iteration (``unique_time_events``): every node therefore learns the
+  pooled, binned event times of the collaboration. Bin times
+  (``COXPH_TIME_BIN_WIDTH``) when that is too much detail.
+- **Sub-task results.** The sub-tasks are created under the researcher's
+  identity and their results are retrievable from the server (the vantage6
+  permission checks operate at the server). Every partial must therefore
+  treat its entire return value as visible to the researcher — the sample
+  contents below are all aggregates over at least ``k`` individuals.
+
+Aggregated model coefficients are shared with the data stations by the
+central aggregator during the iteration process.
 
 Vulnerabilities to known attacks
 --------------------------------

@@ -20,6 +20,7 @@ from importlib import import_module
 import numpy as np
 import pandas as pd
 import pytest
+from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
 
 # Add the algorithm module and repo root to the path
 repo_root = Path(__file__).parent.parent.parent
@@ -92,24 +93,34 @@ def guards_off(monkeypatch):
 
 @pytest.fixture
 def standard_result(guards_off):
-    """Run the federated algorithm on the three-node test data (guards off)."""
-    df1, df2, df3 = _load_datasets()
+    """Run the federated algorithm on nodes 1 and 2 (guards off).
+
+    Node 3 has too few events; under the fail-closed threshold policy a run
+    that includes it stops with ``PrivacyThresholdViolation``, so the
+    happy-path fixtures select organisations 1 and 2 explicitly.
+    """
+    df1, df2, _ = _load_datasets()
     datasets = [
         [{"database": df1, "db_type": "csv"}],
         [{"database": df2, "db_type": "csv"}],
-        [{"database": df3, "db_type": "csv"}],
     ]
-    return _run_central(datasets, [1, 2, 3])
+    return _run_central(datasets, [1, 2])
 
 
 @pytest.mark.unit
 class TestFederatedPipelineVsLifelines:
     """Compare the federated result (guards off) against a lifelines reference."""
 
-    def test_excludes_small_node(self, standard_result):
-        """Node 3 (<= 10 events) should be excluded; nodes 1 and 2 included."""
-        assert 3 in standard_result["excluded_organizations"]
-        assert sorted(standard_result["included_organizations"]) == [1, 2]
+    def test_run_including_below_threshold_node_fails(self, guards_off):
+        """A run that includes node 3 (too few events) fails closed (D4)."""
+        df1, df2, df3 = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+            [{"database": df3, "db_type": "csv"}],
+        ]
+        with pytest.raises(PrivacyThresholdViolation):
+            _run_central(datasets, [1, 2, 3])
 
     def test_converged(self, standard_result):
         """The optimiser should report convergence within a few iterations."""
@@ -225,35 +236,6 @@ class TestNonConvergence:
             assert model.loc[var, "Z"] == 0.0
             # SE must be finite (computed from the Hessian at beta_0)
             assert np.isfinite(model.loc[var, "SE"])
-
-
-@pytest.mark.unit
-class TestAllExcluded:
-    """When every organisation is excluded, the full output schema is returned."""
-
-    def test_all_excluded_full_schema(self, monkeypatch):
-        """FR-A5: all-excluded return has model=None and all schema keys."""
-        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "1000")
-        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
-
-        df1, df2, df3 = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-            [{"database": df3, "db_type": "csv"}],
-        ]
-        result = _run_central(datasets, [1, 2, 3])
-
-        assert result["model"] is None
-        assert result["converged"] is False
-        assert result["n_iterations"] == 0
-        assert result["included_organizations"] == []
-        assert len(result["excluded_organizations"]) == 3
-        assert result["aic"] is None
-        assert result["overall_p_value"] is None
-        assert isinstance(result["warnings"], list)
-        assert len(result["warnings"]) > 0
 
 
 @pytest.mark.unit
@@ -374,10 +356,9 @@ class TestNaNPolicy:
         risk sets); the federated result matches lifelines on the NaN-free
         pooled data.
 
-        Putting the NaN on an *event* row is critical: get_unique_event_times
-        does not have expl_vars and cannot drop rows with NaN covariates, so
-        without the fix the event counts (freq) would include that row while
-        z_sum and the risk sets would not — a 10-20x tolerance violation.
+        Putting the NaN on an *event* row is critical: without the shared
+        preparation step the event counts (freq) could include rows that
+        z_sum and the risk sets exclude — a 10-20x tolerance violation.
         """
         df1, df2, _ = _load_datasets()
         df1 = df1.copy()
@@ -414,20 +395,19 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
         organization_ids=organization_ids,
     )
 
-    # Gather the global event-time grid from get_unique_event_times.
+    # Gather the pooled event-time grid from compute_summed_z results.
     task = client.task.create(
         input_={
-            "method": "get_unique_event_times",
-            "kwargs": {"time_col": "time", "outcome_col": "event"},
+            "method": "compute_summed_z",
+            "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
         },
         organizations=organization_ids,
     )
     time_results = client.wait_for_results(task_id=task["id"])
     grid = []
     for r in time_results:
-        if "times" in r:
-            t = pd.DataFrame.from_dict(r["times"])
-            grid.extend(t["time"].tolist())
+        t = pd.DataFrame.from_dict(r["times"])
+        grid.extend(t["time"].tolist())
     grid = sorted(set(grid))
 
     # Dispatch perform_iteration at beta = 0.
@@ -517,17 +497,20 @@ class TestTimeBinning:
         )
         task = client.task.create(
             input_={
-                "method": "get_unique_event_times",
-                "kwargs": {"time_col": "time", "outcome_col": "event"},
+                "method": "compute_summed_z",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                },
             },
             organizations=[1, 2],
         )
         results = client.wait_for_results(task_id=task["id"])
         shared_times = []
         for r in results:
-            if "times" in r:
-                t = pd.DataFrame.from_dict(r["times"])
-                shared_times.extend(t["time"].tolist())
+            t = pd.DataFrame.from_dict(r["times"])
+            shared_times.extend(t["time"].tolist())
         for t in shared_times:
             assert t % 10 == 0 or np.isclose(t % 10, 0), f"shared time {t} is not a multiple of 10"
 
