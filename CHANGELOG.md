@@ -1,6 +1,27 @@
 # Changelog
 
-## 2.0.0-dev (unreleased)
+## 2.1.0
+
+Non-breaking internal change; the wire contract (``algorithm_store.json``
+function signatures and result keys) is unchanged.
+
+- All payloads that cross the wire are validated with Pydantic models in
+  ``v6-cox-ph/miscellaneous.py``: the user input (``CoxPHInput``), the
+  payload central sends to ``perform_iteration`` (``IterationInput``, new
+  in 2.1.0) and the partial results (``SummedZResult`` and
+  ``IterationResult``, new in 2.1.0). The partials build their result
+  dicts from the result models, so the keys and nesting of what travels
+  over the wire are pinned in one place; central validates the received
+  results with the same models and attributes errors by the
+  ``organization_id`` the result carries.
+- ``agg3`` is now also checked for finiteness (2.0.0 checked its shape
+  only).
+- The node's privacy settings (``SAMPLE_SIZE_THRESHOLD``,
+  ``COXPH_TIME_BIN_WIDTH``, ``COXPH_MIN_RISK_SET_CHANGE``) are validated by
+  a frozen model with declarative bounds; invalid settings raise
+  ``UserInputError`` as before.
+
+## 2.0.0 (2026-10-05)
 
 BREAKING wire-contract changes (a major version bump; the commit messages
 of the changes below start with ``BREAKING(wire):``):

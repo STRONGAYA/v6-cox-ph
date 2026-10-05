@@ -45,7 +45,9 @@ v6-cox-ph/                 algorithm package (the hyphenated name is intentional
   privacy_guards.py        pure guards: parent-task check, thresholds, binning,
                            tail censoring, vectorised risk-set aggregates with
                            the jump guard
-  miscellaneous.py         pydantic input model, data-quality helpers
+  miscellaneous.py         pydantic models for the wire contract (input,
+                           iteration input, partial results),
+                           data-quality helpers
   __init__.py              exports central and the partials
 algorithm_store.json       wire contract — function names, arguments, types
 Dockerfile                 container image; entrypoint is
@@ -193,7 +195,8 @@ deliberately runs glibc and unlocked to test the declared range.
 ## Privacy rules (non-negotiable for node-side code)
 
 - **Never return row-level data** from a partial. Only aggregates leave a
-  node.
+  node. The result dicts of the partials are built from the Pydantic
+  result models, so their keys and nesting are pinned in one place.
 - **Every partial prepares its data through the shared**
   ``prepare_node_data(client, df, time_col, outcome_col, expl_vars, *,
   need_outcome)`` (in ``privacy_guards.py``), which runs the guards in
@@ -229,7 +232,8 @@ deliberately runs glibc and unlocked to test the declared range.
 ## Coding conventions
 
 - numpy/pandas vectorised maths; avoid per-row Python loops in the hot path.
-- Pydantic input validation via ``CoxPHInput`` / ``validate_coxph_input``.
+- Pydantic validation of everything that crosses the wire: ``CoxPHInput``,
+  ``IterationInput``, ``SummedZResult``, ``IterationResult``.
 - vantage6 logging: ``info``/``warn``/``error`` from
   ``vantage6.algorithm.tools.util``.
 - Raise vantage6 exception types: ``UserInputError``,

@@ -4,6 +4,19 @@ Implementation
 Overview
 --------
 
+Wire validation
+---------------
+Every payload that crosses a trust boundary as JSON with a schema known in
+advance is validated against a Pydantic model defined in
+``v6-cox-ph/miscellaneous.py``: the user input (``CoxPHInput``), the
+payload central sends to ``perform_iteration`` (``IterationInput``) and the
+partial results (``SummedZResult``, ``IterationResult``). The partials
+build their result dicts from the result models, so the keys and nesting of
+what travels over the wire are pinned in one place; central validates the
+received results with the same models, attributing any error by the
+``organization_id`` the result carries. ``algorithm_store.json`` remains
+the user-facing wire contract: function names, arguments and types.
+
 Central
 --------
 The central part is responsible for the orchestration and aggregation of the algorithm.

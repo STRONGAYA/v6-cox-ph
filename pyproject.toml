@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "v6-cox-ph"
-version = "2.0.0"
+version = "2.1.0"
 description = "Federated Cox Proportional Hazards algorithm for vantage6"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
