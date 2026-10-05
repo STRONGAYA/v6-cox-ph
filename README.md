@@ -75,7 +75,12 @@ See `docs/coxph/Privacy.rst` for the privacy implications.
 
 ### Output fields
 
-The `central` function returns, alongside the model table, a `converged`
-(bool) and `n_iterations` (int) field indicating whether the Newton-Raphson
-optimiser converged. The Wald statistic is `Z = Coef / SE` and the p-value is
-`p = 2 * Phi(-|Z|)`. See `docs/coxph/Usage.rst` for the full output schema.
+The `central` function returns, alongside the model table (a JSON object
+indexed by variable name), a `converged` (bool) and `n_iterations` (int)
+field, the likelihood-ratio test (`log_likelihood`, `log_likelihood_null`,
+`lr_statistic`, `lr_p_value`), `n_events`, `covariance`, the Breslow
+`baseline_cumulative_hazard` and `survival_curves` (with optional
+`covariate_profiles`), an aggregate `privacy_guards` summary of the active
+node guards, and `algorithm_version`. The Wald statistic is
+`Z = Coef / SE` and its p-value is `p = 2 * Phi(-|Z|)`. See
+`docs/coxph/Usage.rst` for the full output schema.

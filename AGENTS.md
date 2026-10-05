@@ -52,10 +52,14 @@ Dockerfile                 container image; entrypoint is
                            ``wrap_algorithm`` from vantage6.algorithm.tools.wrap
 pyproject.toml             dependencies, dev/lint extras, pytest config
 tests/
-  unit/                    no-Docker tests (math, guards, mock pipeline)
+  unit/                    no-Docker tests (math, guards, mock pipeline;
+                           reference_risk_sets.py holds the pre-vectorisation
+                           mask implementation for equivalence tests)
   integration/             Docker + v6 dev network tests
   data/                    coxph_test_data_{1,2,3}.csv, node/store configs
   conftest.py              Docker/vantage6 fixtures, markers
+scripts/                   benchmark_risk_sets.py, bias_study.py (not
+                           collected by pytest)
 docs/coxph/                Privacy.rst, Validation.rst, Usage.rst, etc.
 .github/workflows/         test-suite.yml (test + lint + security + docker),
                            security-scan.yml (weekly), release.yaml

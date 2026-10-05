@@ -28,9 +28,30 @@ of the changes below start with ``BREAKING(wire):``):
   and ``included_organizations`` / ``excluded_organizations`` are removed
   from the result.
 
-Input validation is now enforced on the node: the time column must be
-numeric, finite and non-negative; the outcome column must be binary;
-violations raise ``UserInputError`` and stop the analysis.
+Non-breaking additions in the same release:
+
+- Survival curves: ``central`` optionally takes ``covariate_profiles``
+  and returns ``baseline_cumulative_hazard`` (Breslow, at the pooled
+  event-case covariate mean) and ``survival_curves`` per profile — all
+  computed centrally from existing aggregates; no new partial.
+- The optimiser tracks the partial log-likelihood centrally, halves the
+  Newton step when it decreases (keeping the last accepted state, so the
+  reported statistics always belong to one evaluated beta) and uses a
+  20-round-trip budget. New result fields: ``log_likelihood``,
+  ``log_likelihood_null``, ``lr_statistic``, ``lr_p_value``, ``n_events``,
+  ``covariance``, ``algorithm_version``, ``baseline_cumulative_hazard``,
+  ``survival_curves`` and the aggregate ``privacy_guards`` summary
+  (``active``, ``max_min_risk_set_change``, ``time_binning``) with a
+  warning when the guards were active.
+- The risk-set aggregates are computed vectorised
+  (``searchsorted``/``bincount``/reverse cumsum, the jump guard derived
+  from the bucket counts) instead of with T x N boolean masks; benchmark
+  at 100k rows x 10k event times x 10 covariates: 89.3 s / 717 MB before,
+  0.12 s / 28 MB after. ``agg2`` travels as a plain (T x p) list.
+- Input validation is enforced on the node: the time column must be
+  numeric, finite and non-negative; the outcome column must be binary;
+  violations raise ``UserInputError`` and stop the analysis. Every node
+  also fails closed unless every dispatched organisation answered.
 
 ## 1.0.0
 
