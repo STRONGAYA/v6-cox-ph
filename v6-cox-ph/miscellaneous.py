@@ -22,16 +22,11 @@ class CoxPHInput(BaseModel):
     """
 
     time_col: str = Field(..., description="Name of the column containing time data")
-    outcome_col: str = Field(
-        ..., description="Name of the column containing outcome/event data"
-    )
+    outcome_col: str = Field(..., description="Name of the column containing outcome/event data")
     expl_vars: List[str] = Field(..., description="List of explanatory variable names")
     organization_ids: Optional[List[int]] = Field(
         default=None,
-        description=(
-            "List of organisation IDs to include. If None, all "
-            "organisations are used."
-        ),
+        description=("List of organisation IDs to include. If None, all " "organisations are used."),
     )
 
     @field_validator("time_col", "outcome_col")
@@ -63,10 +58,7 @@ class CoxPHInput(BaseModel):
             raise ValueError("organization_ids must be a list of integers")
         for org_id in v:
             if not isinstance(org_id, int) or org_id < 0:
-                raise ValueError(
-                    f"Invalid organisation ID: {org_id}. "
-                    "Must be a non-negative integer."
-                )
+                raise ValueError(f"Invalid organisation ID: {org_id}. " "Must be a non-negative integer.")
         return list(set(v))
 
 
@@ -133,9 +125,7 @@ def check_event_count(df: pd.DataFrame, outcome_col: str, min_events: int = 5) -
     return event_count > min_events
 
 
-def check_data_quality(
-    df: pd.DataFrame, time_col: str, outcome_col: str
-) -> Dict[str, Any]:
+def check_data_quality(df: pd.DataFrame, time_col: str, outcome_col: str) -> Dict[str, Any]:
     """
     Perform comprehensive data quality checks.
 

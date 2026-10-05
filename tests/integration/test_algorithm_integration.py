@@ -79,9 +79,7 @@ def test_configurations():
             "expl_vars": ["age", "treatment"],
             "organisation_subset": [1],
             "expected_failure": True,
-            "failure_reason": (
-                "Single organisation may not meet sample size threshold."
-            ),
+            "failure_reason": ("Single organisation may not meet sample size threshold."),
             "expected_error_type": [
                 CollectResultsError,
                 PrivacyThresholdViolation,
@@ -222,10 +220,7 @@ class TestCoxPHAlgorithmIntegration:
             organizations=[1],
             name=f"Test {method} org selection — {config_name}",
             image=algorithm_image_name,
-            description=(
-                f"Integration test for {method} with organisation "
-                f"selection using {config_name}."
-            ),
+            description=(f"Integration test for {method} with organisation " f"selection using {config_name}."),
             input_={"method": method, "kwargs": kwargs},
             databases=[{"label": config["database_label"]}],
         )
@@ -280,10 +275,7 @@ class TestCoxPHAlgorithmIntegration:
             organizations=[1],
             name=f"Test {method} parameter galore — {config_name}",
             image=algorithm_image_name,
-            description=(
-                f"Integration test for {method} with all parameters "
-                f"using {config_name}."
-            ),
+            description=(f"Integration test for {method} with all parameters " f"using {config_name}."),
             input_={"method": method, "kwargs": kwargs},
             databases=[{"label": config["database_label"]}],
         )
@@ -354,8 +346,7 @@ class TestCoxPHAlgorithmIntegration:
         # The error must carry the exact privacy message.
         message = str(exc_info.value)
         assert "Direct invocation is not permitted" in message, (
-            f"Expected the PrivacyViolation message 'Direct invocation is not "
-            f"permitted', got: {message}"
+            f"Expected the PrivacyViolation message 'Direct invocation is not " f"permitted', got: {message}"
         )
 
     def test_default_guards_loose_acceptance(
@@ -444,11 +435,7 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
         for line in lines:
             if line.strip().startswith("vantage6.algorithm.tools.exceptions."):
                 error_class_line = line.strip()
-                error_message = (
-                    error_class_line.split(": ", 1)[1]
-                    if ": " in error_class_line
-                    else "Unknown error"
-                )
+                error_message = error_class_line.split(": ", 1)[1] if ": " in error_class_line else "Unknown error"
                 if "UserInputError" in error_class_line:
                     raise UserInputError(error_message)
                 elif "CollectResultsError" in error_class_line:
@@ -458,9 +445,7 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
                 elif "PrivacyViolation" in error_class_line:
                     raise PrivacyViolation(error_message)
                 else:
-                    raise AlgorithmError(
-                        f"Unknown error type in log: {error_class_line}"
-                    )
+                    raise AlgorithmError(f"Unknown error type in log: {error_class_line}")
 
         # Look for error > lines
         error_lines = [line for line in lines if line.startswith("error >")]
@@ -470,9 +455,7 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
                 raise AlgorithmError(f"Algorithm execution failed: {error_message}")
 
         # Traceback found but no recognised error pattern — raise generic error
-        raise AlgorithmError(
-            f"Traceback found in task log but no error type recognised: {log}"
-        )
+        raise AlgorithmError(f"Traceback found in task log but no error type recognised: {log}")
 
     assert result is not None, "Result should not be None"
 
@@ -480,9 +463,7 @@ def extract_coxph_result(client, task) -> Dict[str, Any]:
 
     # Check if the algorithm returned an "all excluded" result (no model)
     if result.get("model") is None:
-        raise AlgorithmError(
-            "All organisations were excluded — no model could be computed."
-        )
+        raise AlgorithmError("All organisations were excluded — no model could be computed.")
 
     return result
 
@@ -503,13 +484,9 @@ def verify_error_type(exc_info, config: dict) -> None:
         if not isinstance(expected_errors, list):
             expected_errors = [expected_errors]
 
-        error_matched = any(
-            isinstance(exc_info.value, expected_error)
-            for expected_error in expected_errors
-        )
+        error_matched = any(isinstance(exc_info.value, expected_error) for expected_error in expected_errors)
         assert error_matched, (
-            f"Expected one of {[err.__name__ for err in expected_errors]} "
-            f"but got {type(exc_info.value).__name__}"
+            f"Expected one of {[err.__name__ for err in expected_errors]} " f"but got {type(exc_info.value).__name__}"
         )
 
     print(f"Expected failure occurred for {config}: {exc_info.value}")
@@ -608,30 +585,24 @@ def determine_model_acceptance(
         central_coef = cph.params_[var]
         fed_coef = fed_df.loc[var, "Coef"]
         assert abs(fed_coef - central_coef) <= 0.05, (
-            f"Coefficient mismatch for {var}: "
-            f"federated={fed_coef}, centralised={central_coef}"
+            f"Coefficient mismatch for {var}: " f"federated={fed_coef}, centralised={central_coef}"
         )
 
         central_se = cph.standard_errors_[var]
         fed_se = fed_df.loc[var, "SE"]
         rel_se_diff = abs(fed_se - central_se) / central_se if central_se else 0
         assert rel_se_diff <= 0.10, (
-            f"SE mismatch for {var}: federated={fed_se}, "
-            f"centralised={central_se}, relative diff={rel_se_diff}"
+            f"SE mismatch for {var}: federated={fed_se}, " f"centralised={central_se}, relative diff={rel_se_diff}"
         )
 
         # Z must equal Coef / SE (regression check for the old bug)
         z = fed_df.loc[var, "Z"]
-        assert (
-            abs(z - fed_coef / fed_se) <= 1e-4
-        ), f"Z != Coef/SE for {var}: Z={z}, Coef/SE={fed_coef / fed_se}"
+        assert abs(z - fed_coef / fed_se) <= 1e-4, f"Z != Coef/SE for {var}: Z={z}, Coef/SE={fed_coef / fed_se}"
 
         # p must equal 2 * Phi(-|Z|)
         expected_p = 2 * norm.cdf(-abs(z))
         pval = fed_df.loc[var, "p-value"]
-        assert (
-            abs(pval - expected_p) <= 1e-6
-        ), f"p-value mismatch for {var}: got {pval}, expected {expected_p}"
+        assert abs(pval - expected_p) <= 1e-6, f"p-value mismatch for {var}: got {pval}, expected {expected_p}"
 
     assert np.isfinite(federated_result["aic"]), "AIC should be finite"
 
