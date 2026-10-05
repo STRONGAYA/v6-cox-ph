@@ -25,8 +25,10 @@ Projects build on this algorithm in a fork or a stacked branch. To stay
 compatible with that:
 
 - Any step that removes rows runs **before** ``check_sample_size`` and
-  identically in all three partials, so every aggregate central combines
-  comes from the same row set on each node.
+  identically in every partial: put project row selection at the marked
+  ``select_rows`` hook inside the shared ``prepare_node_data``. That way
+  every aggregate central combines comes from the same row set on each
+  node, and rows the project removes still count against the threshold.
 - Never weaken the vanilla guards: the parent-task guard, the sample-size
   threshold and the logging rules stay as they are.
 - A change to the wire contract is a **major** version bump, and the commit
@@ -169,15 +171,17 @@ deliberately runs glibc and unlocked to test the declared range.
 
 - **Never return row-level data** from a partial. Only aggregates leave a
   node.
-- **Every partial keeps its guards**, in order:
-  ``ensure_spawned_by_central`` → ``load_privacy_settings``
-  → ``validate_expl_vars`` (``compute_summed_z``, ``perform_iteration``)
-  → ``drop_incomplete_rows`` → ``check_sample_size``
-  → ``validate_iteration_input`` (``perform_iteration`` only)
-  → ``prepare_time_column`` → (work; ``perform_iteration`` builds its risk
-  sets with ``guarded_risk_set_masks``). ``get_unique_event_times`` also
-  runs ``check_data_quality`` before ``drop_incomplete_rows``. Do not
-  reorder or skip any of them.
+- **Every partial prepares its data through the shared**
+  ``prepare_node_data(client, df, time_col, outcome_col, expl_vars, *,
+  need_outcome)`` (in ``privacy_guards.py``), which runs the guards in
+  order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
+  ``validate_expl_vars`` (when ``expl_vars`` are given) →
+  ``drop_incomplete_rows`` → ``select_rows`` (the marked hook for project
+  row selection) → ``check_sample_size``. Do not reorder or skip any of
+  them; the unit tests assert the order. ``validate_iteration_input``
+  (``perform_iteration`` only) and ``prepare_time_column`` run afterwards.
+  ``get_unique_event_times`` checks its data-quality flags on the prepared
+  frame.
 - **No new partial** without a sample-size threshold, parent-task guard and
   documentation in ``Privacy.rst``.
 - **Do not log data values or counts**; use ``info``/``warn`` for status

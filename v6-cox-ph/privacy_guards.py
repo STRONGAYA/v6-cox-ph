@@ -2,12 +2,13 @@
 Privacy guards for the federated Cox-PH partial functions.
 
 These guards are pure functions (DataFrame/array in, DataFrame/array out)
-so they can be unit-tested without vantage6. They are called from all three
-partial functions in the same order::
+so they can be unit-tested without vantage6. All partial functions run the
+shared ``prepare_node_data`` step, in this order::
 
     ensure_spawned_by_central -> load_privacy_settings
     -> (validate_expl_vars, where expl_vars are used) -> drop_incomplete_rows
-    -> check_sample_size -> (validate_iteration_input, perform_iteration only)
+    -> select_rows (hook) -> check_sample_size
+    -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work)
 
 The settings are read from node environment variables (``algorithm_env``)
@@ -179,6 +180,87 @@ def ensure_spawned_by_central(client) -> None:
             "'central' function. Direct invocation is not permitted."
         )
     info("Parent-task guard passed: task has a parent.")
+
+
+def select_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Marked hook for project row selection.
+
+    A project layer may replace this function to select the rows its
+    protocol analyses (an eligibility filter, an inlier filter, …). The
+    hook is a no-op here and runs **before** ``check_sample_size``, so any
+    rows it removes count against the threshold. Implementations must
+    never add rows and must remove rows only — otherwise the aggregates
+    across partials describe different row sets.
+    """
+    return df
+
+
+def prepare_node_data(
+    client,
+    df: pd.DataFrame,
+    time_col: str,
+    outcome_col: Optional[str],
+    expl_vars: Optional[list],
+    *,
+    need_outcome: bool,
+) -> tuple[pd.DataFrame, PrivacySettings, bool]:
+    """Run the shared node-side guard sequence once.
+
+    Order (do not reorder or skip):
+
+        ``ensure_spawned_by_central`` -> ``load_privacy_settings``
+        -> ``validate_expl_vars`` (when ``expl_vars`` are given)
+        -> ``drop_incomplete_rows`` -> ``select_rows`` (hook)
+        -> ``check_sample_size``
+
+    Every partial calls this so that all aggregates central combines come
+    from the same row set on each node. The threshold failure behaviour
+    (return a marker vs. raise) stays with the caller.
+
+    Parameters
+    ----------
+    client : AlgorithmClient
+        The algorithm client (used only by the parent-task guard).
+    df : pd.DataFrame
+        The node's data.
+    time_col : str
+        Name of the time column.
+    outcome_col : str | None
+        Name of the outcome column, or ``None`` when the partial does not
+        receive it (``perform_iteration`` until the outcome column joins
+        the wire contract).
+    expl_vars : list | None
+        Explanatory variable names, or an empty list/None when the partial
+        does not use covariates.
+    need_outcome : bool
+        Whether the sample-size threshold also counts events (rows and
+        events must both exceed the threshold).
+
+    Returns
+    -------
+    tuple[pd.DataFrame, PrivacySettings, bool]
+        The prepared frame, the loaded privacy settings, and whether the
+        sample-size threshold was met.
+    """
+    ensure_spawned_by_central(client)
+    settings = load_privacy_settings()
+
+    if expl_vars:
+        validate_expl_vars(df, expl_vars, time_col, outcome_col)
+
+    cols = [time_col]
+    if outcome_col is not None:
+        cols.append(outcome_col)
+    if expl_vars:
+        cols.extend(expl_vars)
+    df = drop_incomplete_rows(df, cols)
+
+    df = select_rows(df)
+
+    outcome = outcome_col if need_outcome else None
+    threshold_met = check_sample_size(df, outcome, settings)
+
+    return df, settings, threshold_met
 
 
 def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: PrivacySettings) -> bool:

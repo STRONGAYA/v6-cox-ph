@@ -34,11 +34,13 @@ from privacy_guards import (  # noqa: E402
     ensure_spawned_by_central,
     guarded_risk_set_masks,
     load_privacy_settings,
+    prepare_node_data,
     prepare_time_column,
     tail_cutoff,
     validate_expl_vars,
     validate_iteration_input,
 )
+import privacy_guards  # noqa: E402
 
 
 @pytest.mark.unit
@@ -268,6 +270,139 @@ class TestValidateIterationInput:
     def test_on_grid_with_binning(self, settings_binned):
         b, g = validate_iteration_input([0.1], [10.0, 20.0], ["a"], settings_binned)
         assert g == [10.0, 20.0]
+
+
+@pytest.mark.unit
+class TestPrepareNodeData:
+    """The shared node-preparation step runs every guard, in order.
+
+    This is the executable form of the AGENTS.md rule that any step that
+    removes rows runs before check_sample_size and identically in every
+    partial: if the order or membership of this sequence changes, these
+    tests fail.
+    """
+
+    @pytest.fixture
+    def node_df(self):
+        return pd.DataFrame(
+            {
+                "time": [float(i) for i in range(1, 31)],
+                "event": [1] * 15 + [0] * 15,
+                "age": [50.0] * 30,
+                "treatment": [0, 1] * 15,
+            }
+        )
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def default_env(self, monkeypatch):
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+
+    def _record_guard_calls(self, monkeypatch):
+        """Wrap the guards so their call order is recorded."""
+        calls = []
+        for name in [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "select_rows",
+            "check_sample_size",
+        ]:
+            original = getattr(privacy_guards, name)
+
+            def make_wrapper(guard_name, guard_original):
+                def wrapper(*args, **kwargs):
+                    calls.append(guard_name)
+                    return guard_original(*args, **kwargs)
+
+                return wrapper
+
+            monkeypatch.setattr(privacy_guards, name, make_wrapper(name, original))
+        return calls
+
+    def test_guard_order_with_expl_vars(self, client, node_df, default_env, monkeypatch):
+        """All guards run, in the documented order."""
+        calls = self._record_guard_calls(monkeypatch)
+        df, settings, threshold_met = prepare_node_data(
+            client, node_df, "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "select_rows",
+            "check_sample_size",
+        ]
+        assert threshold_met is True
+        assert len(df) == 30
+
+    def test_guard_order_without_expl_vars(self, client, node_df, default_env, monkeypatch):
+        """Without expl_vars, validate_expl_vars is skipped; order is stable."""
+        calls = self._record_guard_calls(monkeypatch)
+        _, _, threshold_met = prepare_node_data(client, node_df, "time", "event", [], need_outcome=True)
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "drop_incomplete_rows",
+            "select_rows",
+            "check_sample_size",
+        ]
+        assert threshold_met is True
+
+    def test_hook_runs_before_threshold(self, client, node_df, default_env, monkeypatch):
+        """Rows removed by the select_rows hook count against the threshold."""
+        monkeypatch.setattr(
+            privacy_guards,
+            "select_rows",
+            lambda df: df.iloc[:5],
+        )
+        _, _, threshold_met = prepare_node_data(
+            client, node_df, "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is False
+
+    def test_need_outcome_false_checks_rows_only(self, client, default_env, monkeypatch):
+        """need_outcome=False checks rows only (perform_iteration today)."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
+        df = pd.DataFrame({"time": [1.0] * 30, "age": [50.0] * 30})
+        _, _, threshold_met = prepare_node_data(client, df, "time", None, ["age"], need_outcome=False)
+        assert threshold_met is True
+        df_small = pd.DataFrame({"time": [1.0] * 5, "age": [50.0] * 5})
+        _, _, threshold_met = prepare_node_data(client, df_small, "time", None, ["age"], need_outcome=False)
+        assert threshold_met is False
+
+    def test_nan_rows_dropped_before_threshold(self, client, default_env, monkeypatch):
+        """Rows with NaN in any analysed column are dropped before the threshold."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "12")
+        df = pd.DataFrame(
+            {
+                "time": [1.0] * 30,
+                "event": [1] * 15 + [0] * 15,
+                "age": [50.0] * 30,
+                "treatment": [0, 1] * 15,
+            }
+        )
+        # 12 rows get NaN in an analysed column: 15 events and 30 rows would
+        # both pass threshold 12, but after dropping only 18 rows / 13 events
+        # remain — rows still pass, events (13 > 12) pass too; push one more
+        # NaN onto an event row to make events 12, which must fail (>12).
+        df.loc[0:11, "age"] = np.nan
+        df.loc[12, "age"] = np.nan  # row 12 is an event row
+        _, _, threshold_met = prepare_node_data(client, df, "time", "event", ["age", "treatment"], need_outcome=True)
+        assert threshold_met is False
 
 
 @pytest.mark.unit
