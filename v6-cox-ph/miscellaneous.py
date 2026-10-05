@@ -103,28 +103,6 @@ def validate_coxph_input(
         raise UserInputError(f"Invalid Cox-PH input: {e}")
 
 
-def check_event_count(df: pd.DataFrame, outcome_col: str, min_events: int = 5) -> bool:
-    """
-    Check if the data has a sufficient number of events.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        The data to check.
-    outcome_col : str
-        Name of the outcome column.
-    min_events : int
-        Minimum number of events required (default 5).
-
-    Returns
-    -------
-    bool
-        True if sufficient events, False otherwise.
-    """
-    event_count = df[df[outcome_col] == 1].shape[0]
-    return event_count > min_events
-
-
 def check_data_quality(df: pd.DataFrame, time_col: str, outcome_col: str) -> Dict[str, Any]:
     """
     Perform comprehensive data quality checks.

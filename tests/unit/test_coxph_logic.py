@@ -88,21 +88,17 @@ class TestComputeDerivatives:
             atol=1e-6,
         )
 
-    def test_compute_derivatives_skips_invalid_s1(self, sample_aggregated_time_events, sample_z_sum):
-        """Test that invalid s1 values are skipped."""
-        agg1 = np.array([0.0, 8.0, 3.0])  # First entry is 0 (invalid)
-        agg2 = np.array([[2.0, 4.0], [3.0, 6.0], [1.0, 2.0]])
-        agg3 = np.array(
-            [
-                [[1.0, 2.0], [2.0, 4.0]],
-                [[1.5, 3.0], [3.0, 6.0]],
-                [[0.5, 1.0], [1.0, 2.0]],
-            ]
-        )
-        primary, secondary = compute_derivatives(agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum)
-        # Should still produce valid results (just skipping the first entry)
-        assert np.all(np.isfinite(primary))
-        assert np.all(np.isfinite(secondary))
+    def test_compute_derivatives_raises_on_nonpositive_s1(
+        self, sample_aggs, sample_aggregated_time_events, sample_z_sum
+    ):
+        """A risk-set sum of zero, negative or NaN raises AlgorithmError."""
+        from vantage6.algorithm.tools.exceptions import AlgorithmError
+
+        _, agg2, agg3 = sample_aggs
+        for bad in (0.0, -1.0, float("nan")):
+            agg1 = np.array([bad, 8.0, 3.0])
+            with pytest.raises(AlgorithmError):
+                compute_derivatives(agg1, agg2, agg3, sample_aggregated_time_events, sample_z_sum)
 
 
 @pytest.mark.unit

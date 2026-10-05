@@ -8,7 +8,7 @@ separated from the orchestration logic in central.py and partial.py.
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2, norm
-
+from vantage6.algorithm.tools.exceptions import AlgorithmError
 from vantage6.algorithm.tools.util import info, warn
 
 from typing import Any, Dict, List, Tuple
@@ -59,7 +59,7 @@ def compute_derivatives(
     freqs = aggregated_time_events["freq"].to_numpy()
 
     if len(summed_agg1) != n_times:
-        raise ValueError(
+        raise AlgorithmError(
             f"Length mismatch: aggregated_time_events has {n_times} rows but "
             f"summed_agg1 has {len(summed_agg1)} entries"
         )
@@ -71,9 +71,11 @@ def compute_derivatives(
         s2_value = np.asarray(summed_agg2[pos])
         s3_value = np.asarray(summed_agg3[pos])
 
-        if s1_value <= 0 or np.isnan(s1_value):
-            warn(f"Invalid s1_value at position {pos}: {s1_value}")
-            continue
+        if not (s1_value > 0) or np.isnan(s1_value):
+            raise AlgorithmError(
+                f"Risk-set sum S0 is not positive at grid position {pos}; "
+                f"the aggregated risk sets are inconsistent."
+            )
 
         # Primary derivative component
         s1 = freq * (s2_value / s1_value)
@@ -166,7 +168,7 @@ def compute_model_results(
     try:
         wald_statistic = np.dot(beta, np.dot(-secondary_derivative, beta))
         overall_p_value = float(chi2.sf(wald_statistic, degrees_of_freedom))
-    except Exception as e:
+    except (ValueError, FloatingPointError) as e:
         warn(f"Could not compute Wald statistic: {e}")
         overall_p_value = None
 
@@ -190,9 +192,6 @@ def compute_model_results(
         aic = float(-2 * log_likelihood + 2 * n_params)
     except (ValueError, IndexError, FloatingPointError) as e:
         warn(f"Could not compute AIC due to numerical/data issue: {e}")
-        aic = None
-    except Exception as e:
-        warn(f"Unexpected error computing AIC: {e}")
         aic = None
 
     # Results data — full precision (FR-A4); rounding is a client concern.

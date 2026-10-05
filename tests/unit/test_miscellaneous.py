@@ -17,7 +17,6 @@ sys.path.insert(0, str(algorithm_path))
 
 from miscellaneous import (  # noqa: E402
     check_data_quality,
-    check_event_count,
     validate_coxph_input,
 )
 
@@ -124,37 +123,6 @@ class TestValidateCoxphInput:
         assert validated.time_col == "time"
         assert validated.outcome_col == "event"
         assert validated.expl_vars == ["age"]
-
-
-@pytest.mark.unit
-class TestCheckEventCount:
-    """Tests for the check_event_count function."""
-
-    def test_check_event_count_sufficient(self):
-        """Test that sufficient events return True."""
-        df = pd.DataFrame({"event": [1, 1, 1, 1, 1, 0, 0]})
-        assert check_event_count(df, "event", min_events=3) is True
-
-    def test_check_event_count_insufficient(self):
-        """Test that insufficient events return False."""
-        df = pd.DataFrame({"event": [1, 0, 0, 0, 0]})
-        assert check_event_count(df, "event", min_events=3) is False
-
-    def test_check_event_count_boundary(self):
-        """Test the boundary condition (exactly at threshold)."""
-        df = pd.DataFrame({"event": [1, 1, 1, 0, 0]})
-        # count=3, min_events=3 → 3 > 3 is False
-        assert check_event_count(df, "event", min_events=3) is False
-        # count=3, min_events=2 → 3 > 2 is True
-        assert check_event_count(df, "event", min_events=2) is True
-
-    def test_check_event_count_default_threshold(self):
-        """Test the default threshold of 5."""
-        df = pd.DataFrame({"event": [1] * 6 + [0] * 10})
-        assert check_event_count(df, "event") is True
-        df_small = pd.DataFrame({"event": [1] * 5 + [0] * 10})
-        # 5 > 5 is False
-        assert check_event_count(df_small, "event") is False
 
 
 @pytest.mark.unit

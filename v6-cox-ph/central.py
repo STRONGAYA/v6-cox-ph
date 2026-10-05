@@ -13,7 +13,7 @@ import pandas as pd
 from scipy.linalg import solve
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
-from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
+from vantage6.algorithm.tools.exceptions import AlgorithmError
 from vantage6.algorithm.tools.util import error, info, warn
 
 from .coxph_logic import compute_derivatives, compute_model_results
@@ -63,15 +63,12 @@ def central(
         Dictionary containing model results, p-values, AIC, and warnings.
     """
     # Validate input parameters
-    try:
-        validated = validate_coxph_input(
-            time_col=time_col,
-            outcome_col=outcome_col,
-            expl_vars=expl_vars,
-            organization_ids=organization_ids,
-        )
-    except UserInputError:
-        raise
+    validated = validate_coxph_input(
+        time_col=time_col,
+        outcome_col=outcome_col,
+        expl_vars=expl_vars,
+        organization_ids=organization_ids,
+    )
 
     time_col = validated.time_col
     outcome_col = validated.outcome_col
@@ -108,7 +105,7 @@ def central(
         _excluded_ids = []
         if n_loops > 2:
             error("Sample size violations should be eliminated yet criteria " "are not met. Exiting")
-            raise ValueError("Sample size violations should be eliminated yet criteria " "are not met. Exiting")
+            raise AlgorithmError("Sample size violations should be eliminated yet criteria " "are not met. Exiting")
 
         n_loops += 1
         info("Creating subtask for all selected organisations")
