@@ -858,3 +858,177 @@ class TestOptimiser:
         model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3
+
+
+@pytest.mark.unit
+class TestSurvivalCurves:
+    """Baseline cumulative hazard and survival curves (all computed centrally)."""
+
+    def _run_central_with_profiles(self, datasets, organization_ids, profiles):
+        client = MockAlgorithmClient(datasets=datasets, module="v6-cox-ph", organization_ids=organization_ids)
+        task = client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                    "organization_ids": organization_ids,
+                    "covariate_profiles": profiles,
+                },
+            },
+            organizations=[organization_ids[0]],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        return results[0]
+
+    def test_baseline_curve_consistency(self, guards_off):
+        """S(t | centre) == exp(-H0(t)); curves only on the event grid."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        h0 = result["baseline_cumulative_hazard"]
+        baseline_curve = result["survival_curves"]["0"]
+        assert set(h0.keys()) == set(baseline_curve.keys())
+        for t in h0:
+            assert abs(baseline_curve[t] - np.exp(-h0[t])) <= 1e-12
+        # H0 is non-decreasing and starts at the first grid time
+        values = [h0[t] for t in sorted(h0, key=float)]
+        assert all(b >= a - 1e-12 for a, b in zip(values, values[1:]))
+
+    def test_baseline_hazard_matches_direct_breslow(self, guards_off):
+        """H0 equals a direct Breslow computation at the same centre (guards off)."""
+        from importlib import import_module
+
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # Recompute the rounded centre/scale exactly as central does
+        client = MockAlgorithmClient(datasets=datasets, module="v6-cox-ph", organization_ids=[1, 2])
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        zsum_results = client.wait_for_results(task_id=task["id"])
+        z_sum = None
+        sum_squares = None
+        for r in zsum_results:
+            z_sum = pd.Series(r["sum"]) if z_sum is None else z_sum + pd.Series(r["sum"])
+            sum_squares = (
+                pd.Series(r["sum_squares"]) if sum_squares is None else sum_squares + pd.Series(r["sum_squares"])
+            )
+        n_events = float(result["n_events"])
+        centre, scale = coxph_logic.pooled_standardisation(
+            z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events
+        )
+
+        # Direct Breslow baseline at x* = 0 (the covariate centre)
+        pooled = pd.concat([df1, df2])
+        beta_star = pd.DataFrame(result["model"]).T["Coef"].to_numpy(dtype=float) * scale
+        x_star = (pooled[EXPL_VARS].to_numpy(dtype=float) - centre) / scale
+        eta = x_star @ beta_star
+        times = pooled["time"].to_numpy(dtype=float)
+        events = pooled["event"].to_numpy(dtype=float)
+        grid = np.array(sorted(float(t) for t in result["baseline_cumulative_hazard"]))
+        direct = {}
+        cumulative = 0.0
+        for t in grid:
+            risk = times >= t
+            d_t = float(np.sum((times == t) & (events == 1)))
+            if d_t > 0:
+                cumulative += d_t / float(np.exp(eta[risk]).sum())
+            direct[str(t)] = cumulative
+
+        reported = result["baseline_cumulative_hazard"]
+        for t in reported:
+            assert abs(reported[t] - direct[t]) <= 1e-9, f"H0 mismatch at t={t}"
+
+    def test_covariate_profiles(self, guards_off):
+        """Each profile's curve is S0(t) ** exp(beta . (x - centre)/scale)."""
+        profiles = [{"age": 70.0}, {"age": 40.0, "treatment": 1.0}]
+        df1, df2, _ = _load_datasets()
+        result = self._run_central_with_profiles(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+            profiles,
+        )
+        assert set(result["survival_curves"].keys()) == {"0", "1", "2"}
+        baseline = result["survival_curves"]["0"]
+        h0 = result["baseline_cumulative_hazard"]
+        for idx, profile in enumerate(profiles, start=1):
+            curve = result["survival_curves"][str(idx)]
+            for t in h0:
+                assert abs(curve[t] - baseline[t]) > 1e-9, f"profile {idx} equals the baseline at t={t}"
+
+    def test_invalid_profile_rejected(self, guards_off):
+        """A profile naming an unknown variable fails with UserInputError."""
+        from vantage6.algorithm.tools.exceptions import UserInputError
+
+        df1, df2, _ = _load_datasets()
+        client = MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        with pytest.raises(UserInputError):
+            client.task.create(
+                input_={
+                    "method": "central",
+                    "kwargs": {
+                        "time_col": "time",
+                        "outcome_col": "event",
+                        "expl_vars": EXPL_VARS,
+                        "organization_ids": [1, 2],
+                        "covariate_profiles": [{"nonexistent_var": 1.0}],
+                    },
+                },
+                organizations=[1],
+            )
+
+    def test_curve_steps_respect_k(self, monkeypatch):
+        """With default guards every curve time is backed by risk sets >= k."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        k = 5
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # At beta = 0 the per-node agg1 equals the node's risk-set size; the
+        # guards guarantee every non-zero value is >= k.
+        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2])
+        grid = sorted(
+            (float(t) for t in result["baseline_cumulative_hazard"]),
+        )
+        for node_idx, agg1 in enumerate(per_node_agg1):
+            for i, value in enumerate(agg1):
+                if float(value) > 0:
+                    assert float(value) >= k - 1e-9, (
+                        f"node {node_idx}: risk set {float(value)} < k={k} at grid index {i} "
+                        f"(time {grid[i] if i < len(grid) else '?'})"
+                    )

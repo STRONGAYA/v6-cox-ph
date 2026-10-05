@@ -11,7 +11,7 @@ from scipy.stats import chi2, norm
 from vantage6.algorithm.tools.exceptions import AlgorithmError
 from vantage6.algorithm.tools.util import info, warn
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def compute_derivatives(
@@ -277,6 +277,73 @@ def partial_log_likelihood(
         raise AlgorithmError("A risk-set sum S0 is not positive; cannot evaluate the log-likelihood.")
     freqs = aggregated_time_events["freq"].to_numpy(dtype=float)
     return float(np.dot(beta, np.asarray(z_sum, dtype=float)) - np.sum(freqs * np.log(s0)))
+
+
+def pooled_standardisation(z_sum, sum_squares, n_events: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The pooled covariate centre and scale over the event cases.
+
+    ``centre = z_sum / n_events`` and ``scale = sqrt(sum_squares / n_events -
+    centre^2)``, both rounded to two significant figures so the nodes learn
+    less about the pooled event-case covariate distribution. A covariate
+    with no spread over the events gets scale 1 (with a warning); the fit is
+    unaffected either way because the partial likelihood is invariant to the
+    shared affine transform.
+    """
+    z = np.asarray(z_sum, dtype=float)
+    squares = np.asarray(sum_squares, dtype=float)
+    centre = z / n_events
+    variance = squares / n_events - centre**2
+    scale = np.sqrt(np.maximum(variance, 0.0))
+    if np.any(scale <= 0):
+        warn("A covariate has no spread over the event cases; using scale 1 for it.")
+        scale = np.where(scale > 0, scale, 1.0)
+    return round_sig(centre), round_sig(scale)
+
+
+def survival_curves(
+    freqs,
+    summed_agg1,
+    grid_times,
+    beta,
+    centre: np.ndarray,
+    scale: np.ndarray,
+    expl_vars: List[str],
+    covariate_profiles: Optional[List[Dict[str, float]]],
+) -> tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+    """
+    Breslow baseline cumulative hazard and survival curves, all centrally.
+
+    ``H0(t) = sum_{t_j <= t} d_j / S0(t_j)`` with ``d_j`` the pooled event
+    count per grid time and ``S0(t_j)`` the risk-set sum at the reported
+    (standardised-space) beta; the baseline profile is the covariate centre
+    (``x* = 0``). Each requested profile gets
+    ``S(t | x) = S0(t) ** exp(beta . (x - centre) / scale)``; profile
+    variables left out are taken at the centre. Everything is computed from
+    quantities that are already aggregated: no new data leaves a node.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        The baseline cumulative hazard and the survival curves, both JSON
+        objects keyed by (stringified) grid time.
+    """
+    d = np.asarray(freqs, dtype=float)
+    s0 = np.asarray(summed_agg1, dtype=float)
+    h0_steps = np.where(d > 0, d / s0, 0.0)
+    h0 = np.cumsum(h0_steps)
+
+    baseline_cumulative_hazard = {str(t): float(h) for t, h in zip(grid_times, h0)}
+    curves: Dict[str, Dict[str, float]] = {"0": {str(t): float(np.exp(-h)) for t, h in zip(grid_times, h0)}}
+
+    for profile_index, profile in enumerate(covariate_profiles or [], start=1):
+        x_star = np.array(
+            [(float(profile.get(var, centre[j])) - centre[j]) / scale[j] for j, var in enumerate(expl_vars)]
+        )
+        profile_exponent = float(np.exp(np.dot(beta, x_star)))
+        curves[str(profile_index)] = {str(t): float(np.exp(-h * profile_exponent)) for t, h in zip(grid_times, h0)}
+
+    return baseline_cumulative_hazard, curves
 
 
 def round_sig(values, digits: int = 2) -> np.ndarray:

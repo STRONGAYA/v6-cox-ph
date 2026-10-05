@@ -4,9 +4,9 @@ Miscellaneous utilities for the Cox-PH algorithm.
 This module contains the Pydantic models for input validation.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from vantage6.algorithm.tools.exceptions import UserInputError
 
 
@@ -24,6 +24,14 @@ class CoxPHInput(BaseModel):
     organization_ids: Optional[List[int]] = Field(
         default=None,
         description=("List of organisation IDs to include. If None, all " "organisations are used."),
+    )
+    covariate_profiles: Optional[List[Dict[str, float]]] = Field(
+        default=None,
+        description=(
+            "Optional covariate profiles for survival curves. Each entry maps "
+            "explanatory variable names to values; variables left out are taken "
+            "at the pooled event-case mean (the baseline profile)."
+        ),
     )
 
     @field_validator("time_col", "outcome_col")
@@ -58,12 +66,29 @@ class CoxPHInput(BaseModel):
                 raise ValueError(f"Invalid organisation ID: {org_id}. " "Must be a non-negative integer.")
         return list(set(v))
 
+    @model_validator(mode="after")
+    def validate_covariate_profiles(self) -> "CoxPHInput":
+        """Covariate profiles may only name known explanatory variables."""
+        if self.covariate_profiles is None:
+            return self
+        for i, profile in enumerate(self.covariate_profiles):
+            if not isinstance(profile, dict):
+                raise ValueError(f"Covariate profile {i} must be a mapping of variable names to values")
+            unknown = [var for var in profile if var not in self.expl_vars]
+            if unknown:
+                raise ValueError(
+                    f"Covariate profile {i} names unknown variables {unknown}; "
+                    f"known explanatory variables are {self.expl_vars}"
+                )
+        return self
+
 
 def validate_coxph_input(
     time_col: str,
     outcome_col: str,
     expl_vars: List[str],
     organization_ids: Optional[List[int]] = None,
+    covariate_profiles: Optional[List[Dict[str, float]]] = None,
 ) -> CoxPHInput:
     """
     Validate Cox-PH algorithm input parameters.
@@ -78,6 +103,8 @@ def validate_coxph_input(
         List of explanatory variable names.
     organization_ids : Optional[List[int]]
         List of organisation IDs to include.
+    covariate_profiles : Optional[List[Dict[str, float]]]
+        Optional covariate profiles for survival curves.
 
     Returns
     -------
@@ -95,6 +122,7 @@ def validate_coxph_input(
             outcome_col=outcome_col,
             expl_vars=expl_vars,
             organization_ids=organization_ids,
+            covariate_profiles=covariate_profiles,
         )
     except Exception as e:
         raise UserInputError(f"Invalid Cox-PH input: {e}")

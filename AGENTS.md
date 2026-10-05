@@ -93,6 +93,11 @@ user task → central → compute_summed_z
 - ``compute_summed_z`` also returns the node's privacy settings
   (configuration, not data); the result summary based on them is built in a
   later step.
+- ``central`` optionally takes ``covariate_profiles`` (validated by the
+  Pydantic input model: keys must be known explanatory variables) and
+  returns ``baseline_cumulative_hazard`` and ``survival_curves`` computed
+  centrally from the pooled event counts and risk-set sums — no new partial,
+  no new data leaves a node.
 - ``perform_iteration`` receives ``outcome_col`` and drops rows with a
   missing outcome, so every partial analyses the same rows; a node that
   passed ``compute_summed_z`` cannot fail there — its threshold check is

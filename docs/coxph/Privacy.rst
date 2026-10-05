@@ -137,6 +137,14 @@ researcher that ran ``central``:
   permission checks operate at the server). Every partial must therefore
   treat its entire return value as visible to the researcher — the sample
   contents below are all aggregates over at least ``k`` individuals.
+- **Survival curves.** ``baseline_cumulative_hazard`` and
+  ``survival_curves`` are computed centrally from the pooled event counts
+  and risk-set sums that the researcher already sees; no new partial runs
+  and no new data leaves a node. What the curve reveals is, per grid time,
+  the pooled event count over the risk-set sum — information the shared
+  aggregates already contained. The tail censoring and the jump guard carry
+  through: every non-empty risk set behind a curve step covers at least
+  ``k`` individuals on every node.
 
 Aggregated model coefficients are shared with the data stations by the
 central aggregator during the iteration process.

@@ -29,6 +29,11 @@
           "name": "organization_ids",
           "type": "list",
           "description": "List of organisation IDs to include. If None, all organisations are used."
+        },
+        {
+          "name": "covariate_profiles",
+          "type": "json",
+          "description": "Optional covariate profiles for survival curves: a list of objects mapping explanatory variable names to values. Variables left out are taken at the pooled event-case mean (the baseline profile)."
         }
       ]
     },

@@ -18,8 +18,9 @@ from vantage6.algorithm.tools.exceptions import AlgorithmError
 from vantage6.algorithm.tools.util import info, warn
 
 from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
-from .coxph_logic import partial_log_likelihood
-from .coxph_logic import format_results_dataframe, round_sig
+from .coxph_logic import partial_log_likelihood, pooled_standardisation
+from .coxph_logic import survival_curves as survival_curves_from_aggregates
+from .coxph_logic import format_results_dataframe
 from .miscellaneous import validate_coxph_input
 
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
@@ -34,6 +35,7 @@ def central(
     outcome_col: str,
     expl_vars: list,
     organization_ids: Optional[list] = None,
+    covariate_profiles: Optional[list] = None,
 ) -> dict:
     """
     Central function for the federated Cox Proportional Hazards algorithm.
@@ -73,6 +75,7 @@ def central(
         outcome_col=outcome_col,
         expl_vars=expl_vars,
         organization_ids=organization_ids,
+        covariate_profiles=covariate_profiles,
     )
 
     time_col = validated.time_col
@@ -147,14 +150,7 @@ def central(
     # coefficients are transformed back.
     assert z_sum is not None and sum_squares is not None
     n_events = float(aggregated_time_events["freq"].sum())
-    centre_arr = z_sum.to_numpy(dtype=float) / n_events
-    variance = sum_squares.to_numpy(dtype=float) / n_events - centre_arr**2
-    scale_arr = np.sqrt(np.maximum(variance, 0.0))
-    if np.any(scale_arr <= 0):
-        warn("A covariate has no spread over the event cases; using scale 1 for it.")
-        scale_arr = np.where(scale_arr > 0, scale_arr, 1.0)
-    centre = round_sig(centre_arr)
-    scale = round_sig(scale_arr)
+    centre, scale = pooled_standardisation(z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events)
     info("Dispatching standardised covariates (centre and scale to 2 significant figures).")
 
     # The gradient in the standardised space needs the event-case covariate
@@ -317,6 +313,20 @@ def central(
 
     results_df = format_results_dataframe(model["results_data"], expl_vars)
 
+    # Baseline cumulative hazard and survival curves, computed centrally from
+    # quantities that are already aggregated (see coxph_logic): no new
+    # partial, no new data leaves a node.
+    baseline_cumulative_hazard, survival_curves = survival_curves_from_aggregates(
+        aggregated_time_events["freq"].to_numpy(dtype=float),
+        summed_agg1,
+        aggregated_time_events[time_col].to_numpy(dtype=float),
+        beta,
+        centre,
+        scale,
+        expl_vars,
+        validated.covariate_profiles,
+    )
+
     lr_statistic = 2 * (log_likelihood - log_likelihood_null)
     return {
         "model": results_df.to_dict(orient="index"),
@@ -333,6 +343,8 @@ def central(
         "n_events": int(aggregated_time_events["freq"].sum()),
         "covariance": np.asarray(model["covariance"]).tolist(),
         "algorithm_version": _algorithm_version(),
+        "baseline_cumulative_hazard": baseline_cumulative_hazard,
+        "survival_curves": survival_curves,
     }
 
 

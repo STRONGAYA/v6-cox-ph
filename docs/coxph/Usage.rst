@@ -13,6 +13,10 @@ The input arguments for the central function consist of:
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
   organisations are used.
+- ``covariate_profiles`` (list of objects, optional): covariate profiles for
+  survival curves. Each entry maps explanatory variable names to values;
+  variables left out are taken at the pooled event-case mean. An entry
+  naming an unknown variable raises ``UserInputError``.
 
 Input rules
 ------------
@@ -64,6 +68,25 @@ The central function returns a dictionary with:
 test. When the log-likelihood decreases after a Newton step the optimiser
 halves the step and retries; the reported statistics always belong to the
 last accepted evaluation (the iteration budget is 20 round-trips).
+
+Survival curves
+----------------
+
+The result also contains:
+
+- ``baseline_cumulative_hazard``: the Breslow baseline cumulative hazard
+  ``H0(t) = sum_{t_j <= t} d_j / S0(t_j)`` over the event-time grid (the
+  binned grid when time binning is on), where ``d_j`` is the pooled event
+  count per grid time and ``S0(t_j)`` the risk-set sum at the reported
+  coefficients. The baseline is at the covariate centre: the pooled
+  event-case mean covariate profile.
+- ``survival_curves``: survival functions ``S(t | x) = S0(t) ** exp(beta .
+  (x - centre) / scale)``. Key ``"0"`` is the baseline (the covariate
+  centre); every requested ``covariate_profiles`` entry follows under its
+  1-based index.
+
+Both are computed centrally from quantities that are already aggregated —
+no new data leaves a node for them.
 
 The Wald statistic is reported as ``Z = Coef / SE`` and the p-value as
 ``p = 2 * Phi(-|Z|)``. When ``converged`` is ``False`` a warning is appended
