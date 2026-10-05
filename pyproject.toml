@@ -47,6 +47,10 @@ markers = [
     "docker: Tests that require Docker",
 ]
 
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+
 [tool.mypy]
 ignore_missing_imports = true
 follow_imports = "silent"

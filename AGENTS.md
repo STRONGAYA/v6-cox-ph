@@ -76,9 +76,10 @@ CI when infrastructure is absent)::
 
     pytest tests/integration
 
-Lint and format (mirrors ``.github/workflows/test-suite.yml``)::
+Lint and format (mirrors ``.github/workflows/test-suite.yml``; Black reads
+``line-length = 120`` from ``[tool.black]`` in ``pyproject.toml``)::
 
-    black --check --target-version py310 v6-cox-ph/ tests/
+    black --fast --check --diff --target-version py310 v6-cox-ph/ tests/
     flake8 v6-cox-ph/ tests/ --max-line-length=120 --extend-ignore=E203,W503
     ln -s v6-cox-ph v6_cox_ph
     mypy v6_cox_ph --ignore-missing-imports --follow-imports=silent
