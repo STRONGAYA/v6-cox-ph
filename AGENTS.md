@@ -95,8 +95,10 @@ user task → central → get_unique_event_times → compute_summed_z
 
 ## Environment and commands
 
-Python 3.10. Install in editable mode with the test (``dev``) and lint
-(``lint``) extras::
+Python 3.10 or later. The container image runs Python 3.12; the code
+supports ``>= 3.10`` until 3.10 is dropped deliberately (then ``requires-python``
+and Black's ``target-version`` move up together). Install in editable mode
+with the test (``dev``) and lint (``lint``) extras::
 
     pip install -e .[dev,lint]
 
@@ -123,9 +125,20 @@ Lint and format (mirrors ``.github/workflows/test-suite.yml``; Black reads
     mypy v6_cox_ph --ignore-missing-imports --follow-imports=silent
     rm v6_cox_ph
 
-Build the Docker image::
+Build the Docker image (Alpine two-stage; the base is pinned by digest and
+kept current by Dependabot)::
 
     docker build -t v6-cox-ph:ci-test .
+
+The runtime dependencies are pinned in ``requirements-lock.txt`` and
+installed as constraints (``-c``), not hashes. Regenerate after a dependency
+change with::
+
+    uv pip compile pyproject.toml --python-version 3.12 \
+        --python-platform x86_64-unknown-linux-musl -o requirements-lock.txt
+
+The lock targets musl/Python 3.12 (what the image runs); the CI test matrix
+deliberately runs glibc and unlocked to test the declared range.
 
 ## Testing conventions
 
