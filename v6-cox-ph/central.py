@@ -143,7 +143,7 @@ def central(
 
     # Build aggregated_time_events from compute_summed_z results: it drops
     # NaN in time, outcome and expl_vars, so its event counts are consistent
-    # with z_sum and the risk sets (FR-B4).
+    # with z_sum and the risk sets.
     aggregated_time_events = pd.concat(time_event_dfs)
     aggregated_time_events = aggregated_time_events.groupby(time_col, as_index=False).sum()
 
@@ -159,7 +159,7 @@ def central(
     centre, scale = pooled_standardisation(z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events)
     info("Dispatching standardised covariates (centre and scale to 2 significant figures).")
 
-    # Aggregate summary of the guards that were active on the nodes (D3):
+    # Aggregate summary of the guards that were active on the nodes:
     # configuration, not data; no per-node breakdown. A warning is added
     # when any guard was active, because the estimates are then approximate.
     max_min_risk_set_change = max(int(s.get("min_risk_set_change") or 1) for s in node_privacy_settings)
@@ -295,7 +295,7 @@ def central(
             break
 
         if epoch == epochs - 1:
-            # FR-A1: do NOT apply the last step so the reported beta,
+            # Do NOT apply the last step so the reported beta,
             # Hessian and summed_agg1 stay consistent.
             break
 
@@ -431,7 +431,7 @@ def _require_all_organisations_answered(results, ids: list) -> None:
     one; a node whose run failed (for example
     ``PrivacyThresholdViolation``) is simply absent from the list.
     Aggregating the survivors would silently compute a model over a subset
-    of the collaboration — the run must fail instead (D4). The message
+    of the collaboration — the run must fail instead. The message
     names the counts, never the data.
 
     Raises

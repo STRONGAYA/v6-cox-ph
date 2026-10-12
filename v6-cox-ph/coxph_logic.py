@@ -194,7 +194,7 @@ def compute_model_results(
         warn(f"Could not compute AIC due to numerical/data issue: {e}")
         aic = None
 
-    # Results data — full precision (FR-A4); rounding is a client concern.
+    # Results data — full precision; rounding is a client concern.
     results_data = {
         "Coef": beta,
         "Exp(coef)": np.exp(beta),

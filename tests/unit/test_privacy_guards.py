@@ -90,7 +90,7 @@ class TestLoadPrivacySettings:
             load_privacy_settings()
 
     def test_threshold_plus_one_less_than_k(self, monkeypatch):
-        """T + 1 < k raises UserInputError (FR-B2)."""
+        """T + 1 < k raises UserInputError."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "3")
         monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "5")
         with pytest.raises(UserInputError, match="must be"):
@@ -135,7 +135,7 @@ class TestCheckSampleSize:
         assert check_sample_size(df, "event", settings) is False
 
     def test_missing_outcome_col_raises(self, settings):
-        """FR-B5: missing outcome_col raises UserInputError."""
+        """Missing outcome_col raises UserInputError."""
         df = pd.DataFrame({"x": range(20)})
         with pytest.raises(UserInputError, match="Outcome column"):
             check_sample_size(df, "event", settings)
@@ -179,7 +179,7 @@ class TestEnsureSpawnedByCentral:
         ensure_spawned_by_central(client)
 
     def test_non_mock_client_without_token_fails_closed(self):
-        """FR-B1: a non-mock client without _access_token raises AlgorithmError."""
+        """A non-mock client without _access_token raises AlgorithmError."""
         client = self._make_client(token=None)
         with pytest.raises(AlgorithmError, match="No access token"):
             ensure_spawned_by_central(client)
@@ -533,7 +533,7 @@ class TestTailCutoff:
         assert tail_cutoff(times, k=3) == 3.0
 
     def test_fewer_than_k_raises(self):
-        """FR-B2: fewer than k valid times raises PrivacyViolation."""
+        """Fewer than k valid times raises PrivacyViolation."""
         times = pd.Series([1.0, 2.0])
         with pytest.raises(PrivacyViolation):
             tail_cutoff(times, k=5)
@@ -655,7 +655,7 @@ class TestGuardedRiskSetMasks:
 
 @pytest.mark.unit
 class TestValidateExplVars:
-    """Tests for validate_expl_vars (FR-B3)."""
+    """Tests for validate_expl_vars."""
 
     def test_valid_vars(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50], "tx": [1]})
@@ -684,7 +684,7 @@ class TestValidateExplVars:
 
 @pytest.mark.unit
 class TestDropIncompleteRows:
-    """Tests for drop_incomplete_rows (FR-B4)."""
+    """Tests for drop_incomplete_rows."""
 
     def test_drops_nan_rows(self):
         df = pd.DataFrame({"time": [1.0, np.nan, 3.0], "event": [1, 1, 0], "age": [50, 60, np.nan]})

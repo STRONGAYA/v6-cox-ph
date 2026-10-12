@@ -580,7 +580,7 @@ def prepare_time_column(
 
 
 def validate_expl_vars(df: pd.DataFrame, expl_vars: list, time_col: str, outcome_col: str | None) -> None:
-    """Validate explanatory variables on the node (FR-B3).
+    """Validate explanatory variables on the node.
 
     Checks that every name in ``expl_vars`` is a column of ``df``, does not
     overlap with ``time_col`` or ``outcome_col``, and is numeric. Column
@@ -604,7 +604,7 @@ def validate_expl_vars(df: pd.DataFrame, expl_vars: list, time_col: str, outcome
 
 
 def drop_incomplete_rows(df: pd.DataFrame, cols: list) -> pd.DataFrame:
-    """Drop rows with NaN in any of the specified columns (FR-B4).
+    """Drop rows with NaN in any of the specified columns.
 
     Applied identically in all three partials before ``check_sample_size``
     so that thresholds apply to the analysed rows. The input is not

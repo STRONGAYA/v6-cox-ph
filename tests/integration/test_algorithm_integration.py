@@ -370,7 +370,7 @@ class TestCoxPHAlgorithmIntegration:
         test_methods,
     ):
         """
-        FR-B6: at least one algorithm run in the real network that completes
+        At least one algorithm run in the real network that completes
         and converges, regardless of the guard configuration.
 
         The node config sets ``COXPH_MIN_RISK_SET_CHANGE=1`` for exactness, so

@@ -2,7 +2,7 @@
 Reference (pre-vectorisation) risk-set implementation, for equivalence tests.
 
 This is the mask-based implementation ``perform_iteration`` used before the
-``searchsorted``/``bincount`` rewrite (step B11), kept verbatim as the
+``searchsorted``/``bincount`` rewrite, kept verbatim as the
 reference that ``guarded_risk_set_aggregates`` must reproduce to rtol=1e-12.
 """
 

@@ -111,7 +111,7 @@ class TestFederatedPipelineVsLifelines:
     """Compare the federated result (guards off) against a lifelines reference."""
 
     def test_run_including_below_threshold_node_fails(self, guards_off):
-        """A run that includes node 3 (too few events) fails closed (D4)."""
+        """A run that includes node 3 (too few events) fails closed."""
         df1, df2, df3 = _load_datasets()
         datasets = [
             [{"database": df1, "db_type": "csv"}],
@@ -202,7 +202,7 @@ class TestNonConvergence:
     def test_forced_non_convergence(self, monkeypatch, guards_off):
         """With a single epoch the optimiser cannot converge.
 
-        FR-A1: the reported Coef is beta_0 (all zeros) because the final
+        The reported Coef is beta_0 (all zeros) because the final
         Newton step is not applied. SE, Z and AIC are evaluated at the
         same beta_0.
         """
@@ -225,7 +225,7 @@ class TestNonConvergence:
         # A model is still returned
         assert result["model"] is not None
 
-        # FR-A1: Coef == 0 (beta_0 reported, not beta_1)
+        # Coef == 0 (beta_0 reported, not beta_1)
         model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert (
@@ -242,7 +242,7 @@ class TestSingularHessian:
     """A singular Hessian produces a graceful result, not a crash."""
 
     def test_collinear_covariate(self, monkeypatch, guards_off):
-        """FR-A2: collinear covariate -> converged=False, NaN SE, JSON-serialisable."""
+        """Collinear covariate -> converged=False, NaN SE, JSON-serialisable."""
         df1, df2, _ = _load_datasets()
         df1 = df1.copy()
         df2 = df2.copy()
@@ -285,7 +285,7 @@ class TestSingularHessian:
 
 @pytest.mark.unit
 class TestSubTaskValidation:
-    """The result parser catches malformed sub-task results (FR-A3).
+    """The result parser catches malformed sub-task results.
 
     Structural errors (missing keys) surface in pydantic's wording
     (``Field required``); the semantic checks (shape, finiteness, unknown
@@ -457,7 +457,7 @@ class TestWireContractPinning:
 
 @pytest.mark.unit
 class TestNaNPolicy:
-    """NaN rows are dropped identically in all partials (FR-B4)."""
+    """NaN rows are dropped identically in all partials."""
 
     def test_nan_rows_dropped_consistently(self, monkeypatch, guards_off):
         """A NaN in age on an event row of node 1 is dropped in
@@ -1142,7 +1142,7 @@ class TestSurvivalCurves:
 
 @pytest.mark.unit
 class TestPrivacyGuardsSummary:
-    """The result carries an aggregate summary of the active guards (D3)."""
+    """The result carries an aggregate summary of the active guards."""
 
     def test_default_guards_summary(self, monkeypatch):
         """Default guards: active, k=5, no binning, warning appended."""

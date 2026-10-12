@@ -69,7 +69,7 @@ def compute_summed_z(
 
     # Also return per-time event counts from the same NaN-dropped,
     # censored DataFrame so that central can build aggregated_time_events
-    # that are consistent with z_sum and the risk sets (FR-B4).
+    # that are consistent with z_sum and the risk sets.
     times = events.groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times["freq"] = times[outcome_col]
