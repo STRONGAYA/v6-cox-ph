@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2, norm
 from vantage6.algorithm.tools.exceptions import AlgorithmError
-from vantage6.algorithm.tools.util import info, warn
+from vantage6_strongaya_general.miscellaneous import safe_log
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,7 +49,7 @@ def compute_derivatives(
         - secondary_derivative: Second derivative (Hessian) of the partial
           log-likelihood.
     """
-    info("Computing derivatives for Cox-PH model")
+    safe_log("info", "Computing derivatives for Cox-PH model")
 
     n_covs = len(z_sum)
     n_times = len(aggregated_time_events)
@@ -137,7 +137,7 @@ def compute_model_results(
     Dict[str, Any]
         Dictionary containing model coefficients, statistics, and warnings.
     """
-    info("Computing final model results")
+    safe_log("info", "Computing final model results")
 
     n_covs = len(beta)
 
@@ -147,7 +147,7 @@ def compute_model_results(
         covariance = np.linalg.inv(-secondary_derivative)
         serrors = np.array([np.sqrt(covariance[k, k]) for k in range(covariance.shape[0])])
     except np.linalg.LinAlgError as e:
-        warn(f"Could not invert Hessian matrix: {e}")
+        safe_log("warn", f"Could not invert Hessian matrix: {e}")
         covariance = np.zeros((n_covs, n_covs))
         serrors = np.array([np.nan] * n_covs)
 
@@ -169,7 +169,7 @@ def compute_model_results(
         wald_statistic = np.dot(beta, np.dot(-secondary_derivative, beta))
         overall_p_value = float(chi2.sf(wald_statistic, degrees_of_freedom))
     except (ValueError, FloatingPointError) as e:
-        warn(f"Could not compute Wald statistic: {e}")
+        safe_log("warn", f"Could not compute Wald statistic: {e}")
         overall_p_value = None
 
     # AIC for model comparison
@@ -191,7 +191,7 @@ def compute_model_results(
 
         aic = float(-2 * log_likelihood + 2 * n_params)
     except (ValueError, IndexError, FloatingPointError) as e:
-        warn(f"Could not compute AIC due to numerical/data issue: {e}")
+        safe_log("warn", f"Could not compute AIC due to numerical/data issue: {e}")
         aic = None
 
     # Results data — full precision; rounding is a client concern.
@@ -222,7 +222,7 @@ def compute_model_results(
                 f"Warning: Covariate '{var_name}' may perfectly predict the event "
                 f"(coef={coef}, SE={se}). Results may be unreliable."
             )
-            warn(msg)
+            safe_log("warn", msg)
             warnings.append(msg)
 
     if not converged:
@@ -296,7 +296,7 @@ def pooled_standardisation(z_sum, sum_squares, n_events: float) -> tuple[np.ndar
     variance = squares / n_events - centre**2
     scale = np.sqrt(np.maximum(variance, 0.0))
     if np.any(scale <= 0):
-        warn("A covariate has no spread over the event cases; using scale 1 for it.")
+        safe_log("warn", "A covariate has no spread over the event cases; using scale 1 for it.")
         scale = np.where(scale > 0, scale, 1.0)
     return round_sig(centre), round_sig(scale)
 

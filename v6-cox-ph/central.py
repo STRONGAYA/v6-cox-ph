@@ -16,7 +16,7 @@ from scipy.stats import chi2
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError
-from vantage6.algorithm.tools.util import info, warn
+from vantage6_strongaya_general.miscellaneous import safe_log
 
 from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
 from .coxph_logic import partial_log_likelihood, pooled_standardisation
@@ -94,13 +94,13 @@ def central(
     else:
         ids = list(organization_ids)
 
-    info(f"Sending task to organisations {ids}")
+    safe_log("info", f"Sending task to organisations {ids}")
 
     n_covs = len(expl_vars)
     epochs = MAX_ITERATIONS
 
     # Subtask: compute summed Z
-    info("Defining input parameters for subtask — compute summed Z")
+    safe_log("info", "Defining input parameters for subtask — compute summed Z")
     input_ = {
         "method": "compute_summed_z",
         "kwargs": {
@@ -110,7 +110,7 @@ def central(
         },
     }
 
-    info("Creating subtask for all organisations")
+    safe_log("info", "Creating subtask for all organisations")
     task = client.task.create(
         input_=input_,
         organizations=ids,
@@ -118,9 +118,9 @@ def central(
         description="Computing the summed Z statistic",
     )
 
-    info("Waiting for results")
+    safe_log("info", "Waiting for results")
     results = client.wait_for_results(task_id=task.get("id"))
-    info("Results obtained!")
+    safe_log("info", "Results obtained!")
     _require_all_organisations_answered(results, ids)
 
     z_sum = None
@@ -157,7 +157,7 @@ def central(
     assert z_sum is not None and sum_squares is not None
     n_events = float(aggregated_time_events["freq"].sum())
     centre, scale = pooled_standardisation(z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events)
-    info("Dispatching standardised covariates (centre and scale to 2 significant figures).")
+    safe_log("info", "Dispatching standardised covariates (centre and scale to 2 significant figures).")
 
     # Aggregate summary of the guards that were active on the nodes:
     # configuration, not data; no per-node breakdown. A warning is added
@@ -178,7 +178,7 @@ def central(
             f"time binning {'on' if time_binning else 'off'}); "
             "the estimates are approximate."
         )
-        warn(guards_warning)
+        safe_log("warn", guards_warning)
 
     # The gradient in the standardised space needs the event-case covariate
     # sums in that space as well.
@@ -202,7 +202,7 @@ def central(
         # Serialise beta for vantage6
         beta_serialised: list = beta.tolist()
 
-        info("Defining input parameters for subtask — perform iteration")
+        safe_log("info", "Defining input parameters for subtask — perform iteration")
         input_ = {
             "method": "perform_iteration",
             "kwargs": {
@@ -216,7 +216,7 @@ def central(
             },
         }
 
-        info("Creating subtask for all organisations")
+        safe_log("info", "Creating subtask for all organisations")
         task = client.task.create(
             input_=input_,
             organizations=ids,
@@ -224,9 +224,9 @@ def central(
             description="Iterating to find the optimal beta",
         )
 
-        info("Waiting for results")
+        safe_log("info", "Waiting for results")
         results = client.wait_for_results(task_id=task.get("id"))
-        info("Results obtained!")
+        safe_log("info", "Results obtained!")
         _require_all_organisations_answered(results, ids)
 
         n_times = len(unique_time_events)
@@ -253,7 +253,7 @@ def central(
             # halve it and retry from the accepted point. The accepted state
             # is reported if the budget runs out mid-halving.
             step_halvings += 1
-            warn("Newton step decreased the log-likelihood; halving the step.")
+            safe_log("warn", "Newton step decreased the log-likelihood; halving the step.")
             last_step = np.asarray(last_step, dtype=float) * 0.5
             beta = accepted["beta"] - last_step
             continue
@@ -279,18 +279,18 @@ def central(
             step = solve(secondary_derivative, primary_derivative)
         except np.linalg.LinAlgError as e:
             convergence_cause = f"Hessian is singular: {e}"
-            warn(convergence_cause)
+            safe_log("warn", convergence_cause)
             break
 
         delta = float(np.max(np.abs(step)))
 
         if not np.isfinite(delta):
             convergence_cause = "Newton step is not finite"
-            warn(convergence_cause)
+            safe_log("warn", convergence_cause)
             break
 
         if delta <= 0.000001:
-            info("Betas have settled! Finished iterating!")
+            safe_log("info", "Betas have settled! Finished iterating!")
             converged = True
             break
 
@@ -323,7 +323,7 @@ def central(
         )
         if convergence_cause:
             msg += f"; cause: {convergence_cause}"
-        warn(msg)
+        safe_log("warn", msg)
         central_warnings.append(msg)
 
     # Compute final model results — beta, secondary_derivative and

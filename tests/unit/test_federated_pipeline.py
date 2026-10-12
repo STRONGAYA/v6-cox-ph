@@ -944,7 +944,7 @@ class TestOptimiser:
         monkeypatch.setattr(central_module, "solve", overshooting_solve)
 
         warnings_seen = []
-        monkeypatch.setattr(central_module, "warn", lambda msg: warnings_seen.append(msg))
+        monkeypatch.setattr(central_module, "safe_log", lambda level, msg: warnings_seen.append(msg))
 
         df1, df2, _ = _load_datasets()
         result = _run_central(

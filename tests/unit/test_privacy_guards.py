@@ -336,11 +336,13 @@ class TestPrepareNodeData:
         for name in [
             "ensure_spawned_by_central",
             "load_privacy_settings",
+            "mask_unnecessary_variables",
             "validate_expl_vars",
             "drop_incomplete_rows",
             "validate_survival_columns",
             "select_rows",
             "check_sample_size",
+            "apply_sample_size_threshold",
         ]:
             original = getattr(privacy_guards, name)
 
@@ -363,11 +365,13 @@ class TestPrepareNodeData:
         assert calls == [
             "ensure_spawned_by_central",
             "load_privacy_settings",
+            "mask_unnecessary_variables",
             "validate_expl_vars",
             "drop_incomplete_rows",
             "validate_survival_columns",
             "select_rows",
             "check_sample_size",
+            "apply_sample_size_threshold",
         ]
         assert threshold_met is True
         assert len(df) == 30
@@ -379,10 +383,12 @@ class TestPrepareNodeData:
         assert calls == [
             "ensure_spawned_by_central",
             "load_privacy_settings",
+            "mask_unnecessary_variables",
             "drop_incomplete_rows",
             "validate_survival_columns",
             "select_rows",
             "check_sample_size",
+            "apply_sample_size_threshold",
         ]
         assert threshold_met is True
 

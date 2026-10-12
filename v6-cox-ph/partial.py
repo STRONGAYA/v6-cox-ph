@@ -11,7 +11,7 @@ import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
 from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
-from vantage6.algorithm.tools.util import info
+from vantage6_strongaya_general.miscellaneous import safe_log
 
 from .miscellaneous import IterationResult, SummedZResult
 from .privacy_guards import (
@@ -52,7 +52,7 @@ def compute_summed_z(
     dict
         A dictionary containing the sum of the explanatory variables.
     """
-    info("Computing summed Z statistics")
+    safe_log("info", "Computing summed Z statistics")
 
     df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 
@@ -144,7 +144,7 @@ def perform_iteration(
     dict
         A dictionary containing the aggregates computed during the iteration.
     """
-    info("Computing aggregates for the derivation of the partial likelihood")
+    safe_log("info", "Computing aggregates for the derivation of the partial likelihood")
 
     df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 

@@ -38,7 +38,11 @@ from vantage6.algorithm.tools.exceptions import (
 )
 
 from .miscellaneous import format_validation_error
-from vantage6.algorithm.tools.util import info, warn
+from vantage6_strongaya_general.miscellaneous import safe_log
+from vantage6_strongaya_general.privacy_measures import (
+    apply_sample_size_threshold,
+    mask_unnecessary_variables,
+)
 
 # Environment variable names
 ENV_SAMPLE_SIZE_THRESHOLD = "SAMPLE_SIZE_THRESHOLD"
@@ -154,7 +158,7 @@ def ensure_spawned_by_central(client) -> None:
     from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
 
     if isinstance(client, MockAlgorithmClient):
-        info("Skipping parent-task guard: mock client detected.")
+        safe_log("info", "Skipping parent-task guard: mock client detected.")
         return
 
     token = getattr(client, "_access_token", None)
@@ -187,7 +191,7 @@ def ensure_spawned_by_central(client) -> None:
             "Partial functions may only be invoked as sub-tasks of the "
             "'central' function. Direct invocation is not permitted."
         )
-    info("Parent-task guard passed: task has a parent.")
+    safe_log("info", "Parent-task guard passed: task has a parent.")
 
 
 def select_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -217,9 +221,13 @@ def prepare_node_data(
     Order (do not reorder or skip):
 
         ``ensure_spawned_by_central`` -> ``load_privacy_settings``
+        -> RDF collect (STRONG AYA, only when the node carries an
+        ``endpoint`` column) -> ``mask_unnecessary_variables`` (STRONG AYA)
         -> ``validate_expl_vars`` (when ``expl_vars`` are given)
         -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
         -> ``select_rows`` (hook) -> ``check_sample_size``
+        -> ``apply_sample_size_threshold`` (STRONG AYA, when the native
+        threshold passed)
 
     Every partial calls this so that all aggregates central combines come
     from the same row set on each node. The threshold failure behaviour
@@ -253,6 +261,19 @@ def prepare_node_data(
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
 
+    # STRONG AYA: collect RDF data when the node carries an endpoint column,
+    # then drop every column the analysis does not use (endpoint included).
+    variables_to_analyse = [time_col]
+    if outcome_col is not None:
+        variables_to_analyse.append(outcome_col)
+    if expl_vars:
+        variables_to_analyse.extend(expl_vars)
+    if "endpoint" in df.columns:
+        from vantage6_strongaya_rdf import collect_sparql_data
+
+        df = collect_sparql_data(variables_to_analyse, endpoint=df["endpoint"].iloc[0])
+    df = mask_unnecessary_variables(df, variables_to_analyse)
+
     if expl_vars:
         validate_expl_vars(df, expl_vars, time_col, outcome_col)
 
@@ -269,6 +290,14 @@ def prepare_node_data(
 
     outcome = outcome_col if need_outcome else None
     threshold_met = check_sample_size(df, outcome, settings)
+
+    if threshold_met:
+        # STRONG AYA: an additional threshold on top of the native one.
+        # Masks variables with too few observations and raises
+        # PrivacyThresholdViolation when the node as a whole is too small;
+        # when the native threshold already failed, the caller raises and
+        # this step must not double-raise.
+        df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
     return df, settings, threshold_met
 
@@ -436,7 +465,7 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
-        warn(f"Sample size threshold not met: row count does not exceed {threshold}.")
+        safe_log("warn", f"Sample size threshold not met: row count does not exceed {threshold}.")
         return False
 
     if outcome_col is not None:
@@ -444,7 +473,7 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
             raise UserInputError(f"Outcome column '{outcome_col}' not found in data columns.")
         n_events = int((df[outcome_col] == 1).sum())
         if n_events <= threshold:
-            warn(f"Sample size threshold not met: event count does not exceed " f"{threshold}.")
+            safe_log("warn", f"Sample size threshold not met: event count does not exceed " f"{threshold}.")
             return False
 
     return True
