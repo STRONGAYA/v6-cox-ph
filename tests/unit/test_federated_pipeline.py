@@ -13,13 +13,13 @@ default guards (``k=5``) and asserts the risk-set privacy property on per-node
 """
 
 import sys
-from io import StringIO
 from pathlib import Path
 from importlib import import_module
 
 import numpy as np
 import pandas as pd
 import pytest
+from vantage6.algorithm.tools.exceptions import AlgorithmError, PrivacyThresholdViolation
 
 # Add the algorithm module and repo root to the path
 repo_root = Path(__file__).parent.parent.parent
@@ -92,24 +92,34 @@ def guards_off(monkeypatch):
 
 @pytest.fixture
 def standard_result(guards_off):
-    """Run the federated algorithm on the three-node test data (guards off)."""
-    df1, df2, df3 = _load_datasets()
+    """Run the federated algorithm on nodes 1 and 2 (guards off).
+
+    Node 3 has too few events; under the fail-closed threshold policy a run
+    that includes it stops with ``PrivacyThresholdViolation``, so the
+    happy-path fixtures select organisations 1 and 2 explicitly.
+    """
+    df1, df2, _ = _load_datasets()
     datasets = [
         [{"database": df1, "db_type": "csv"}],
         [{"database": df2, "db_type": "csv"}],
-        [{"database": df3, "db_type": "csv"}],
     ]
-    return _run_central(datasets, [1, 2, 3])
+    return _run_central(datasets, [1, 2])
 
 
 @pytest.mark.unit
 class TestFederatedPipelineVsLifelines:
     """Compare the federated result (guards off) against a lifelines reference."""
 
-    def test_excludes_small_node(self, standard_result):
-        """Node 3 (<= 10 events) should be excluded; nodes 1 and 2 included."""
-        assert 3 in standard_result["excluded_organizations"]
-        assert sorted(standard_result["included_organizations"]) == [1, 2]
+    def test_run_including_below_threshold_node_fails(self, guards_off):
+        """A run that includes node 3 (too few events) fails closed."""
+        df1, df2, df3 = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+            [{"database": df3, "db_type": "csv"}],
+        ]
+        with pytest.raises(PrivacyThresholdViolation):
+            _run_central(datasets, [1, 2, 3])
 
     def test_converged(self, standard_result):
         """The optimiser should report convergence within a few iterations."""
@@ -121,7 +131,7 @@ class TestFederatedPipelineVsLifelines:
         """Federated coefficients within 2e-3 of lifelines on pooled data."""
         df1, df2, _ = _load_datasets()
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(standard_result["model"]))
+        model = pd.DataFrame(standard_result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
                 f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
@@ -131,7 +141,7 @@ class TestFederatedPipelineVsLifelines:
         """Federated SE within 1e-3 of lifelines."""
         df1, df2, _ = _load_datasets()
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(standard_result["model"]))
+        model = pd.DataFrame(standard_result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "SE"] - ref["se"][var]) <= 1e-3, (
                 f"SE mismatch {var}: fed={model.loc[var, 'SE']}, " f"ref={ref['se'][var]}"
@@ -139,7 +149,7 @@ class TestFederatedPipelineVsLifelines:
 
     def test_z_matches_beta_over_se(self, standard_result):
         """Regression: Z must equal Coef / SE (not the old (exp(beta)-1)/SE)."""
-        model = pd.read_json(StringIO(standard_result["model"]))
+        model = pd.DataFrame(standard_result["model"]).T
         for var in EXPL_VARS:
             coef = model.loc[var, "Coef"]
             se = model.loc[var, "SE"]
@@ -174,8 +184,8 @@ class TestFederatedEqualsPooled:
         pooled_df = pd.concat([df1, df2], ignore_index=True)
         pooled = _run_central([[{"database": pooled_df, "db_type": "csv"}]], [1])
 
-        fed_model = pd.read_json(StringIO(fed["model"]))
-        pooled_model = pd.read_json(StringIO(pooled["model"]))
+        fed_model = pd.DataFrame(fed["model"]).T
+        pooled_model = pd.DataFrame(pooled["model"]).T
         for var in EXPL_VARS:
             np.testing.assert_allclose(
                 fed_model.loc[var, "Coef"],
@@ -192,7 +202,7 @@ class TestNonConvergence:
     def test_forced_non_convergence(self, monkeypatch, guards_off):
         """With a single epoch the optimiser cannot converge.
 
-        FR-A1: the reported Coef is beta_0 (all zeros) because the final
+        The reported Coef is beta_0 (all zeros) because the final
         Newton step is not applied. SE, Z and AIC are evaluated at the
         same beta_0.
         """
@@ -215,8 +225,8 @@ class TestNonConvergence:
         # A model is still returned
         assert result["model"] is not None
 
-        # FR-A1: Coef == 0 (beta_0 reported, not beta_1)
-        model = pd.read_json(StringIO(result["model"]))
+        # Coef == 0 (beta_0 reported, not beta_1)
+        model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert (
                 model.loc[var, "Coef"] == 0.0
@@ -228,40 +238,11 @@ class TestNonConvergence:
 
 
 @pytest.mark.unit
-class TestAllExcluded:
-    """When every organisation is excluded, the full output schema is returned."""
-
-    def test_all_excluded_full_schema(self, monkeypatch):
-        """FR-A5: all-excluded return has model=None and all schema keys."""
-        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "1000")
-        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
-
-        df1, df2, df3 = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-            [{"database": df3, "db_type": "csv"}],
-        ]
-        result = _run_central(datasets, [1, 2, 3])
-
-        assert result["model"] is None
-        assert result["converged"] is False
-        assert result["n_iterations"] == 0
-        assert result["included_organizations"] == []
-        assert len(result["excluded_organizations"]) == 3
-        assert result["aic"] is None
-        assert result["overall_p_value"] is None
-        assert isinstance(result["warnings"], list)
-        assert len(result["warnings"]) > 0
-
-
-@pytest.mark.unit
 class TestSingularHessian:
     """A singular Hessian produces a graceful result, not a crash."""
 
     def test_collinear_covariate(self, monkeypatch, guards_off):
-        """FR-A2: collinear covariate -> converged=False, NaN SE, JSON-serialisable."""
+        """Collinear covariate -> converged=False, NaN SE, JSON-serialisable."""
         df1, df2, _ = _load_datasets()
         df1 = df1.copy()
         df2 = df2.copy()
@@ -293,7 +274,7 @@ class TestSingularHessian:
         result = results[0]
 
         assert result["converged"] is False
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in collinear_vars:
             assert np.isnan(model.loc[var, "SE"]), f"SE for {var} should be NaN"
         assert result["model"] is not None
@@ -304,69 +285,179 @@ class TestSingularHessian:
 
 @pytest.mark.unit
 class TestSubTaskValidation:
-    """The validation helpers catch malformed sub-task results (FR-A3)."""
+    """The result parser catches malformed sub-task results.
 
-    def test_validate_iteration_result_bad_agg1_length(self):
+    Structural errors (missing keys) surface in pydantic's wording
+    (``Field required``); the semantic checks (shape, finiteness, unknown
+    organisation, missing variables) keep their custom wording.
+    """
+
+    def test_parse_iteration_result_bad_agg1_length(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="agg1 has length"):
-            central._validate_iteration_result(
-                {"agg1": [1.0, 2.0], "agg2": {}, "agg3": []},
-                n_times=5,
-                n_covs=2,
-                expl_vars=["age", "treatment"],
-                org_id=1,
+            central._parse_result(
+                central.IterationResult,
+                {"organization_id": 1, "agg1": [1.0, 2.0], "agg2": [], "agg3": []},
+                context={"expected_ids": [1], "n_times": 5, "n_covs": 2},
             )
 
-    def test_validate_iteration_result_missing_key(self):
+    def test_parse_iteration_result_missing_key(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
-        with pytest.raises(Exception, match="missing key"):
-            central._validate_iteration_result(
-                {"agg1": [1.0]},
-                n_times=1,
-                n_covs=1,
-                expl_vars=["age"],
-                org_id=1,
+        with pytest.raises(Exception, match="Field required"):
+            central._parse_result(
+                central.IterationResult,
+                {"organization_id": 1, "agg1": [1.0]},
+                context={"expected_ids": [1], "n_times": 1, "n_covs": 1},
             )
 
-    def test_validate_zsum_result_missing_sum(self):
+    def test_parse_zsum_result_missing_sum(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
-        with pytest.raises(Exception, match="missing 'sum'"):
-            central._validate_zsum_result({}, ["age", "treatment"], "time", org_id=1)
+        with pytest.raises(Exception, match="Field required"):
+            central._parse_result(
+                central.SummedZResult,
+                {"organization_id": 1},
+                context={"expected_ids": [1], "expl_vars": ["age", "treatment"], "time_col": "time"},
+            )
 
-    def test_validate_zsum_result_missing_variable(self):
+    def test_parse_zsum_result_missing_variable(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
         with pytest.raises(Exception, match="missing variables"):
-            central._validate_zsum_result(
-                {"sum": {"age": 10.0}, "times": {"time": [1.0], "freq": [1]}},
-                ["age", "treatment"],
-                "time",
-                org_id=1,
+            central._parse_result(
+                central.SummedZResult,
+                {
+                    "organization_id": 1,
+                    "sum": {"age": 10.0},
+                    "sum_squares": {"age": 100.0, "treatment": 25.0},
+                    "times": {"time": [1.0], "freq": [1]},
+                    "privacy_settings": {"sample_size_threshold": 10},
+                },
+                context={"expected_ids": [1], "expl_vars": ["age", "treatment"], "time_col": "time"},
             )
 
-    def test_validate_zsum_result_missing_times(self):
+    def test_parse_zsum_result_missing_times(self):
         from importlib import import_module
 
         central = import_module("v6-cox-ph.central")
-        with pytest.raises(Exception, match="missing 'times'"):
-            central._validate_zsum_result(
-                {"sum": {"age": 10.0, "treatment": 5.0}},
-                ["age", "treatment"],
-                "time",
-                org_id=1,
+        with pytest.raises(Exception, match="Field required"):
+            central._parse_result(
+                central.SummedZResult,
+                {
+                    "organization_id": 1,
+                    "sum": {"age": 10.0, "treatment": 5.0},
+                    "sum_squares": {"age": 100.0, "treatment": 25.0},
+                    "privacy_settings": {"sample_size_threshold": 10},
+                },
+                context={"expected_ids": [1], "expl_vars": ["age", "treatment"], "time_col": "time"},
             )
+
+    def test_parse_result_unknown_organization(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="not one of"):
+            central._parse_result(
+                central.IterationResult,
+                {"organization_id": 99, "agg1": [1.0], "agg2": [[1.0]], "agg3": [[[1.0]]]},
+                context={"expected_ids": [1], "n_times": 1, "n_covs": 1},
+            )
+
+    def test_parse_result_not_a_dict(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(Exception, match="Expected a dict result"):
+            central._parse_result(central.SummedZResult, [1, 2, 3], context={"expected_ids": [1]})
+
+
+@pytest.mark.unit
+class TestWireContractPinning:
+    """The partials' result dicts carry exactly the wire-model keys.
+
+    The partials build their results from ``SummedZResult`` /
+    ``IterationResult`` and return ``model_dump()``; these tests pin the
+    dumped key sets against literals so the wire contract is asserted next
+    to ``algorithm_store.json``.
+    """
+
+    def _client(self):
+        df1, df2, _ = _load_datasets()
+        return MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+
+    def test_compute_summed_z_result_keys(self, guards_off):
+        client = self._client()
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert results, "compute_summed_z returned no results"
+        for r in results:
+            assert set(r.keys()) == {"organization_id", "sum", "sum_squares", "times", "privacy_settings"}
+            assert set(r["times"].keys()) == {"time", "freq"}
+            assert set(r["privacy_settings"].keys()) == {
+                "sample_size_threshold",
+                "min_risk_set_change",
+                "time_bin_width",
+            }
+
+    def test_perform_iteration_result_keys(self, guards_off):
+        client = self._client()
+        grid_task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        grid = sorted(
+            {
+                t
+                for r in client.wait_for_results(task_id=grid_task["id"])
+                for t in pd.DataFrame.from_dict(r["times"])["time"].tolist()
+            }
+        )
+        task = client.task.create(
+            input_={
+                "method": "perform_iteration",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                    "beta": [0.0, 0.0],
+                    "centre": [0.0, 0.0],
+                    "scale": [1.0, 1.0],
+                    "unique_time_events": grid,
+                },
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert results, "perform_iteration returned no results"
+        for r in results:
+            assert set(r.keys()) == {"organization_id", "agg1", "agg2", "agg3"}
 
 
 @pytest.mark.unit
 class TestNaNPolicy:
-    """NaN rows are dropped identically in all partials (FR-B4)."""
+    """NaN rows are dropped identically in all partials."""
 
     def test_nan_rows_dropped_consistently(self, monkeypatch, guards_off):
         """A NaN in age on an event row of node 1 is dropped in
@@ -374,10 +465,9 @@ class TestNaNPolicy:
         risk sets); the federated result matches lifelines on the NaN-free
         pooled data.
 
-        Putting the NaN on an *event* row is critical: get_unique_event_times
-        does not have expl_vars and cannot drop rows with NaN covariates, so
-        without the fix the event counts (freq) would include that row while
-        z_sum and the risk sets would not — a 10-20x tolerance violation.
+        Putting the NaN on an *event* row is critical: without the shared
+        preparation step the event counts (freq) could include rows that
+        z_sum and the risk sets exclude — a 10-20x tolerance violation.
         """
         df1, df2, _ = _load_datasets()
         df1 = df1.copy()
@@ -396,7 +486,7 @@ class TestNaNPolicy:
         # Build the NaN-free reference
         df1_clean = df1.dropna(subset=["time", "event", "age", "treatment"])
         ref = _lifelines_reference(pd.concat([df1_clean, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
                 f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
@@ -414,20 +504,19 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
         organization_ids=organization_ids,
     )
 
-    # Gather the global event-time grid from get_unique_event_times.
+    # Gather the pooled event-time grid from compute_summed_z results.
     task = client.task.create(
         input_={
-            "method": "get_unique_event_times",
-            "kwargs": {"time_col": "time", "outcome_col": "event"},
+            "method": "compute_summed_z",
+            "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
         },
         organizations=organization_ids,
     )
     time_results = client.wait_for_results(task_id=task["id"])
     grid = []
     for r in time_results:
-        if "times" in r:
-            t = pd.DataFrame.from_dict(r["times"])
-            grid.extend(t["time"].tolist())
+        t = pd.DataFrame.from_dict(r["times"])
+        grid.extend(t["time"].tolist())
     grid = sorted(set(grid))
 
     # Dispatch perform_iteration at beta = 0.
@@ -436,8 +525,11 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
             "method": "perform_iteration",
             "kwargs": {
                 "time_col": "time",
+                "outcome_col": "event",
                 "expl_vars": EXPL_VARS,
                 "beta": [0.0, 0.0],
+                "centre": [0.0, 0.0],
+                "scale": [1.0, 1.0],
                 "unique_time_events": grid,
             },
         },
@@ -489,7 +581,7 @@ class TestDefaultGuardsPrivacyProperty:
         ]
         result = _run_central(datasets, [1, 2])
         ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
-        model = pd.read_json(StringIO(result["model"]))
+        model = pd.DataFrame(result["model"]).T
         for var in EXPL_VARS:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
                 f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
@@ -517,20 +609,668 @@ class TestTimeBinning:
         )
         task = client.task.create(
             input_={
-                "method": "get_unique_event_times",
-                "kwargs": {"time_col": "time", "outcome_col": "event"},
+                "method": "compute_summed_z",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                },
             },
             organizations=[1, 2],
         )
         results = client.wait_for_results(task_id=task["id"])
         shared_times = []
         for r in results:
-            if "times" in r:
-                t = pd.DataFrame.from_dict(r["times"])
-                shared_times.extend(t["time"].tolist())
+            t = pd.DataFrame.from_dict(r["times"])
+            shared_times.extend(t["time"].tolist())
         for t in shared_times:
             assert t % 10 == 0 or np.isclose(t % 10, 0), f"shared time {t} is not a multiple of 10"
 
         # The full pipeline still converges.
         result = _run_central(datasets, [1, 2])
         assert result["converged"] is True
+
+
+def _run_central_with_client(client, organization_ids):
+    """Dispatch central through a pre-built (possibly wrapped) client."""
+    task = client.task.create(
+        input_={
+            "method": "central",
+            "kwargs": {
+                "time_col": "time",
+                "outcome_col": "event",
+                "expl_vars": EXPL_VARS,
+                "organization_ids": organization_ids,
+            },
+        },
+        organizations=[organization_ids[0]],
+    )
+    results = client.wait_for_results(task_id=task["id"])
+    return results[0]
+
+
+@pytest.mark.unit
+class TestOrganizationAttribution:
+    """Errors attribute results by their organization_id, not their position."""
+
+    def _two_node_client(self):
+        df1, df2, _ = _load_datasets()
+        return MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+
+    def test_partial_results_carry_organization_id(self, guards_off):
+        """compute_summed_z and perform_iteration return their organisation id."""
+        client = self._two_node_client()
+
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                },
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert sorted(r["organization_id"] for r in results) == [1, 2]
+
+    def test_shuffled_results_attributed_correctly(self, guards_off, monkeypatch):
+        """Reversed result order still yields the correct model."""
+        original_wait = MockAlgorithmClient.wait_for_results
+
+        def reversed_wait(self, task_id, interval=1):
+            return list(reversed(original_wait(self, task_id, interval)))
+
+        # Patch the class so the client copies the mock hands to central are
+        # wrapped as well (central uses those for its sub-task waits).
+        monkeypatch.setattr(MockAlgorithmClient, "wait_for_results", reversed_wait)
+
+        client = self._two_node_client()
+        result = _run_central_with_client(client, [1, 2])
+        assert result["converged"] is True
+
+        # The model must equal the unshuffled run
+        reference = _run_central(
+            [
+                [{"database": _load_datasets()[0], "db_type": "csv"}],
+                [{"database": _load_datasets()[1], "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        shuffled_model = pd.DataFrame(result["model"]).T
+        reference_model = pd.DataFrame(reference["model"]).T
+        for var in EXPL_VARS:
+            np.testing.assert_allclose(shuffled_model.loc[var, "Coef"], reference_model.loc[var, "Coef"], atol=1e-12)
+
+    def test_unknown_organization_id_raises(self, guards_off, monkeypatch):
+        """A result claiming an organisation that was not dispatched fails closed."""
+        original_wait = MockAlgorithmClient.wait_for_results
+
+        def tampered_wait(self, task_id, interval=1):
+            results = original_wait(self, task_id, interval)
+            for r in results:
+                if isinstance(r, dict):
+                    r["organization_id"] = 99
+            return results
+
+        monkeypatch.setattr(MockAlgorithmClient, "wait_for_results", tampered_wait)
+
+        client = self._two_node_client()
+        with pytest.raises(AlgorithmError, match="not one of"):
+            _run_central_with_client(client, [1, 2])
+
+
+@pytest.mark.unit
+class TestAffineTransform:
+    """The standardisation of the covariates must not change the model."""
+
+    def _uncentred_fit(self, client, organization_ids):
+        """Fit without centring/scaling: dispatch with centre 0 / scale 1."""
+        from importlib import import_module
+
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+
+        # Gather z_sum and the event grid
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=organization_ids,
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        z_sum = None
+        time_event_dfs = []
+        for r in results:
+            if z_sum is None:
+                z_sum = pd.Series(r["sum"])
+            else:
+                z_sum += pd.Series(r["sum"])
+            time_event_dfs.append(pd.DataFrame.from_dict(r["times"]))
+        ate = pd.concat(time_event_dfs).groupby("time", as_index=False).sum()
+        grid = ate["time"].tolist()
+
+        beta = np.zeros(len(EXPL_VARS))
+        for _ in range(20):
+            task = client.task.create(
+                input_={
+                    "method": "perform_iteration",
+                    "kwargs": {
+                        "time_col": "time",
+                        "outcome_col": "event",
+                        "expl_vars": EXPL_VARS,
+                        "beta": beta.tolist(),
+                        "centre": [0.0, 0.0],
+                        "scale": [1.0, 1.0],
+                        "unique_time_events": grid,
+                    },
+                },
+                organizations=organization_ids,
+            )
+            results = client.wait_for_results(task_id=task["id"])
+            n_times = len(grid)
+            agg1 = np.zeros(n_times)
+            agg2 = np.zeros((n_times, len(EXPL_VARS)))
+            agg3 = np.zeros((n_times, len(EXPL_VARS), len(EXPL_VARS)))
+            for r in results:
+                agg1 += np.array(r["agg1"])
+                agg2 += np.array(pd.DataFrame.from_dict(r["agg2"]))
+                agg3 += np.array([np.array(lst) for lst in r["agg3"]])
+            primary, secondary = coxph_logic.compute_derivatives(agg1, agg2, agg3, ate, z_sum)
+            from scipy.linalg import solve
+
+            step = solve(secondary, primary)
+            if float(np.max(np.abs(step))) <= 1e-6:
+                return beta
+            beta = beta - step
+        return beta
+
+    def test_standardised_equals_unstandardised(self, guards_off):
+        """central's standardised fit equals a centre-0/scale-1 fit to 1e-10."""
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+
+        standardised = _run_central(datasets, [1, 2])
+        assert standardised["converged"] is True
+
+        client = MockAlgorithmClient(datasets=datasets, module="v6-cox-ph", organization_ids=[1, 2])
+        unstandardised_beta = self._uncentred_fit(client, [1, 2])
+
+        model = pd.DataFrame(standardised["model"]).T
+        for i, var in enumerate(EXPL_VARS):
+            np.testing.assert_allclose(
+                model.loc[var, "Coef"], unstandardised_beta[i], atol=1e-10, err_msg=f"back-transform mismatch {var}"
+            )
+
+    @pytest.mark.parametrize("transform", ["scale_1e4", "offset_1e4"])
+    def test_extreme_covariates_converge(self, guards_off, transform):
+        """A covariate scaled by 1e4 or offset by 1e4 still converges."""
+        df1, df2, _ = _load_datasets()
+        df1 = df1.copy()
+        df2 = df2.copy()
+        if transform == "scale_1e4":
+            df1["age"] = df1["age"] * 1e4
+            df2["age"] = df2["age"] * 1e4
+        else:
+            df1["age"] = df1["age"] + 1e4
+            df2["age"] = df2["age"] + 1e4
+
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # The model must match lifelines on the same (extreme) data
+        ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
+        model = pd.DataFrame(result["model"]).T
+        for var in EXPL_VARS:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3, (
+                f"coef mismatch {var} ({transform}): fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
+            )
+
+    def test_missing_outcome_rows_equal_removal(self, guards_off):
+        """Rows with a missing outcome give exactly the result of removing them."""
+        df1, df2, _ = _load_datasets()
+        df1 = df1.copy()
+        nan_rows = df1.index[:4]
+        df1.loc[nan_rows, "event"] = np.nan
+
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        with_nan = _run_central(datasets, [1, 2])
+
+        df1_dropped = df1.dropna(subset=["event"])
+        removed = _run_central(
+            [
+                [{"database": df1_dropped, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+
+        with_nan_model = pd.DataFrame(with_nan["model"]).T
+        removed_model = pd.DataFrame(removed["model"]).T
+        for var in EXPL_VARS:
+            np.testing.assert_allclose(with_nan_model.loc[var, "Coef"], removed_model.loc[var, "Coef"], atol=1e-12)
+
+
+def _breslow_log_likelihood(df, expl_vars, beta):
+    """An independent Breslow partial log-likelihood on pooled data."""
+    times = df["time"].to_numpy()
+    events = df["event"].to_numpy()
+    eta = df[expl_vars].to_numpy(dtype=float) @ np.asarray(beta, dtype=float)
+    ll = 0.0
+    for t in np.unique(times[events == 1]):
+        event_mask = (times == t) & (events == 1)
+        d_t = int(event_mask.sum())
+        risk = times >= t
+        s0 = float(np.exp(eta[risk]).sum())
+        ll += float(eta[event_mask].sum()) - d_t * float(np.log(s0))
+    return ll
+
+
+@pytest.mark.unit
+class TestOptimiser:
+    """The central optimiser: log-likelihood, LR test and step-halving."""
+
+    def test_log_likelihood_matches_direct_breslow(self, guards_off):
+        """The reported log-likelihood equals a direct Breslow fit (guards off)."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        assert result["converged"] is True
+        model = pd.DataFrame(result["model"]).T
+        beta = model["Coef"].to_numpy(dtype=float)
+        direct = _breslow_log_likelihood(pd.concat([df1, df2]), EXPL_VARS, beta)
+        assert (
+            abs(result["log_likelihood"] - direct) <= 1e-9
+        ), f"log-likelihood mismatch: reported={result['log_likelihood']}, direct={direct}"
+
+    def test_likelihood_ratio_fields_consistent(self, guards_off):
+        """ll > ll_null, the LR statistic and p-value are consistent."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        ll = result["log_likelihood"]
+        ll_null = result["log_likelihood_null"]
+        assert ll > ll_null
+        assert result["n_events"] == int((pd.concat([df1, df2])["event"] == 1).sum())
+        assert abs(result["lr_statistic"] - 2 * (ll - ll_null)) <= 1e-9
+        assert 0.0 <= result["lr_p_value"] <= 1.0
+        assert result["covariance"] is not None
+        cov = np.asarray(result["covariance"], dtype=float)
+        assert cov.shape == (len(EXPL_VARS), len(EXPL_VARS))
+        assert result["algorithm_version"] not in ("", None)
+
+    def test_step_halving_triggers(self, guards_off, monkeypatch):
+        """An oversized Newton step is detected and halved."""
+        original_solve = central_module.solve
+        calls = {"n": 0}
+
+        def overshooting_solve(a, b):
+            step = original_solve(a, b)
+            if calls["n"] == 0:
+                # Triple the very first step: the next evaluation must show a
+                # likelihood decrease and engage the step-halving.
+                calls["n"] += 1
+                return 3.0 * step
+            return step
+
+        monkeypatch.setattr(central_module, "solve", overshooting_solve)
+
+        warnings_seen = []
+        monkeypatch.setattr(central_module, "warn", lambda msg: warnings_seen.append(msg))
+
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        assert any(
+            "halving the step" in w for w in warnings_seen
+        ), f"Expected step-halving warning, saw: {warnings_seen}"
+        assert result["converged"] is True
+
+        # The recovered model still matches lifelines
+        ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
+        model = pd.DataFrame(result["model"]).T
+        for var in EXPL_VARS:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3
+
+
+@pytest.mark.unit
+class TestSurvivalCurves:
+    """Baseline cumulative hazard and survival curves (all computed centrally)."""
+
+    def _run_central_with_profiles(self, datasets, organization_ids, profiles):
+        client = MockAlgorithmClient(datasets=datasets, module="v6-cox-ph", organization_ids=organization_ids)
+        task = client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                    "organization_ids": organization_ids,
+                    "covariate_profiles": profiles,
+                },
+            },
+            organizations=[organization_ids[0]],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        return results[0]
+
+    def test_baseline_curve_consistency(self, guards_off):
+        """S(t | centre) == exp(-H0(t)); curves only on the event grid."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        h0 = result["baseline_cumulative_hazard"]
+        baseline_curve = result["survival_curves"]["0"]
+        assert set(h0.keys()) == set(baseline_curve.keys())
+        for t in h0:
+            assert abs(baseline_curve[t] - np.exp(-h0[t])) <= 1e-12
+        # H0 is non-decreasing and starts at the first grid time
+        values = [h0[t] for t in sorted(h0, key=float)]
+        assert all(b >= a - 1e-12 for a, b in zip(values, values[1:]))
+
+    def test_baseline_hazard_matches_direct_breslow(self, guards_off):
+        """H0 equals a direct Breslow computation at the same centre (guards off)."""
+        from importlib import import_module
+
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # Recompute the rounded centre/scale exactly as central does
+        client = MockAlgorithmClient(datasets=datasets, module="v6-cox-ph", organization_ids=[1, 2])
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        zsum_results = client.wait_for_results(task_id=task["id"])
+        z_sum = None
+        sum_squares = None
+        for r in zsum_results:
+            z_sum = pd.Series(r["sum"]) if z_sum is None else z_sum + pd.Series(r["sum"])
+            sum_squares = (
+                pd.Series(r["sum_squares"]) if sum_squares is None else sum_squares + pd.Series(r["sum_squares"])
+            )
+        n_events = float(result["n_events"])
+        centre, scale = coxph_logic.pooled_standardisation(
+            z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events
+        )
+
+        # Direct Breslow baseline at x* = 0 (the covariate centre)
+        pooled = pd.concat([df1, df2])
+        beta_star = pd.DataFrame(result["model"]).T["Coef"].to_numpy(dtype=float) * scale
+        x_star = (pooled[EXPL_VARS].to_numpy(dtype=float) - centre) / scale
+        eta = x_star @ beta_star
+        times = pooled["time"].to_numpy(dtype=float)
+        events = pooled["event"].to_numpy(dtype=float)
+        grid = np.array(sorted(float(t) for t in result["baseline_cumulative_hazard"]))
+        direct = {}
+        cumulative = 0.0
+        for t in grid:
+            risk = times >= t
+            d_t = float(np.sum((times == t) & (events == 1)))
+            if d_t > 0:
+                cumulative += d_t / float(np.exp(eta[risk]).sum())
+            direct[str(t)] = cumulative
+
+        reported = result["baseline_cumulative_hazard"]
+        for t in reported:
+            assert abs(reported[t] - direct[t]) <= 1e-9, f"H0 mismatch at t={t}"
+
+    def test_covariate_profiles(self, guards_off):
+        """Each profile's curve is S0(t) ** exp(beta . (x - centre)/scale)."""
+        profiles = [{"age": 70.0}, {"age": 40.0, "treatment": 1.0}]
+        df1, df2, _ = _load_datasets()
+        result = self._run_central_with_profiles(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+            profiles,
+        )
+        assert set(result["survival_curves"].keys()) == {"0", "1", "2"}
+        baseline = result["survival_curves"]["0"]
+        h0 = result["baseline_cumulative_hazard"]
+        for idx, profile in enumerate(profiles, start=1):
+            curve = result["survival_curves"][str(idx)]
+            for t in h0:
+                assert abs(curve[t] - baseline[t]) > 1e-9, f"profile {idx} equals the baseline at t={t}"
+
+    def test_invalid_profile_rejected(self, guards_off):
+        """A profile naming an unknown variable fails with UserInputError."""
+        from vantage6.algorithm.tools.exceptions import UserInputError
+
+        df1, df2, _ = _load_datasets()
+        client = MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        with pytest.raises(UserInputError):
+            client.task.create(
+                input_={
+                    "method": "central",
+                    "kwargs": {
+                        "time_col": "time",
+                        "outcome_col": "event",
+                        "expl_vars": EXPL_VARS,
+                        "organization_ids": [1, 2],
+                        "covariate_profiles": [{"nonexistent_var": 1.0}],
+                    },
+                },
+                organizations=[1],
+            )
+
+    def test_curve_steps_respect_k(self, monkeypatch):
+        """With default guards every curve time is backed by risk sets >= k."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        k = 5
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2])
+        assert result["converged"] is True
+
+        # At beta = 0 the per-node agg1 equals the node's risk-set size; the
+        # guards guarantee every non-zero value is >= k.
+        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2])
+        grid = sorted(
+            (float(t) for t in result["baseline_cumulative_hazard"]),
+        )
+        for node_idx, agg1 in enumerate(per_node_agg1):
+            for i, value in enumerate(agg1):
+                if float(value) > 0:
+                    assert float(value) >= k - 1e-9, (
+                        f"node {node_idx}: risk set {float(value)} < k={k} at grid index {i} "
+                        f"(time {grid[i] if i < len(grid) else '?'})"
+                    )
+
+
+@pytest.mark.unit
+class TestPrivacyGuardsSummary:
+    """The result carries an aggregate summary of the active guards."""
+
+    def test_default_guards_summary(self, monkeypatch):
+        """Default guards: active, k=5, no binning, warning appended."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        summary = result["privacy_guards"]
+        assert set(summary.keys()) == {"active", "max_min_risk_set_change", "time_binning"}
+        assert summary["active"] is True
+        assert summary["max_min_risk_set_change"] == 5
+        assert summary["time_binning"] is False
+        assert any("guards were active" in w for w in result["warnings"])
+
+    def test_guards_off_summary(self, guards_off):
+        """Guards disabled: inactive, no warning."""
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        summary = result["privacy_guards"]
+        assert summary["active"] is False
+        assert summary["max_min_risk_set_change"] == 1
+        assert summary["time_binning"] is False
+        assert not any("guards were active" in w for w in result["warnings"])
+
+    def test_binning_summary(self, monkeypatch):
+        """Time binning shows up as active."""
+        monkeypatch.setenv("COXPH_TIME_BIN_WIDTH", "10")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        summary = result["privacy_guards"]
+        assert summary["active"] is True
+        assert summary["time_binning"] is True
+        assert summary["max_min_risk_set_change"] == 1
+
+
+@pytest.mark.unit
+class TestGuardBiasRegression:
+    """Fixed-seed regression bound on the guards' coefficient bias.
+
+    The bound is derived from the bias study (scripts/bias_study.py): the
+    smoke run (2 repetitions, nodes of 200 and 1000 rows, k in {1, 5, 10},
+    binning on/off) observed a maximum deviation from the k = 1 fit of
+    ~0.04; the bound below carries headroom for the full 50-repetition
+    study to re-derive it (do not loosen it without re-running the study).
+    """
+
+    BETA_TRUE = np.array([0.5, -0.3])
+    BOUND = 0.05
+
+    def _simulate(self, seed: int, n_rows: int = 200) -> list:
+        rng = np.random.default_rng(seed)
+        datasets = []
+        for _ in range(3):
+            X = rng.normal(size=(n_rows, 2))
+            eta = X @ self.BETA_TRUE
+            hazard = 0.02 * np.exp(eta)
+            event_time = rng.exponential(1.0 / hazard)
+            censor_time = rng.uniform(0.0, 60.0)
+            datasets.append(
+                pd.DataFrame(
+                    {
+                        "time": np.minimum(event_time, censor_time),
+                        "event": (event_time <= censor_time).astype(int),
+                        "x1": X[:, 0],
+                        "x2": X[:, 1],
+                    }
+                )
+            )
+        return datasets
+
+    def _run(self, datasets):
+        client = MockAlgorithmClient(
+            datasets=[[{"database": df, "db_type": "csv"}] for df in datasets],
+            module="v6-cox-ph",
+            organization_ids=[1, 2, 3],
+        )
+        task = client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": ["x1", "x2"],
+                    "organization_ids": [1, 2, 3],
+                },
+            },
+            organizations=[1],
+        )
+        return client.wait_for_results(task_id=task["id"])[0]
+
+    def test_default_guards_stay_within_bound(self, monkeypatch):
+        """With default guards the coefficients stay within the study bound."""
+        datasets = self._simulate(20261005)
+        covs = ["x1", "x2"]
+
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        unguarded = self._run(datasets)
+        assert unguarded["converged"] is True
+
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        guarded = self._run(datasets)
+        assert guarded["converged"] is True
+        assert guarded["privacy_guards"]["active"] is True
+
+        unguarded_model = pd.DataFrame(unguarded["model"]).T
+        guarded_model = pd.DataFrame(guarded["model"]).T
+        for var in covs:
+            deviation = abs(guarded_model.loc[var, "Coef"] - unguarded_model.loc[var, "Coef"])
+            assert (
+                deviation <= self.BOUND
+            ), f"Guard bias for {var} is {deviation:.4f}, above the regression bound {self.BOUND}"

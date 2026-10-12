@@ -13,22 +13,90 @@ The input arguments for the central function consist of:
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
   organisations are used.
+- ``covariate_profiles`` (list of objects, optional): covariate profiles for
+  survival curves. Each entry maps explanatory variable names to values;
+  variables left out are taken at the pooled event-case mean. An entry
+  naming an unknown variable raises ``UserInputError``.
+
+Input rules
+------------
+
+Every node validates its data before sharing anything:
+
+- ``time_col`` must exist and be numeric, finite and non-negative.
+- ``outcome_col`` must exist and be binary: only 0 and 1 (booleans are
+  allowed).
+- Every ``expl_var`` must exist and be numeric (see below), and rows with
+  missing values in any analysed column are dropped before the sample-size
+  threshold is checked.
+
+A column that violates these rules raises ``UserInputError`` and stops the
+whole analysis; there is no silent fallback. Projects whose data uses other
+codings (for example an outcome coded 1/2, or string labels) must recode
+**before** calling the algorithm — recoding belongs in the project layer,
+not in the vanilla algorithm.
 
 Output fields
 -------------
 
 The central function returns a dictionary with:
 
-- ``model``: a JSON table indexed by variable name with columns ``Coef``,
+- ``model``: a JSON object indexed by variable name with columns ``Coef``,
   ``Exp(coef)``, ``SE``, ``lower_CI``, ``upper_CI``, ``Z`` and ``p-value``.
+  The coefficients are on the original covariates: nodes fit on the
+  standardised ``(x - centre) / scale`` and the central function transforms
+  the reported statistics back.
 - ``overall_p_value``: the overall Wald test p-value.
 - ``aic``: the Akaike Information Criterion.
 - ``degrees_of_freedom``: the number of model parameters.
 - ``warnings``: a list of human-readable warning strings.
-- ``included_organizations`` / ``excluded_organizations``: the organisations
-  that passed / failed the sample-size threshold.
 - ``converged`` (bool): whether the Newton-Raphson optimiser converged.
 - ``n_iterations`` (int): the number of iterations performed.
+- ``log_likelihood`` (float): the Breslow partial log-likelihood at the
+  reported coefficients.
+- ``log_likelihood_null`` (float): the log-likelihood at ``beta = 0``.
+- ``lr_statistic`` / ``lr_p_value`` (float): the likelihood-ratio test
+  statistic ``2 * (ll - ll_null)`` and its chi-squared p-value with
+  ``degrees_of_freedom`` degrees of freedom.
+- ``n_events`` (int): the pooled number of event cases.
+- ``covariance``: the covariance matrix of the coefficients (original
+  covariate scale).
+- ``algorithm_version`` (str): the algorithm package version the result was
+  computed with.
+
+``overall_p_value`` is the Wald test; ``lr_p_value`` is the likelihood-ratio
+test. When the log-likelihood decreases after a Newton step the optimiser
+halves the step and retries; the reported statistics always belong to the
+last accepted evaluation (the iteration budget is 20 round-trips).
+
+Guard-effect summary
+--------------------
+
+The result carries a ``privacy_guards`` object — an aggregate summary of the
+guards that were active on the nodes (configuration, not data; there is no
+per-node breakdown): ``active`` (bool), ``max_min_risk_set_change`` (the
+largest ``k`` any node used) and ``time_binning`` (bool). When any guard was
+active a warning is appended: the estimates are then approximate (see the
+bias study in ``Validation.rst``).
+
+Survival curves
+----------------
+
+The result also contains:
+
+- ``baseline_cumulative_hazard``: the Breslow baseline cumulative hazard
+  ``H0(t) = sum_{t_j <= t} d_j / S0(t_j)`` over the event-time grid (the
+  binned grid when time binning is on), where ``d_j`` is the pooled event
+  count per grid time and ``S0(t_j)`` the risk-set sum at the reported
+  coefficients. The baseline is at the covariate centre: the pooled
+  event-case mean covariate profile.
+- ``survival_curves``: survival functions ``S(t | x) = S0(t) ** exp(beta .
+  (x - centre) / scale)``. Key ``"0"`` is the baseline (the covariate
+  centre); every requested ``covariate_profiles`` entry follows under its
+  1-based index.
+
+Both are computed centrally from quantities that are already aggregated —
+no new data leaves a node for them.
 
 The Wald statistic is reported as ``Z = Coef / SE`` and the p-value as
 ``p = 2 * Phi(-|Z|)``. When ``converged`` is ``False`` a warning is appended

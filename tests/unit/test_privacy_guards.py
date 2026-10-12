@@ -6,8 +6,7 @@ and iteration-input validation. The time-binning / tail-censoring / jump-guard
 functions are tested here as well (added in a later step).
 """
 
-import sys
-from pathlib import Path
+from importlib import import_module
 
 import numpy as np
 import pandas as pd
@@ -20,25 +19,27 @@ from vantage6.algorithm.tools.exceptions import (
     UserInputError,
 )
 
-# Add the algorithm module to the path
-algorithm_path = Path(__file__).parent.parent.parent / "v6-cox-ph"
-sys.path.insert(0, str(algorithm_path))
+# The guards module has relative imports (the Pydantic models in
+# miscellaneous.py), so it must be imported through the installed package,
+# never with a sys.path hack + bare-name import.
+privacy_guards = import_module("v6-cox-ph.privacy_guards")
 
-from privacy_guards import (  # noqa: E402
-    DEFAULT_MIN_RISK_SET_CHANGE,
-    DEFAULT_SAMPLE_SIZE_THRESHOLD,
-    PrivacySettings,
-    bin_times,
-    check_sample_size,
-    drop_incomplete_rows,
-    ensure_spawned_by_central,
-    guarded_risk_set_masks,
-    load_privacy_settings,
-    prepare_time_column,
-    tail_cutoff,
-    validate_expl_vars,
-    validate_iteration_input,
-)
+DEFAULT_MIN_RISK_SET_CHANGE = privacy_guards.DEFAULT_MIN_RISK_SET_CHANGE
+DEFAULT_SAMPLE_SIZE_THRESHOLD = privacy_guards.DEFAULT_SAMPLE_SIZE_THRESHOLD
+PrivacySettings = privacy_guards.PrivacySettings
+bin_times = privacy_guards.bin_times
+check_sample_size = privacy_guards.check_sample_size
+drop_incomplete_rows = privacy_guards.drop_incomplete_rows
+ensure_spawned_by_central = privacy_guards.ensure_spawned_by_central
+guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
+load_privacy_settings = privacy_guards.load_privacy_settings
+prepare_node_data = privacy_guards.prepare_node_data
+prepare_time_column = privacy_guards.prepare_time_column
+tail_cutoff = privacy_guards.tail_cutoff
+validate_expl_vars = privacy_guards.validate_expl_vars
+validate_iteration_input = privacy_guards.validate_iteration_input
+validate_survival_columns = privacy_guards.validate_survival_columns
+from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
 
 
 @pytest.mark.unit
@@ -89,7 +90,7 @@ class TestLoadPrivacySettings:
             load_privacy_settings()
 
     def test_threshold_plus_one_less_than_k(self, monkeypatch):
-        """T + 1 < k raises UserInputError (FR-B2)."""
+        """T + 1 < k raises UserInputError."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "3")
         monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "5")
         with pytest.raises(UserInputError, match="must be"):
@@ -134,7 +135,7 @@ class TestCheckSampleSize:
         assert check_sample_size(df, "event", settings) is False
 
     def test_missing_outcome_col_raises(self, settings):
-        """FR-B5: missing outcome_col raises UserInputError."""
+        """Missing outcome_col raises UserInputError."""
         df = pd.DataFrame({"x": range(20)})
         with pytest.raises(UserInputError, match="Outcome column"):
             check_sample_size(df, "event", settings)
@@ -178,7 +179,7 @@ class TestEnsureSpawnedByCentral:
         ensure_spawned_by_central(client)
 
     def test_non_mock_client_without_token_fails_closed(self):
-        """FR-B1: a non-mock client without _access_token raises AlgorithmError."""
+        """A non-mock client without _access_token raises AlgorithmError."""
         client = self._make_client(token=None)
         with pytest.raises(AlgorithmError, match="No access token"):
             ensure_spawned_by_central(client)
@@ -233,41 +234,258 @@ class TestValidateIterationInput:
     def test_valid_input(self, settings):
         beta = [0.1, -0.2]
         grid = [1.0, 2.0, 3.0]
-        b, g = validate_iteration_input(beta, grid, ["a", "b"], settings)
+        b, c, s, g = validate_iteration_input(beta, [0.0, 0.0], [1.0, 2.0], grid, ["a", "b"], settings)
         np.testing.assert_array_equal(b, [0.1, -0.2])
+        np.testing.assert_array_equal(c, [0.0, 0.0])
+        np.testing.assert_array_equal(s, [1.0, 2.0])
         assert g == [1.0, 2.0, 3.0]
 
     def test_beta_wrong_length(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [1.0], ["a", "b"], settings)
+            validate_iteration_input([0.1, 0.2], [0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
 
     def test_beta_non_finite(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1, np.nan], [1.0], ["a", "b"], settings)
+            validate_iteration_input([0.1, np.nan], [0.0, 0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
 
     def test_unsorted_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [3.0, 1.0], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [3.0, 1.0], ["a"], settings)
 
     def test_duplicate_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [1.0, 1.0], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [1.0, 1.0], ["a"], settings)
 
     def test_nan_in_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [1.0, float("nan")], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [1.0, float("nan")], ["a"], settings)
 
     def test_empty_grid(self, settings):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [], ["a"], settings)
+            validate_iteration_input([0.1], [0.0], [1.0], [], ["a"], settings)
 
     def test_off_grid_with_binning(self, settings_binned):
         with pytest.raises(UserInputError):
-            validate_iteration_input([0.1], [5.0], ["a"], settings_binned)
+            validate_iteration_input([0.1], [0.0], [1.0], [5.0], ["a"], settings_binned)
 
     def test_on_grid_with_binning(self, settings_binned):
-        b, g = validate_iteration_input([0.1], [10.0, 20.0], ["a"], settings_binned)
+        b, c, s, g = validate_iteration_input([0.1], [0.0], [1.0], [10.0, 20.0], ["a"], settings_binned)
         assert g == [10.0, 20.0]
+
+    def test_centre_wrong_length(self, settings):
+        with pytest.raises(UserInputError, match="centre must have length"):
+            validate_iteration_input([0.1, 0.2], [0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
+
+    def test_centre_non_finite(self, settings):
+        with pytest.raises(UserInputError, match="centre contains non-finite"):
+            validate_iteration_input([0.1, 0.2], [np.nan, 0.0], [1.0, 1.0], [1.0], ["a", "b"], settings)
+
+    def test_scale_wrong_length(self, settings):
+        with pytest.raises(UserInputError, match="scale must have length"):
+            validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0], [1.0], ["a", "b"], settings)
+
+    def test_scale_non_positive(self, settings):
+        with pytest.raises(UserInputError, match="scale must be strictly positive"):
+            validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0, 0.0], [1.0], ["a", "b"], settings)
+
+    def test_scale_non_finite(self, settings):
+        with pytest.raises(UserInputError, match="scale contains non-finite"):
+            validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0, np.inf], [1.0], ["a", "b"], settings)
+
+
+@pytest.mark.unit
+class TestPrepareNodeData:
+    """The shared node-preparation step runs every guard, in order.
+
+    This is the executable form of the AGENTS.md rule that any step that
+    removes rows runs before check_sample_size and identically in every
+    partial: if the order or membership of this sequence changes, these
+    tests fail.
+    """
+
+    @pytest.fixture
+    def node_df(self):
+        return pd.DataFrame(
+            {
+                "time": [float(i) for i in range(1, 31)],
+                "event": [1] * 15 + [0] * 15,
+                "age": [50.0] * 30,
+                "treatment": [0, 1] * 15,
+            }
+        )
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def default_env(self, monkeypatch):
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+
+    def _record_guard_calls(self, monkeypatch):
+        """Wrap the guards so their call order is recorded."""
+        calls = []
+        for name in [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "validate_survival_columns",
+            "select_rows",
+            "check_sample_size",
+        ]:
+            original = getattr(privacy_guards, name)
+
+            def make_wrapper(guard_name, guard_original):
+                def wrapper(*args, **kwargs):
+                    calls.append(guard_name)
+                    return guard_original(*args, **kwargs)
+
+                return wrapper
+
+            monkeypatch.setattr(privacy_guards, name, make_wrapper(name, original))
+        return calls
+
+    def test_guard_order_with_expl_vars(self, client, node_df, default_env, monkeypatch):
+        """All guards run, in the documented order."""
+        calls = self._record_guard_calls(monkeypatch)
+        df, settings, threshold_met = prepare_node_data(
+            client, node_df, "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "validate_survival_columns",
+            "select_rows",
+            "check_sample_size",
+        ]
+        assert threshold_met is True
+        assert len(df) == 30
+
+    def test_guard_order_without_expl_vars(self, client, node_df, default_env, monkeypatch):
+        """Without expl_vars, validate_expl_vars is skipped; order is stable."""
+        calls = self._record_guard_calls(monkeypatch)
+        _, _, threshold_met = prepare_node_data(client, node_df, "time", "event", [], need_outcome=True)
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "drop_incomplete_rows",
+            "validate_survival_columns",
+            "select_rows",
+            "check_sample_size",
+        ]
+        assert threshold_met is True
+
+    def test_hook_runs_before_threshold(self, client, node_df, default_env, monkeypatch):
+        """Rows removed by the select_rows hook count against the threshold."""
+        monkeypatch.setattr(
+            privacy_guards,
+            "select_rows",
+            lambda df: df.iloc[:5],
+        )
+        _, _, threshold_met = prepare_node_data(
+            client, node_df, "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is False
+
+    def test_need_outcome_false_checks_rows_only(self, client, default_env, monkeypatch):
+        """need_outcome=False checks rows only (perform_iteration today)."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
+        df = pd.DataFrame({"time": [1.0] * 30, "age": [50.0] * 30})
+        _, _, threshold_met = prepare_node_data(client, df, "time", None, ["age"], need_outcome=False)
+        assert threshold_met is True
+        df_small = pd.DataFrame({"time": [1.0] * 5, "age": [50.0] * 5})
+        _, _, threshold_met = prepare_node_data(client, df_small, "time", None, ["age"], need_outcome=False)
+        assert threshold_met is False
+
+    def test_nan_rows_dropped_before_threshold(self, client, default_env, monkeypatch):
+        """Rows with NaN in any analysed column are dropped before the threshold."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "12")
+        df = pd.DataFrame(
+            {
+                "time": [1.0] * 30,
+                "event": [1] * 15 + [0] * 15,
+                "age": [50.0] * 30,
+                "treatment": [0, 1] * 15,
+            }
+        )
+        # 12 rows get NaN in an analysed column: 15 events and 30 rows would
+        # both pass threshold 12, but after dropping only 18 rows / 13 events
+        # remain — rows still pass, events (13 > 12) pass too; push one more
+        # NaN onto an event row to make events 12, which must fail (>12).
+        df.loc[0:11, "age"] = np.nan
+        df.loc[12, "age"] = np.nan  # row 12 is an event row
+        _, _, threshold_met = prepare_node_data(client, df, "time", "event", ["age", "treatment"], need_outcome=True)
+        assert threshold_met is False
+
+
+@pytest.mark.unit
+class TestValidateSurvivalColumns:
+    """Tests for validate_survival_columns (input rules, no value echoes)."""
+
+    def _df(self, time=None, event=None):
+        time = [1.0, 2.0, 3.0, 4.0] if time is None else time
+        event = [1, 0, 1, 0] if event is None else event
+        return pd.DataFrame({"time": time, "event": event})
+
+    def test_valid_input_passes(self):
+        validate_survival_columns(self._df(), "time", "event")
+
+    def test_boolean_outcome_passes(self):
+        validate_survival_columns(self._df(event=[True, False, True, False]), "time", "event")
+
+    def test_missing_time_column_raises(self):
+        with pytest.raises(UserInputError, match="Time column 'time' not found"):
+            validate_survival_columns(pd.DataFrame({"event": [1]}), "time", "event")
+
+    def test_missing_outcome_column_raises(self):
+        with pytest.raises(UserInputError, match="Outcome column 'event' not found"):
+            validate_survival_columns(pd.DataFrame({"time": [1.0]}), "time", "event")
+
+    def test_no_outcome_col_skips_outcome_checks(self):
+        df = pd.DataFrame({"time": [1.0, 2.0]})
+        validate_survival_columns(df, "time", None)
+
+    def test_string_time_raises(self):
+        with pytest.raises(UserInputError, match="Time column 'time' must be numeric"):
+            validate_survival_columns(self._df(time=["a", "b", "c", "d"]), "time", "event")
+
+    def test_negative_time_raises(self):
+        with pytest.raises(UserInputError, match="negative"):
+            validate_survival_columns(self._df(time=[1.0, -2.0, 3.0, 4.0]), "time", "event")
+
+    def test_infinite_time_raises(self):
+        with pytest.raises(UserInputError, match="non-finite"):
+            validate_survival_columns(self._df(time=[1.0, np.inf, 3.0, 4.0]), "time", "event")
+
+    def test_outcome_coded_1_2_raises(self):
+        with pytest.raises(UserInputError, match="only contain 0 and 1"):
+            validate_survival_columns(self._df(event=[1, 2, 1, 0]), "time", "event")
+
+    def test_string_outcome_raises(self):
+        with pytest.raises(UserInputError, match="numeric or boolean"):
+            validate_survival_columns(self._df(event=["yes", "no", "yes", "no"]), "time", "event")
+
+    def test_messages_never_echo_values(self):
+        """Error messages name columns and dtypes, never data values."""
+        cases = [
+            (self._df(time=[1.0, -123.456, 3.0, 4.0]), "time", "event", "-123.456"),
+            (self._df(event=[1, 7, 1, 0]), "time", "event", "'7'"),
+        ]
+        for df, time_col, outcome_col, forbidden in cases:
+            with pytest.raises(UserInputError) as exc_info:
+                validate_survival_columns(df, time_col, outcome_col)
+            assert forbidden not in str(exc_info.value)
 
 
 @pytest.mark.unit
@@ -315,7 +533,7 @@ class TestTailCutoff:
         assert tail_cutoff(times, k=3) == 3.0
 
     def test_fewer_than_k_raises(self):
-        """FR-B2: fewer than k valid times raises PrivacyViolation."""
+        """Fewer than k valid times raises PrivacyViolation."""
         times = pd.Series([1.0, 2.0])
         with pytest.raises(PrivacyViolation):
             tail_cutoff(times, k=5)
@@ -437,7 +655,7 @@ class TestGuardedRiskSetMasks:
 
 @pytest.mark.unit
 class TestValidateExplVars:
-    """Tests for validate_expl_vars (FR-B3)."""
+    """Tests for validate_expl_vars."""
 
     def test_valid_vars(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50], "tx": [1]})
@@ -466,7 +684,7 @@ class TestValidateExplVars:
 
 @pytest.mark.unit
 class TestDropIncompleteRows:
-    """Tests for drop_incomplete_rows (FR-B4)."""
+    """Tests for drop_incomplete_rows."""
 
     def test_drops_nan_rows(self):
         df = pd.DataFrame({"time": [1.0, np.nan, 3.0], "event": [1, 1, 0], "age": [50, 60, np.nan]})
@@ -484,3 +702,68 @@ class TestDropIncompleteRows:
         df = pd.DataFrame({"time": [1.0, 2.0], "event": [1, 0]})
         out = drop_incomplete_rows(df, ["time", "missing"])
         assert len(out) == 2
+
+
+@pytest.mark.unit
+class TestRiskSetEquivalence:
+    """The vectorised aggregates equal the reference mask implementation."""
+
+    def _random_case(self, seed: int, n_rows: int, n_grid: int, n_covs: int, k: int, tie: bool):
+        """Build a random times/grid/covariates case with optional ties."""
+        rng = np.random.default_rng(seed)
+        grid = np.sort(rng.choice(np.arange(1, n_grid + 1) * 1.0, size=n_grid // 2, replace=False))
+        times = rng.uniform(0.5, float(grid[-1]) + 1.0, size=n_rows)
+        if tie:
+            # Put some rows exactly on grid points and duplicate some times
+            on_grid = rng.choice(len(grid), size=min(5, n_rows))
+            times[on_grid] = grid[on_grid]
+            times[: min(3, n_rows)] = times[0]
+        X = rng.normal(size=(n_rows, n_covs))
+        beta = rng.normal(size=n_covs)
+        return pd.Series(times), grid.tolist(), X, beta
+
+    @pytest.mark.parametrize("k", [1, 3, 5])
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_matches_reference(self, k, seed):
+        """agg1/agg2/agg3 equal the mask implementation to rtol=1e-12."""
+        from tests.unit.reference_risk_sets import mask_based_aggregates
+
+        times, grid, X, beta = self._random_case(seed, n_rows=60, n_grid=30, n_covs=3, k=k, tie=True)
+
+        ref1, ref2, ref3 = mask_based_aggregates(times, grid, k, X, beta)
+        new1, new2, new3 = guarded_risk_set_aggregates(times, grid, k, X, beta)
+
+        np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(new2, ref2, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(new3, ref3, rtol=1e-12, atol=1e-14)
+
+    def test_rows_off_grid_and_before_grid(self):
+        """Rows between grid points and before the first grid point count correctly."""
+        from tests.unit.reference_risk_sets import mask_based_aggregates
+
+        times = pd.Series([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 7.5])
+        grid = [1.0, 2.0, 3.0, 5.0]
+        X = np.arange(14, dtype=float).reshape(7, 2)
+        beta = np.array([0.1, -0.2])
+
+        for k in (1, 3):
+            ref1, ref2, ref3 = mask_based_aggregates(times, grid, k, X, beta)
+            new1, new2, new3 = guarded_risk_set_aggregates(times, grid, k, X, beta)
+            np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(new2, ref2, rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(new3, ref3, rtol=1e-12, atol=1e-14)
+
+    def test_empty_risk_sets_match_reference(self):
+        """Grid points beyond all rows give zero aggregates, as the masks did."""
+        from tests.unit.reference_risk_sets import mask_based_aggregates
+
+        times = pd.Series([1.0, 2.0, 3.0])
+        grid = [1.0, 5.0, 9.0]
+        X = np.array([[0.0, 1.0], [1.0, 0.0], [2.0, 2.0]])
+        beta = np.zeros(2)
+
+        ref1, ref2, ref3 = mask_based_aggregates(times, grid, 1, X, beta)
+        new1, new2, new3 = guarded_risk_set_aggregates(times, grid, 1, X, beta)
+        np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
+        # The grid points beyond every row have empty risk sets
+        assert new1[1] == 0.0 and new1[2] == 0.0

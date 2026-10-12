@@ -1,6 +1,9 @@
 .git
 .github
 .idea
+.junie
+.mypy_cache
+.pytest_cache
 tests
 docs
 *.egg-info
@@ -8,3 +11,4 @@ __pycache__
 *.pyc
 venv
 .venv
+scripts

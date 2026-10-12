@@ -8,75 +8,126 @@ working in this repository. Read this before touching node-side code.
 A federated Cox proportional hazards model (Breslow ties) for
 [vantage6](https://vantage6.ai) 4.14–4.15 (the range pinned in
 ``pyproject.toml`` and tested in CI). One Docker image exposes a single
-``central`` aggregator function and three ``partial`` functions that run on
+``central`` aggregator function and two ``partial`` functions that run on
 data stations. The partials share only aggregated quantities with the
 central aggregator; no row-level data leaves a node.
+
+## Scope
+
+This repository is the **vanilla** Cox-PH algorithm. Project-specific
+features — data filtering, recoding, project privacy tooling, other data
+sources — do not belong here; they go in project branches or forks. Vanilla
+never depends on project code, and project code never flows back.
+
+## Building on this algorithm
+
+Projects build on this algorithm in a fork or a stacked branch. To stay
+compatible with that:
+
+- Any step that removes rows runs **before** ``check_sample_size`` and
+  identically in every partial: put project row selection at the marked
+  ``select_rows`` hook inside the shared ``prepare_node_data``. That way
+  every aggregate central combines comes from the same row set on each
+  node, and rows the project removes still count against the threshold.
+- Never weaken the vanilla guards: the parent-task guard, the sample-size
+  threshold and the logging rules stay as they are.
+- A change to the wire contract is a **major** version bump, and the commit
+  message starts with ``BREAKING(wire):``.
 
 ## Repository layout
 
 ```
 v6-cox-ph/                 algorithm package (the hyphenated name is intentional)
   central.py               aggregator: dispatches sub-tasks, Newton-Raphson loop
-  partial.py               node-side: get_unique_event_times, compute_summed_z,
-                           perform_iteration (all decorated, all guarded)
+  partial.py               node-side: compute_summed_z, perform_iteration
+                           (both decorated, both guarded)
   coxph_logic.py           pure math: derivatives, Newton step, model results
   privacy_guards.py        pure guards: parent-task check, thresholds, binning,
-                           tail censoring, risk-set jump guard
-  miscellaneous.py         pydantic input model, data-quality helpers
+                           tail censoring, vectorised risk-set aggregates with
+                           the jump guard
+  miscellaneous.py         pydantic models for the wire contract (input,
+                           iteration input, partial results),
+                           data-quality helpers
   __init__.py              exports central and the partials
 algorithm_store.json       wire contract — function names, arguments, types
 Dockerfile                 container image; entrypoint is
                            ``wrap_algorithm`` from vantage6.algorithm.tools.wrap
 pyproject.toml             dependencies, dev/lint extras, pytest config
 tests/
-  unit/                    no-Docker tests (math, guards, mock pipeline)
+  unit/                    no-Docker tests (math, guards, mock pipeline;
+                           reference_risk_sets.py holds the pre-vectorisation
+                           mask implementation for equivalence tests)
   integration/             Docker + v6 dev network tests
   data/                    coxph_test_data_{1,2,3}.csv, node/store configs
   conftest.py              Docker/vantage6 fixtures, markers
+scripts/                   benchmark_risk_sets.py, bias_study.py (not
+                           collected by pytest)
 docs/coxph/                Privacy.rst, Validation.rst, Usage.rst, etc.
-.github/workflows/         test-suite.yml (test + lint + security), release.yaml
+.github/workflows/         test-suite.yml (test + lint + security + docker),
+                           security-scan.yml (weekly), release.yaml
+.github/dependabot.yml     pip, Docker and action updates
 ```
 
 ## How the algorithm executes
 
 ```
-user task → central → get_unique_event_times → compute_summed_z
+user task → central → compute_summed_z
            → perform_iteration × N (Newton–Raphson)
 ```
 
 - ``central`` is decorated with ``@algorithm_client`` and is the only function
   a user should call. It validates input, collects organisation IDs,
   dispatches sub-tasks, runs the Newton–Raphson loop, and returns the model.
-- The three partials are decorated with ``@data(1)`` and ``@algorithm_client``.
+- The two partials are decorated with ``@data(1)`` and ``@algorithm_client``.
   They run on each node and return aggregates. Their keyword arguments
   **must match** ``algorithm_store.json`` — that file is the wire contract.
   Each partial declares exactly one database there, matching ``@data(1)``.
-- A node that fails the sample-size threshold is handled differently per
-  partial, on purpose. ``get_unique_event_times`` returns the marker
-  ``{"N-Threshold not met": org_id}`` so that ``central`` can exclude that
-  organisation and retry (at most three rounds). ``compute_summed_z`` and
-  ``perform_iteration`` raise ``PrivacyThresholdViolation``, which stops the
-  whole analysis. That can still happen for a node that passed the first
-  check, once rows with NaN in ``expl_vars`` are dropped. Do not "unify" the
-  two without changing ``central`` to match.
+- A node that fails the sample-size threshold raises
+  ``PrivacyThresholdViolation`` in every partial, which stops the whole
+  analysis; there is no automatic exclusion and no retry round. Researchers
+  select organisations explicitly via ``organization_ids``.
 - ``central`` builds the event-time grid and per-time event counts
   (``aggregated_time_events``) from the ``times`` returned by
-  ``compute_summed_z``, **not** from ``get_unique_event_times``. Only
-  ``compute_summed_z`` also drops rows with NaN in ``expl_vars``, so only its
+  ``compute_summed_z``. It drops rows with NaN in ``expl_vars``, so its
   counts are consistent with ``z_sum`` and the risk sets.
-  ``get_unique_event_times`` is used for node exclusion only.
+- The covariates are standardised before iterating: ``central`` derives the
+  pooled covariate centre and scale over the event cases from ``z_sum`` and
+  the sum of squares (both returned by ``compute_summed_z``, rounded to two
+  significant figures), nodes fit on ``(x - centre) / scale`` and ``central``
+  back-transforms the reported coefficients, standard errors and covariance.
+  The partial likelihood is invariant to this affine transform; centring
+  prevents ``exp`` overflow and scaling fixes the Hessian conditioning.
+- ``compute_summed_z`` also returns the node's privacy settings
+  (configuration, not data); the result summary based on them is built in a
+  later step.
+- ``central`` optionally takes ``covariate_profiles`` (validated by the
+  Pydantic input model: keys must be known explanatory variables) and
+  returns ``baseline_cumulative_hazard`` and ``survival_curves`` computed
+  centrally from the pooled event counts and risk-set sums — no new partial,
+  no new data leaves a node.
+- ``perform_iteration`` receives ``outcome_col`` and drops rows with a
+  missing outcome, so every partial analyses the same rows; a node that
+  passed ``compute_summed_z`` cannot fail there — its threshold check is
+  defence in depth only.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
-  evaluated at the same ``beta``. Results include ``converged`` and
-  ``n_iterations``.
+  evaluated at the same ``beta`` — the last *accepted* evaluation. The
+  log-likelihood is computed centrally each iteration from the aggregates
+  already collected; when it decreases the Newton step is halved and the
+  previous accepted state is kept (a decrease is only visible at the next
+  round-trip). Results include ``converged`` and ``n_iterations``, plus
+  ``log_likelihood``, ``log_likelihood_null``, ``lr_statistic``,
+  ``lr_p_value``, ``n_events``, ``covariance`` and ``algorithm_version``.
 - Results must be JSON-serialisable (they travel over the vantage6 wire).
-- ``MAX_ITERATIONS`` (module-level in ``central.py``) controls the epoch
+- ``MAX_ITERATIONS`` (module-level in ``central.py``, 20) controls the epoch
   budget; tests monkeypatch it to force non-convergence.
 
 ## Environment and commands
 
-Python 3.10. Install in editable mode with the test (``dev``) and lint
-(``lint``) extras::
+Python 3.10 or later. The container image runs Python 3.12; the code
+supports ``>= 3.10`` until 3.10 is dropped deliberately (then ``requires-python``
+and Black's ``target-version`` move up together). Install in editable mode
+with the test (``dev``) and lint (``lint``) extras::
 
     pip install -e .[dev,lint]
 
@@ -103,9 +154,20 @@ Lint and format (mirrors ``.github/workflows/test-suite.yml``; Black reads
     mypy v6_cox_ph --ignore-missing-imports --follow-imports=silent
     rm v6_cox_ph
 
-Build the Docker image::
+Build the Docker image (Alpine two-stage; the base is pinned by digest and
+kept current by Dependabot)::
 
     docker build -t v6-cox-ph:ci-test .
+
+The runtime dependencies are pinned in ``requirements-lock.txt`` and
+installed as constraints (``-c``), not hashes. Regenerate after a dependency
+change with::
+
+    uv pip compile pyproject.toml --python-version 3.12 \
+        --python-platform x86_64-unknown-linux-musl -o requirements-lock.txt
+
+The lock targets musl/Python 3.12 (what the image runs); the CI test matrix
+deliberately runs glibc and unlocked to test the declared range.
 
 ## Testing conventions
 
@@ -124,8 +186,8 @@ Build the Docker image::
 - ``lifelines.CoxPHFitter`` is the reference, but it uses Efron ties while
   this algorithm uses Breslow ties — expect small differences and use the
   tolerances already in the tests.
-- Test data lives in ``tests/data/``. Node 3 has too few events and is the
-  small-node exclusion case.
+- Test data lives in ``tests/data/``. Node 3 has too few events: a run that
+  includes it fails closed with ``PrivacyThresholdViolation``.
 - Exactness tests disable the risk-set guards with
   ``COXPH_MIN_RISK_SET_CHANGE=1``; the default-guard test asserts the
   privacy property separately.
@@ -133,16 +195,23 @@ Build the Docker image::
 ## Privacy rules (non-negotiable for node-side code)
 
 - **Never return row-level data** from a partial. Only aggregates leave a
-  node.
-- **Every partial keeps its guards**, in order:
-  ``ensure_spawned_by_central`` → ``load_privacy_settings``
-  → ``validate_expl_vars`` (``compute_summed_z``, ``perform_iteration``)
-  → ``drop_incomplete_rows`` → ``check_sample_size``
-  → ``validate_iteration_input`` (``perform_iteration`` only)
-  → ``prepare_time_column`` → (work; ``perform_iteration`` builds its risk
-  sets with ``guarded_risk_set_masks``). ``get_unique_event_times`` also
-  runs ``check_data_quality`` before ``drop_incomplete_rows``. Do not
-  reorder or skip any of them.
+  node. The result dicts of the partials are built from the Pydantic
+  result models, so their keys and nesting are pinned in one place.
+- **Every partial prepares its data through the shared**
+  ``prepare_node_data(client, df, time_col, outcome_col, expl_vars, *,
+  need_outcome)`` (in ``privacy_guards.py``), which runs the guards in
+  order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
+  ``validate_expl_vars`` (when ``expl_vars`` are given) →
+  ``drop_incomplete_rows`` → ``validate_survival_columns`` →
+  ``select_rows`` (the marked hook for project row selection) →
+  ``check_sample_size``. Do not reorder or skip any of them; the unit
+  tests assert the order. ``validate_iteration_input``
+  (``perform_iteration`` only) and ``prepare_time_column`` run afterwards.
+  ``perform_iteration`` builds its aggregates with the vectorised
+  ``guarded_risk_set_aggregates`` (``searchsorted``/``bincount``/reverse
+  cumsum; the jump guard comes from the bucket counts) — the previous mask
+  implementation lives on in ``tests/unit/reference_risk_sets.py`` as the
+  equivalence-test reference. ``agg2`` travels as a plain (T x p) list.
 - **No new partial** without a sample-size threshold, parent-task guard and
   documentation in ``Privacy.rst``.
 - **Do not log data values or counts**; use ``info``/``warn`` for status
@@ -163,36 +232,51 @@ Build the Docker image::
 ## Coding conventions
 
 - numpy/pandas vectorised maths; avoid per-row Python loops in the hot path.
-- Pydantic input validation via ``CoxPHInput`` / ``validate_coxph_input``.
+- Pydantic validation of everything that crosses the wire: ``CoxPHInput``,
+  ``IterationInput``, ``SummedZResult``, ``IterationResult``.
 - vantage6 logging: ``info``/``warn``/``error`` from
   ``vantage6.algorithm.tools.util``.
 - Raise vantage6 exception types: ``UserInputError``,
   ``PrivacyThresholdViolation``, ``PrivacyViolation``, ``AlgorithmError``.
 - UK English in prose, comments, docstrings and log messages (organisation,
   behaviour, optimise). Identifiers keep vantage6's US spelling and must not
-  be "corrected": ``organization_ids``, ``client.organization_id``,
-  ``client.organization.list()``, ``included_organizations`` and
-  ``excluded_organizations`` are part of the wire contract or the vantage6
-  API.
+  be "corrected": ``organization_ids``, ``client.organization_id`` and
+  ``client.organization.list()`` are part of the wire contract or the
+  vantage6 API.
 - Black formatting, line length 120, target ``py310`` (configured in
   ``[tool.black]`` in ``pyproject.toml``); flake8 uses the same 120 limit.
 
 ## Branches, docs and releases
 
-- ``standard-coxph`` — stable; the default branch and PR target. There is no
-  ``main`` branch.
-- ``phase1-algorithm-improvements`` — mathematical and privacy hardening of
-  the standard algorithm (convergence, result validation, node-side guards).
-- ``phase2-strong-aya`` — STRONG AYA guards and ``safe_log``; keep changes
-  portable across branches.
+- ``standard-coxph`` is the default branch and the PR target.
+- Semantic versioning. A wire-contract change (partial signatures, result
+  keys, ``algorithm_store.json``) is a major bump and its commit message
+  starts with ``BREAKING(wire):``.
+- Releases are git tags. ``release.yaml`` publishes
+  ``ghcr.io/<owner>/<repository>-<branch>:<tag>`` where ``<branch>`` is the
+  branch whose **tip** is the tagged commit; it fails clearly when none or
+  several branches match, and a ``workflow_dispatch`` input is the escape
+  hatch for a tag that is no longer a branch tip.
 - Update ``docs/coxph`` and ``algorithm_store.json`` whenever a signature or
   output field changes.
-- CI lives in ``.github/workflows``. ``test-suite.yml`` (test, lint,
-  security) runs on pushes and PRs to ``standard-coxph``, ``phase1-…``,
-  ``phase2-…`` and ``main`` (kept in case the default branch is renamed).
-  ``release.yaml`` runs when a git tag is pushed and publishes
-  ``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the
-  branch that contains the tagged commit.
+- CI lives in ``.github/workflows`` and runs with ``permissions:
+  contents: read``:
+  - ``test-suite.yml`` (on pushes to the default branch, every pull request
+    and manual dispatch) runs the ``test`` matrix (Python 3.10/3.12 ×
+    vantage6 4.14/4.15), ``lint``, ``security`` (Bandit ``-ll`` and
+    ``pip-audit``; both must be able to fail — a finding is fixed or
+    suppressed with a justified ``# nosec`` comment, never ``|| true``) and
+    a ``docker`` build + import smoke-test job.
+  - ``security-scan.yml`` runs weekly (Mondays): ``pip-audit`` on
+    ``requirements-lock.txt`` (suppressions in ``.pip-audit-ignore``, each
+    with a justification and an expiry date — currently the exact pins
+    ``click``, ``cryptography`` and ``pyjwt`` imposed by
+    ``vantage6-common``), Bandit and Trivy (HIGH/CRITICAL,
+    ``ignore-unfixed``) on the latest released image; failures open a
+    ``security-scan`` issue. Suppressions are never replaced by lowering a
+    severity threshold.
+  - ``.github/dependabot.yml`` keeps pip, Docker (base-image digest) and the
+    pinned action SHAs current; actions are pinned by commit SHA.
 
 ## Do not
 

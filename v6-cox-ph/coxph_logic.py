@@ -8,10 +8,10 @@ separated from the orchestration logic in central.py and partial.py.
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2, norm
+from vantage6.algorithm.tools.exceptions import AlgorithmError
+from vantage6.algorithm.tools.util import info, warn
 
-from vantage6_strongaya_general.miscellaneous import safe_log
-
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def compute_derivatives(
@@ -49,7 +49,7 @@ def compute_derivatives(
         - secondary_derivative: Second derivative (Hessian) of the partial
           log-likelihood.
     """
-    safe_log("info", "Computing derivatives for Cox-PH model")
+    info("Computing derivatives for Cox-PH model")
 
     n_covs = len(z_sum)
     n_times = len(aggregated_time_events)
@@ -59,7 +59,7 @@ def compute_derivatives(
     freqs = aggregated_time_events["freq"].to_numpy()
 
     if len(summed_agg1) != n_times:
-        raise ValueError(
+        raise AlgorithmError(
             f"Length mismatch: aggregated_time_events has {n_times} rows but "
             f"summed_agg1 has {len(summed_agg1)} entries"
         )
@@ -71,9 +71,11 @@ def compute_derivatives(
         s2_value = np.asarray(summed_agg2[pos])
         s3_value = np.asarray(summed_agg3[pos])
 
-        if s1_value <= 0 or np.isnan(s1_value):
-            safe_log("warning", f"Invalid s1_value at position {pos}: {s1_value}")
-            continue
+        if not (s1_value > 0) or np.isnan(s1_value):
+            raise AlgorithmError(
+                f"Risk-set sum S0 is not positive at grid position {pos}; "
+                f"the aggregated risk sets are inconsistent."
+            )
 
         # Primary derivative component
         s1 = freq * (s2_value / s1_value)
@@ -135,7 +137,7 @@ def compute_model_results(
     Dict[str, Any]
         Dictionary containing model coefficients, statistics, and warnings.
     """
-    safe_log("info", "Computing final model results")
+    info("Computing final model results")
 
     n_covs = len(beta)
 
@@ -145,7 +147,7 @@ def compute_model_results(
         covariance = np.linalg.inv(-secondary_derivative)
         serrors = np.array([np.sqrt(covariance[k, k]) for k in range(covariance.shape[0])])
     except np.linalg.LinAlgError as e:
-        safe_log("warning", f"Could not invert Hessian matrix: {e}")
+        warn(f"Could not invert Hessian matrix: {e}")
         covariance = np.zeros((n_covs, n_covs))
         serrors = np.array([np.nan] * n_covs)
 
@@ -166,8 +168,8 @@ def compute_model_results(
     try:
         wald_statistic = np.dot(beta, np.dot(-secondary_derivative, beta))
         overall_p_value = float(chi2.sf(wald_statistic, degrees_of_freedom))
-    except Exception as e:
-        safe_log("warning", f"Could not compute Wald statistic: {e}")
+    except (ValueError, FloatingPointError) as e:
+        warn(f"Could not compute Wald statistic: {e}")
         overall_p_value = None
 
     # AIC for model comparison
@@ -189,13 +191,10 @@ def compute_model_results(
 
         aic = float(-2 * log_likelihood + 2 * n_params)
     except (ValueError, IndexError, FloatingPointError) as e:
-        safe_log("warning", f"Could not compute AIC due to numerical/data issue: {e}")
-        aic = None
-    except Exception as e:
-        safe_log("warning", f"Unexpected error computing AIC: {e}")
+        warn(f"Could not compute AIC due to numerical/data issue: {e}")
         aic = None
 
-    # Results data — full precision (FR-A4); rounding is a client concern.
+    # Results data — full precision; rounding is a client concern.
     results_data = {
         "Coef": beta,
         "Exp(coef)": np.exp(beta),
@@ -223,7 +222,7 @@ def compute_model_results(
                 f"Warning: Covariate '{var_name}' may perfectly predict the event "
                 f"(coef={coef}, SE={se}). Results may be unreliable."
             )
-            safe_log("warning", msg)
+            warn(msg)
             warnings.append(msg)
 
     if not converged:
@@ -246,6 +245,151 @@ def compute_model_results(
         "n_params": int(len(beta)),
         "warnings": warnings,
     }
+
+
+def partial_log_likelihood(
+    beta: np.ndarray,
+    z_sum: "pd.Series | np.ndarray",
+    aggregated_time_events: pd.DataFrame,
+    summed_agg1: np.ndarray,
+) -> float:
+    """
+    The Breslow partial log-likelihood at ``beta``, from pooled aggregates.
+
+    ``ell(beta) = beta . z_sum - sum_j d_j * log S0(t_j)`` where ``d_j`` is the
+    pooled event count at grid time ``t_j`` and ``S0(t_j)`` the aggregated
+    risk-set sum at the same ``beta``. Everything it needs is already
+    collected, so no extra round-trip is required.
+
+    Raises
+    ------
+    AlgorithmError
+        If any risk-set sum is not positive or not finite.
+    """
+    beta = np.asarray(beta, dtype=float)
+    s0 = np.asarray(summed_agg1, dtype=float)
+    if len(s0) != len(aggregated_time_events):
+        raise AlgorithmError(
+            f"Length mismatch: aggregated_time_events has {len(aggregated_time_events)} "
+            f"rows but summed_agg1 has {len(s0)} entries"
+        )
+    if np.any(s0 <= 0) or not np.all(np.isfinite(s0)):
+        raise AlgorithmError("A risk-set sum S0 is not positive; cannot evaluate the log-likelihood.")
+    freqs = aggregated_time_events["freq"].to_numpy(dtype=float)
+    return float(np.dot(beta, np.asarray(z_sum, dtype=float)) - np.sum(freqs * np.log(s0)))
+
+
+def pooled_standardisation(z_sum, sum_squares, n_events: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The pooled covariate centre and scale over the event cases.
+
+    ``centre = z_sum / n_events`` and ``scale = sqrt(sum_squares / n_events -
+    centre^2)``, both rounded to two significant figures so the nodes learn
+    less about the pooled event-case covariate distribution. A covariate
+    with no spread over the events gets scale 1 (with a warning); the fit is
+    unaffected either way because the partial likelihood is invariant to the
+    shared affine transform.
+    """
+    z = np.asarray(z_sum, dtype=float)
+    squares = np.asarray(sum_squares, dtype=float)
+    centre = z / n_events
+    variance = squares / n_events - centre**2
+    scale = np.sqrt(np.maximum(variance, 0.0))
+    if np.any(scale <= 0):
+        warn("A covariate has no spread over the event cases; using scale 1 for it.")
+        scale = np.where(scale > 0, scale, 1.0)
+    return round_sig(centre), round_sig(scale)
+
+
+def survival_curves(
+    freqs,
+    summed_agg1,
+    grid_times,
+    beta,
+    centre: np.ndarray,
+    scale: np.ndarray,
+    expl_vars: List[str],
+    covariate_profiles: Optional[List[Dict[str, float]]],
+) -> tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+    """
+    Breslow baseline cumulative hazard and survival curves, all centrally.
+
+    ``H0(t) = sum_{t_j <= t} d_j / S0(t_j)`` with ``d_j`` the pooled event
+    count per grid time and ``S0(t_j)`` the risk-set sum at the reported
+    (standardised-space) beta; the baseline profile is the covariate centre
+    (``x* = 0``). Each requested profile gets
+    ``S(t | x) = S0(t) ** exp(beta . (x - centre) / scale)``; profile
+    variables left out are taken at the centre. Everything is computed from
+    quantities that are already aggregated: no new data leaves a node.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        The baseline cumulative hazard and the survival curves, both JSON
+        objects keyed by (stringified) grid time.
+    """
+    d = np.asarray(freqs, dtype=float)
+    s0 = np.asarray(summed_agg1, dtype=float)
+    h0_steps = np.where(d > 0, d / s0, 0.0)
+    h0 = np.cumsum(h0_steps)
+
+    baseline_cumulative_hazard = {str(t): float(h) for t, h in zip(grid_times, h0)}
+    curves: Dict[str, Dict[str, float]] = {"0": {str(t): float(np.exp(-h)) for t, h in zip(grid_times, h0)}}
+
+    for profile_index, profile in enumerate(covariate_profiles or [], start=1):
+        x_star = np.array(
+            [(float(profile.get(var, centre[j])) - centre[j]) / scale[j] for j, var in enumerate(expl_vars)]
+        )
+        profile_exponent = float(np.exp(np.dot(beta, x_star)))
+        curves[str(profile_index)] = {str(t): float(np.exp(-h * profile_exponent)) for t, h in zip(grid_times, h0)}
+
+    return baseline_cumulative_hazard, curves
+
+
+def round_sig(values, digits: int = 2) -> np.ndarray:
+    """Round to ``digits`` significant figures.
+
+    The pooled covariate centre and scale are shared with the nodes;
+    rounding to two significant figures means the nodes learn less about
+    the pooled event-case covariate distribution.
+    """
+    arr = np.asarray(values, dtype=float)
+    rounded = np.zeros_like(arr)
+    nonzero = arr != 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        exponent = np.floor(np.log10(np.abs(arr[nonzero])))
+        factor = 10.0 ** (digits - 1 - exponent)
+        rounded[nonzero] = np.round(arr[nonzero] * factor) / factor
+    return rounded
+
+
+def back_transform_results(model: dict, scale) -> dict:
+    """Map model statistics from the standardised space back to the original
+    covariates.
+
+    ``perform_iteration`` computes its aggregates on ``(x - centre) / scale``;
+    the fitted coefficients in that space map back as ``beta / scale``, the
+    standard errors as ``SE / scale`` and the covariance as
+    ``C / (scale scale^T)``. The Z statistic and p-values are invariant.
+    """
+    scale = np.asarray(scale, dtype=float)
+    coef = np.asarray(model["results_data"]["Coef"], dtype=float) / scale
+    se = np.asarray(model["results_data"]["SE"], dtype=float) / scale
+    covariance = np.asarray(model["covariance"], dtype=float) / np.outer(scale, scale)
+
+    model["results_data"] = {
+        "Coef": coef,
+        "Exp(coef)": np.exp(coef),
+        "SE": se,
+        "lower_CI": np.exp(coef - 1.96 * se),
+        "upper_CI": np.exp(coef + 1.96 * se),
+        # Z and p-values are invariant under the affine transform
+        "Z": model["results_data"]["Z"],
+        "p-value": model["results_data"]["p-value"],
+    }
+    model["covariance"] = covariance
+    model["standard_errors"] = se
+    return model
 
 
 def format_results_dataframe(results_data: Dict[str, Any], expl_vars: List[str]) -> pd.DataFrame:

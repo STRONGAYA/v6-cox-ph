@@ -1,6 +1,6 @@
 {
   "name": "coxph",
-  "image": "v6-coxph",
+  "image": "ghcr.io/maastrichtu-cds/v6-coxph-standard-coxph",
   "vantage6_version": "4.14",
   "partitioning": "horizontal",
   "functions": [
@@ -29,28 +29,11 @@
           "name": "organization_ids",
           "type": "list",
           "description": "List of organisation IDs to include. If None, all organisations are used."
-        }
-      ]
-    },
-    {
-      "name": "get_unique_event_times",
-      "description": "Retrieve unique event times and their frequencies from the node data.",
-      "type": "federated",
-      "databases": [
-        {
-          "name": "Database 1"
-        }
-      ],
-      "arguments": [
-        {
-          "name": "time_col",
-          "type": "string",
-          "description": "Name of the column containing the time data."
         },
         {
-          "name": "outcome_col",
-          "type": "string",
-          "description": "Name of the column containing the outcome data."
+          "name": "covariate_profiles",
+          "type": "json",
+          "description": "Optional covariate profiles for survival curves: a list of objects mapping explanatory variable names to values. Variables left out are taken at the pooled event-case mean (the baseline profile)."
         }
       ]
     },
@@ -97,6 +80,11 @@
           "description": "Name of the column containing the time data."
         },
         {
+          "name": "outcome_col",
+          "type": "string",
+          "description": "Name of the column containing the outcome data."
+        },
+        {
           "name": "expl_vars",
           "type": "list",
           "description": "List of explanatory variable names."
@@ -105,6 +93,16 @@
           "name": "beta",
           "type": "list",
           "description": "Current coefficient vector (one entry per explanatory variable)."
+        },
+        {
+          "name": "centre",
+          "type": "list",
+          "description": "Pooled covariate means over the event cases (one entry per explanatory variable)."
+        },
+        {
+          "name": "scale",
+          "type": "list",
+          "description": "Pooled covariate standard deviations over the event cases (one entry per explanatory variable)."
         },
         {
           "name": "unique_time_events",

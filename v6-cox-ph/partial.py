@@ -7,96 +7,19 @@ encryption if that is enabled). From there, they are sent to the partial task
 or directly to the user (if they requested partial results).
 """
 
-import numpy as np
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
 from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
-from vantage6_strongaya_general.miscellaneous import safe_log
-from vantage6_strongaya_general.privacy_measures import (
-    apply_sample_size_threshold,
-    mask_unnecessary_variables,
-)
+from vantage6.algorithm.tools.util import info
 
-from .miscellaneous import check_data_quality
+from .miscellaneous import IterationResult, SummedZResult
 from .privacy_guards import (
-    check_sample_size,
-    drop_incomplete_rows,
-    ensure_spawned_by_central,
-    guarded_risk_set_masks,
-    load_privacy_settings,
+    guarded_risk_set_aggregates,
+    prepare_node_data,
     prepare_time_column,
-    validate_expl_vars,
     validate_iteration_input,
 )
-
-
-@data(1)
-@algorithm_client
-def get_unique_event_times(client: AlgorithmClient, df: pd.DataFrame, time_col: str, outcome_col: str) -> dict:
-    """
-    Retrieve unique event times from the provided DataFrame.
-
-    If the number of samples is too small, the sub-task is halted and
-    returns the organisation ID.
-
-    Parameters
-    ----------
-    client : AlgorithmClient
-        The client instance used to interact with the vantage6 server.
-    df : pd.DataFrame
-        The DataFrame containing the data.
-    time_col : str
-        The name of the column containing the time data.
-    outcome_col : str
-        The name of the column containing the outcome data.
-
-    Returns
-    -------
-    dict
-        A dictionary containing unique event times, or a message
-        indicating that the subtask was not executed for privacy reasons.
-    """
-    safe_log("info", "Computing unique event times")
-
-    ensure_spawned_by_central(client)
-    settings = load_privacy_settings()
-
-    # STRONG AYA: determine variables to analyse and apply privacy guards
-    variables_to_analyse = [time_col, outcome_col]
-    df = mask_unnecessary_variables(df, variables_to_analyse)
-
-    # Data quality checks
-    quality = check_data_quality(df, time_col, outcome_col)
-    if not quality["has_time"] or not quality["has_outcome"]:
-        safe_log(
-            "warning",
-            f"Missing required columns: time={quality['has_time']}, " f"outcome={quality['has_outcome']}",
-        )
-        return {"N-Threshold not met": client.organization_id}
-
-    if quality["has_negative_time"]:
-        safe_log("warning", "Negative time values detected in the data")
-
-    df = drop_incomplete_rows(df, [time_col, outcome_col])
-
-    if not check_sample_size(df, outcome_col, settings):
-        safe_log(
-            "warning",
-            "Sub-task was not executed because the number of samples " "is too small.",
-        )
-        return {"N-Threshold not met": client.organization_id}
-
-    # STRONG AYA: apply sample size threshold
-    df = apply_sample_size_threshold(client, df, variables_to_analyse)
-
-    df = prepare_time_column(df, time_col, settings, outcome_col)
-
-    times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
-    times = times.sort_values(by=time_col)[[time_col, outcome_col]]
-    times["freq"] = times[outcome_col]
-    times = times.drop(columns=outcome_col)
-    return {"times": times.to_dict()}
 
 
 @data(1)
@@ -129,37 +52,45 @@ def compute_summed_z(
     dict
         A dictionary containing the sum of the explanatory variables.
     """
-    safe_log("info", "Computing summed Z statistics")
+    info("Computing summed Z statistics")
 
-    ensure_spawned_by_central(client)
-    settings = load_privacy_settings()
+    df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 
-    validate_expl_vars(df, expl_vars, time_col, outcome_col)
-    df = drop_incomplete_rows(df, [time_col, outcome_col] + expl_vars)
-
-    # STRONG AYA: determine variables to analyse and apply privacy guards.
-    # time_col is included because tail censoring needs it.
-    variables_to_analyse = [time_col, outcome_col] + expl_vars
-    df = mask_unnecessary_variables(df, variables_to_analyse)
-
-    if not check_sample_size(df, outcome_col, settings):
+    if not threshold_met:
         raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
-
-    df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
     df = prepare_time_column(df, time_col, settings, outcome_col)
 
     events = df[df[outcome_col] == 1]
     z_sum = events[expl_vars].sum().to_dict()
+    # Sum of squares over the event cases: with z_sum this yields the pooled
+    # covariate centre and spread over events without another round-trip.
+    sum_squares = events[expl_vars].pow(2).sum().to_dict()
 
     # Also return per-time event counts from the same NaN-dropped,
     # censored DataFrame so that central can build aggregated_time_events
-    # that are consistent with z_sum and the risk sets (FR-B4).
+    # that are consistent with z_sum and the risk sets.
     times = events.groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times["freq"] = times[outcome_col]
     times = times.drop(columns=outcome_col)
-    return {"sum": z_sum, "times": times.to_dict()}
+
+    # The node's privacy settings (configuration, not data) let central
+    # report which guards were active during the run.
+    privacy_settings = {
+        "sample_size_threshold": settings.sample_size_threshold,
+        "min_risk_set_change": settings.min_risk_set_change,
+        "time_bin_width": settings.time_bin_width,
+    }
+    # The result dict is built from the wire model, so its keys and nesting
+    # are pinned in one place (SummedZResult).
+    return SummedZResult(
+        organization_id=client.organization_id,
+        sum=z_sum,
+        sum_squares=sum_squares,
+        times=times.to_dict(),
+        privacy_settings=privacy_settings,
+    ).model_dump()
 
 
 @data(1)
@@ -168,12 +99,21 @@ def perform_iteration(
     client: AlgorithmClient,
     df: pd.DataFrame,
     time_col: str,
+    outcome_col: str,
     expl_vars: list,
-    beta: np.ndarray,
+    beta: list,
+    centre: list,
+    scale: list,
     unique_time_events: list,
 ) -> dict:
     """
     Perform an iteration of the algorithm, computing the necessary aggregates.
+
+    The covariates are standardised on the node as ``(x - centre) / scale``
+    before the risk-set aggregates are computed: the partial likelihood is
+    invariant to this shared affine transform, while centring prevents ``exp``
+    overflow from large offsets and scaling fixes the Hessian conditioning
+    from large spreads. Central back-transforms the coefficients it reports.
 
     Parameters
     ----------
@@ -183,10 +123,19 @@ def perform_iteration(
         The DataFrame containing the data.
     time_col : str
         The name of the column containing the time data.
+    outcome_col : str
+        The name of the column containing the outcome data. Rows with a
+        missing outcome are dropped so that tail censoring uses the same
+        rows as ``compute_summed_z``.
     expl_vars : list
         A list of explanatory variables to be used in the computation.
-    beta : np.ndarray
-        The current estimate of the beta coefficients.
+    beta : list
+        The current estimate of the beta coefficients (standardised space),
+        as it arrives on the wire (a JSON list).
+    centre : list
+        The pooled covariate means over the event cases.
+    scale : list
+        The pooled covariate standard deviations over the event cases.
     unique_time_events : list
         A list of unique time events.
 
@@ -195,52 +144,32 @@ def perform_iteration(
     dict
         A dictionary containing the aggregates computed during the iteration.
     """
-    safe_log("info", "Computing aggregates for the derivation of the partial likelihood")
+    info("Computing aggregates for the derivation of the partial likelihood")
 
-    ensure_spawned_by_central(client)
-    settings = load_privacy_settings()
+    df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 
-    validate_expl_vars(df, expl_vars, time_col, outcome_col=None)
-    df = drop_incomplete_rows(df, [time_col] + expl_vars)
-
-    # STRONG AYA: determine variables to analyse and apply privacy guards
-    variables_to_analyse = [time_col] + expl_vars
-    df = mask_unnecessary_variables(df, variables_to_analyse)
-
-    # perform_iteration does not have the outcome column available, so the
-    # threshold is checked on rows only.
-    if not check_sample_size(df, outcome_col=None, settings=settings):
+    # A node that passed compute_summed_z passes this check as well (the same
+    # rows are analysed); the threshold here is defence in depth.
+    if not threshold_met:
         raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
-    beta, unique_time_events = validate_iteration_input(beta, unique_time_events, expl_vars, settings)
+    beta_arr, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
+        beta, centre, scale, unique_time_events, expl_vars, settings
+    )
 
-    df = prepare_time_column(df, time_col, settings)
+    df = prepare_time_column(df, time_col, settings, outcome_col)
 
-    num_unique_time_events = len(unique_time_events)
-    num_explanatory_vars = len(expl_vars)
+    X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 
-    masks = guarded_risk_set_masks(df[time_col], unique_time_events, settings.min_risk_set_change)
-    X_all = df[expl_vars].to_numpy(dtype=float)
+    agg1, agg2, agg3 = guarded_risk_set_aggregates(
+        df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
+    )
 
-    agg1: list = []
-    agg2: list = []
-    agg3: list = []
-
-    for i in range(num_unique_time_events):
-        mask = masks[i]
-        n_in_set = int(mask.sum())
-        if n_in_set == 0:
-            agg1.append(0)
-            agg2.append(pd.Series(np.zeros(num_explanatory_vars), index=expl_vars))
-            agg3.append(np.zeros((num_explanatory_vars, num_explanatory_vars)))
-        else:
-            X = X_all[mask]
-            ebz = np.exp(X @ beta)
-            agg1.append(float(ebz.sum()))
-            agg2.append(pd.Series((X * ebz[:, None]).sum(axis=0), index=expl_vars))
-            agg3.append((X * ebz[:, None]).T @ X)
-
-    agg2 = pd.DataFrame(agg2).to_dict()
-    agg3 = [array.tolist() for array in agg3]
-
-    return {"agg1": agg1, "agg2": agg2, "agg3": agg3}
+    # The result dict is built from the wire model, so its keys and nesting
+    # are pinned in one place (IterationResult).
+    return IterationResult(
+        organization_id=client.organization_id,
+        agg1=agg1.tolist(),
+        agg2=agg2.tolist(),
+        agg3=agg3.tolist(),
+    ).model_dump()
