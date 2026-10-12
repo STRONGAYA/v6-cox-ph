@@ -98,7 +98,11 @@ jobs:
 
       - name: Audit dependencies for known vulnerabilities
         run: |
-          pip-audit
+          # Suppressions live in .pip-audit-ignore with a justification and
+          # an expiry date per entry; the same policy as the weekly lock
+          # scan in security-scan.yml.
+          IGNORES=$(grep -E '^--ignore-vuln' .pip-audit-ignore | tr '\n' ' ')
+          pip-audit $IGNORES
 
   docker:
     runs-on: ubuntu-latest
