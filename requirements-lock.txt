@@ -31,12 +31,15 @@ numpy==2.5.3
     #   v6-cox-ph (pyproject.toml)
     #   pandas
     #   scipy
+    #   vantage6-strongaya-general
 openpyxl==3.1.5
     # via vantage6-algorithm-tools
 pandas==3.0.6
     # via
     #   v6-cox-ph (pyproject.toml)
     #   vantage6-algorithm-tools
+    #   vantage6-strongaya-general
+    #   vantage6-strongaya-rdf
 psycopg2-binary==2.9.10
     # via vantage6-algorithm-tools
 pycparser==3.0
@@ -70,6 +73,7 @@ requests==2.34.2
     # via
     #   docker
     #   vantage6-common
+    #   vantage6-strongaya-rdf
 schema==0.7.5
     # via vantage6-common
 scipy==1.18.1
@@ -94,6 +98,15 @@ urllib3==2.8.0
     #   docker
     #   requests
 vantage6-algorithm-tools==4.15.2
-    # via v6-cox-ph (pyproject.toml)
+    # via
+    #   v6-cox-ph (pyproject.toml)
+    #   vantage6-strongaya-general
+    #   vantage6-strongaya-rdf
 vantage6-common==4.15.2
     # via vantage6-algorithm-tools
+vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@153e61d31dc32e6eadf9df44eea89fbd889b10b7
+    # via
+    #   v6-cox-ph (pyproject.toml)
+    #   vantage6-strongaya-rdf
+vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@56eac1678efca42f71462bcd6a487f22ed49443c
+    # via v6-cox-ph (pyproject.toml)
