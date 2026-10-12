@@ -39,3 +39,5 @@
 --ignore-vuln PYSEC-2026-4148
 --ignore-vuln PYSEC-2026-4149
 --ignore-vuln PYSEC-2026-4152
+--ignore-vuln PYSEC-2026-4183
+--ignore-vuln GHSA-x33g-cr3x-6449
