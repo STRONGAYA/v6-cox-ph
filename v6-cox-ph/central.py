@@ -15,7 +15,7 @@ from scipy.linalg import solve
 from scipy.stats import chi2
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
-from vantage6.algorithm.tools.exceptions import AlgorithmError
+from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
 from vantage6.algorithm.tools.util import info, warn
 
 from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
@@ -23,6 +23,12 @@ from .coxph_logic import partial_log_likelihood, pooled_standardisation
 from .coxph_logic import survival_curves as survival_curves_from_aggregates
 from .coxph_logic import format_results_dataframe
 from .miscellaneous import IterationResult, SummedZResult, format_validation_error, validate_coxph_input
+from .privacy_guards import (
+    ENV_MAX_COVARIATES,
+    ENV_MAX_GRID_POINTS,
+    ENV_TIME_BIN_WIDTH,
+    load_resource_caps,
+)
 
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
 # it to force non-convergence.
@@ -86,6 +92,16 @@ def central(
     expl_vars = validated.expl_vars
     organization_ids = validated.organization_ids
 
+    # Resource caps bound the problem size the algorithm accepts; they are
+    # configuration, read centrally. The message names the user-supplied
+    # count and the configured cap only.
+    caps = load_resource_caps()
+    if len(expl_vars) > caps.max_covariates:
+        raise UserInputError(
+            f"Too many explanatory variables: {len(expl_vars)} requested, the configured "
+            f"maximum ({ENV_MAX_COVARIATES}) is {caps.max_covariates}."
+        )
+
     # Collect all organisations unless specified
     ids: list
     if organization_ids is None:
@@ -93,6 +109,13 @@ def central(
         ids = [organisation.get("id") for organisation in organisations]
     else:
         ids = list(organization_ids)
+        known_ids = {organisation.get("id") for organisation in client.organization.list()}
+        unknown_ids = [org_id for org_id in ids if org_id not in known_ids]
+        if unknown_ids:
+            raise UserInputError(
+                f"Unknown organisation IDs {unknown_ids}; the collaboration has "
+                f"organisations {sorted(org_id for org_id in known_ids if org_id is not None)}."
+            )
 
     info(f"Sending task to organisations {ids}")
 
@@ -148,6 +171,15 @@ def central(
     aggregated_time_events = aggregated_time_events.groupby(time_col, as_index=False).sum()
 
     unique_time_events = aggregated_time_events[time_col].tolist()
+
+    # The event-time grid is data-derived, so the message names the configured
+    # cap and the remedies, never the actual grid size.
+    if len(unique_time_events) > caps.max_grid_points:
+        raise UserInputError(
+            f"The pooled event-time grid exceeds the configured maximum of "
+            f"{caps.max_grid_points} points ({ENV_MAX_GRID_POINTS}). Enable time binning "
+            f"({ENV_TIME_BIN_WIDTH}) on the nodes or select fewer organisations."
+        )
 
     # Standardisation: the pooled covariate centre and spread over the event
     # cases, rounded to two significant figures so the nodes learn less. The

@@ -19,7 +19,7 @@ from importlib import import_module
 import numpy as np
 import pandas as pd
 import pytest
-from vantage6.algorithm.tools.exceptions import AlgorithmError, PrivacyThresholdViolation
+from vantage6.algorithm.tools.exceptions import AlgorithmError, PrivacyThresholdViolation, UserInputError
 
 # Add the algorithm module and repo root to the path
 repo_root = Path(__file__).parent.parent.parent
@@ -1288,3 +1288,105 @@ class TestGuardBiasRegression:
             assert (
                 deviation <= self.BOUND
             ), f"Guard bias for {var} is {deviation:.4f}, above the regression bound {self.BOUND}"
+
+
+def _run_central_with_kwargs(datasets, client_org_ids, **kwargs):
+    """Run ``central`` through the mock client with overridden input kwargs.
+
+    ``client_org_ids`` are the organisations the mock collaboration holds
+    data for; ``organization_ids`` in ``kwargs`` is what the task requests.
+    """
+    client = MockAlgorithmClient(
+        datasets=datasets,
+        module="v6-cox-ph",
+        organization_ids=client_org_ids,
+    )
+    input_kwargs = {
+        "time_col": "time",
+        "outcome_col": "event",
+        "expl_vars": EXPL_VARS,
+    }
+    input_kwargs.update(kwargs)
+    if "organization_ids" not in input_kwargs:
+        input_kwargs["organization_ids"] = client_org_ids
+    task = client.task.create(
+        input_={"method": "central", "kwargs": input_kwargs},
+        organizations=[client_org_ids[0]],
+    )
+    results = client.wait_for_results(task_id=task["id"])
+    return results[0]
+
+
+@pytest.mark.unit
+class TestCentralInputValidation:
+    """central rejects semantically invalid input and oversized requests."""
+
+    def _datasets(self):
+        df1, df2, _ = _load_datasets()
+        return [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+
+    def test_duplicate_expl_vars_rejected(self):
+        """Duplicate explanatory variables are rejected end-to-end."""
+        with pytest.raises(UserInputError, match="duplicate variables"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=["age", "treatment", "age"])
+
+    def test_time_col_equal_outcome_col_rejected(self):
+        """time_col == outcome_col is rejected end-to-end."""
+        with pytest.raises(UserInputError, match="different columns"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], outcome_col="time")
+
+    def test_expl_var_naming_time_col_rejected(self):
+        """An explanatory variable naming the time column is rejected."""
+        with pytest.raises(UserInputError, match="time or outcome column"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=["time", "age"])
+
+    def test_expl_var_naming_outcome_col_rejected(self):
+        """An explanatory variable naming the outcome column is rejected."""
+        with pytest.raises(UserInputError, match="time or outcome column"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=["age", "event"])
+
+    def test_unknown_organization_id_rejected(self):
+        """Organisation IDs absent from the collaboration are rejected."""
+        with pytest.raises(UserInputError, match="Unknown organisation IDs"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], organization_ids=[1, 999])
+
+    def test_too_many_expl_vars_rejected(self):
+        """More explanatory variables than COXPH_MAX_COVARIATES is rejected."""
+        expl_vars = ["age", "treatment"] + [f"extra_{i}" for i in range(19)]
+        assert len(expl_vars) == 21
+        with pytest.raises(UserInputError, match="Too many explanatory variables"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=expl_vars)
+
+    def test_event_time_grid_cap_rejected(self, monkeypatch):
+        """A pooled event-time grid beyond COXPH_MAX_GRID_POINTS is rejected.
+
+        The error message names the configured cap and the remedies, never
+        the actual grid size (that is data).
+        """
+        monkeypatch.setenv("COXPH_MAX_GRID_POINTS", "5")
+        datasets = self._datasets()
+
+        # The pooled grid central would build, for the message assertion.
+        client = MockAlgorithmClient(
+            datasets=datasets,
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        grid = set()
+        for r in client.wait_for_results(task_id=task["id"]):
+            grid.update(pd.DataFrame.from_dict(r["times"])["time"].tolist())
+        assert len(grid) > 5
+
+        with pytest.raises(UserInputError, match="COXPH_MAX_GRID_POINTS") as excinfo:
+            _run_central_with_kwargs(datasets, [1, 2])
+        assert str(len(grid)) not in str(excinfo.value)
