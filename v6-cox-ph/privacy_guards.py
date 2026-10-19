@@ -54,6 +54,10 @@ via ``get_env_var``:
   ``COXPH_MIN_RISK_SET_CHANGE`` > 1, so ``k = 1`` disables it together with
   the jump guard.
 
+The released risk-set aggregates are additionally quantised to float32
+precision (about 7 significant figures) at serialisation — always on, applied
+after the privacy rounding above; see ``quantise_wire_aggregates``.
+
 The resource caps are loaded centrally (``load_resource_caps``):
 
 - ``COXPH_MAX_COVARIATES`` (int >= 1, default 20).
@@ -96,6 +100,14 @@ DEFAULT_MIN_RISK_SET_CHANGE = 5
 DEFAULT_PRIVACY_LEVEL = "standard"
 DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
+
+# The released aggregates travel to central as JSON numbers. Quantising them
+# to float32 precision (about 7 significant decimal digits) at serialisation
+# caps the payload size: a bare float32 cast would serialise to a longer
+# float64 repr, so the cut comes from decimal quantisation. Always on,
+# applied after the configurable privacy rounding (a coarser preset rounding
+# makes it a no-op).
+WIRE_AGGREGATE_SIG_FIGS = 7
 
 
 # Hardening bundles selected by COXPH_PRIVACY_LEVEL. "minimal" leaves only the
@@ -637,6 +649,35 @@ def round_released_aggregates(agg1, agg2, agg3, sig_figs):
         round_sig(agg1, sig_figs),
         round_sig(agg2, sig_figs),
         round_sig(agg3, sig_figs),
+    )
+
+
+def quantise_wire_aggregates(agg1, agg2, agg3):
+    """Quantise the released risk-set aggregates to float32 precision.
+
+    The aggregates travel to central as JSON numbers; quantising them to
+    about 7 significant decimal figures (float32 precision) at serialisation
+    caps the payload size. The quantisation is always on and applies after
+    the configurable privacy rounding (``round_released_aggregates``): where
+    that rounding is coarser (the standard and strict presets) this is a
+    no-op, and where it is off (the minimal preset) this is the only
+    precision limit on the wire. Shapes and dtypes are preserved.
+
+    Parameters
+    ----------
+    agg1, agg2, agg3 : np.ndarray
+        The released aggregates: ``agg1`` (T,), ``agg2`` (T, p) and ``agg3``
+        (T, p, p).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        The quantised ``agg1``, ``agg2`` and ``agg3``.
+    """
+    return (
+        round_sig(agg1, WIRE_AGGREGATE_SIG_FIGS),
+        round_sig(agg2, WIRE_AGGREGATE_SIG_FIGS),
+        round_sig(agg3, WIRE_AGGREGATE_SIG_FIGS),
     )
 
 

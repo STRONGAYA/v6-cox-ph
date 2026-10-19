@@ -27,6 +27,7 @@ from .privacy_guards import (
     ENV_MAX_COVARIATES,
     ENV_MAX_GRID_POINTS,
     ENV_TIME_BIN_WIDTH,
+    WIRE_AGGREGATE_SIG_FIGS,
     load_resource_caps,
 )
 
@@ -225,14 +226,15 @@ def central(
         warn(guards_warning)
 
     # The nodes round the aggregates they release to a configurable number
-    # of significant figures, so the centrally computed log-likelihood
-    # carries a rounding jitter of order events * 10^(1 - N) per node. Near
+    # of significant figures and then quantise them to float32 precision for
+    # the wire (always on), so the centrally computed log-likelihood carries
+    # a rounding jitter of order events * 10^(1 - N) per node, where N is
+    # the coarser of the configured rounding and the wire precision. Near
     # the optimum the true per-step gain falls below that jitter, so a
     # decrease smaller than the jitter floor is not a real decrease.
     jitter = sum(
-        float(time_event_df["freq"].sum()) * 10.0 ** (1 - int(settings["aggregate_sig_figs"]))
+        float(time_event_df["freq"].sum()) * 10.0 ** (1 - _released_sig_figs(settings))
         for time_event_df, settings in zip(time_event_dfs, node_privacy_settings)
-        if settings.get("aggregate_sig_figs") is not None
     )
     ll_tolerance = max(1e-12, jitter)
 
@@ -444,6 +446,19 @@ def _algorithm_version() -> str:
         return version("v6-cox-ph")
     except PackageNotFoundError:
         return "unknown"
+
+
+def _released_sig_figs(settings) -> int:
+    """The precision of the aggregates a node released.
+
+    The coarser of the node's configured aggregate rounding and the
+    always-on wire quantisation (float32 precision): the coarser rounding
+    dominates the jitter in the centrally computed log-likelihood.
+    """
+    configured = settings.get("aggregate_sig_figs")
+    if configured is None:
+        return WIRE_AGGREGATE_SIG_FIGS
+    return min(int(configured), WIRE_AGGREGATE_SIG_FIGS)
 
 
 def _parse_result(model_cls: type[_ModelT], output: object, context: dict) -> _ModelT:

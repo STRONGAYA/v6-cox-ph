@@ -10,6 +10,11 @@ Exactness tests run with ``COXPH_MIN_RISK_SET_CHANGE=1`` (guards disabled) so
 the federated result matches lifelines closely. A separate test exercises the
 default guards (``k=5``) and asserts the risk-set privacy property on per-node
 ``agg1`` at ``beta = 0``.
+
+The released aggregates are always quantised to float32 precision on the
+wire (about 7 significant figures), so exactness is capped at that floor:
+the tightest exactness tolerances sit just above it (1e-5 / 1e-6), far below
+any real decomposition or assembly error.
 """
 
 import sys
@@ -207,7 +212,14 @@ class TestFederatedEqualsPooled:
     """The federated run must equal a centralised run on the pooled data."""
 
     def test_coefficients_identical_to_pooled(self, guards_off):
-        """Federated (2 nodes) coefficients equal pooled single-node to 1e-8."""
+        """Federated (2 nodes) coefficients equal pooled single-node to 1e-6.
+
+        The wire quantisation is not additive — each node's aggregates are
+        quantised to float32 precision before central sums them, while the
+        pooled node quantises the total — so the two runs agree only up to
+        the wire precision (measured 9.6e-9 on this data; 1e-6 keeps
+        headroom while still catching any real decomposition error).
+        """
         df1, df2, _ = _load_datasets()
 
         fed = _run_central(
@@ -227,7 +239,7 @@ class TestFederatedEqualsPooled:
             np.testing.assert_allclose(
                 fed_model.loc[var, "Coef"],
                 pooled_model.loc[var, "Coef"],
-                atol=1e-8,
+                atol=1e-6,
                 err_msg=f"coef differs from pooled for {var}",
             )
 
@@ -859,7 +871,13 @@ class TestAffineTransform:
         return beta
 
     def test_standardised_equals_unstandardised(self, guards_off):
-        """central's standardised fit equals a centre-0/scale-1 fit to 1e-10."""
+        """central's standardised fit equals a centre-0/scale-1 fit to 1e-6.
+
+        The affine invariance holds up to the wire precision: the two runs
+        quantise differently scaled aggregates (float32 precision, always
+        on), so their fits differ by the wire quantisation noise (measured
+        1.1e-7 on this data).
+        """
         df1, df2, _ = _load_datasets()
         datasets = [
             [{"database": df1, "db_type": "csv"}],
@@ -875,7 +893,7 @@ class TestAffineTransform:
         model = pd.DataFrame(standardised["model"]).T
         for i, var in enumerate(EXPL_VARS):
             np.testing.assert_allclose(
-                model.loc[var, "Coef"], unstandardised_beta[i], atol=1e-10, err_msg=f"back-transform mismatch {var}"
+                model.loc[var, "Coef"], unstandardised_beta[i], atol=1e-6, err_msg=f"back-transform mismatch {var}"
             )
 
     @pytest.mark.parametrize("transform", ["scale_1e4", "offset_1e4"])
@@ -954,7 +972,13 @@ class TestOptimiser:
     """The central optimiser: log-likelihood, LR test and step-halving."""
 
     def test_log_likelihood_matches_direct_breslow(self, guards_off):
-        """The reported log-likelihood equals a direct Breslow fit (guards off)."""
+        """The reported log-likelihood equals a direct Breslow fit to 1e-5.
+
+        The reported log-likelihood is computed from the wire-quantised
+        aggregates (float32 precision, always on) while the direct fit uses
+        full precision; the difference is the wire quantisation noise
+        (measured 3.3e-7 on this data, bounded by events x 5e-7).
+        """
         df1, df2, _ = _load_datasets()
         result = _run_central(
             [
@@ -968,7 +992,7 @@ class TestOptimiser:
         beta = model["Coef"].to_numpy(dtype=float)
         direct = _breslow_log_likelihood(pd.concat([df1, df2]), EXPL_VARS, beta)
         assert (
-            abs(result["log_likelihood"] - direct) <= 1e-9
+            abs(result["log_likelihood"] - direct) <= 1e-5
         ), f"log-likelihood mismatch: reported={result['log_likelihood']}, direct={direct}"
 
     def test_likelihood_ratio_fields_consistent(self, guards_off):
@@ -1073,7 +1097,13 @@ class TestSurvivalCurves:
         assert all(b >= a - 1e-12 for a, b in zip(values, values[1:]))
 
     def test_baseline_hazard_matches_direct_breslow(self, guards_off):
-        """H0 equals a direct Breslow computation at the same centre (guards off)."""
+        """H0 equals a direct Breslow computation at the same centre, to 1e-6.
+
+        H0 is accumulated from the wire-quantised risk-set sums (float32
+        precision, always on) while the direct computation uses full
+        precision; the difference is the wire quantisation noise (measured
+        3.0e-8 on this data).
+        """
         from importlib import import_module
 
         coxph_logic = import_module("v6-cox-ph.coxph_logic")
@@ -1127,7 +1157,7 @@ class TestSurvivalCurves:
 
         reported = result["baseline_cumulative_hazard"]
         for t in reported:
-            assert abs(reported[t] - direct[t]) <= 1e-9, f"H0 mismatch at t={t}"
+            assert abs(reported[t] - direct[t]) <= 1e-6, f"H0 mismatch at t={t}"
 
     def test_covariate_profiles(self, guards_off):
         """Each profile's curve is S0(t) ** exp(beta . (x - centre)/scale)."""
@@ -1519,7 +1549,9 @@ class TestReleasedAggregatePrecision:
             results = client.wait_for_results(task_id=task["id"])
             return {r["organization_id"]: r for r in results}
 
-        # An empty COXPH_AGGREGATE_SIG_FIGS disables the rounding: raw values.
+        # An empty COXPH_AGGREGATE_SIG_FIGS disables the privacy rounding,
+        # but the wire quantisation (float32 precision, always on) still
+        # applies: every released value is a 7-significant-figure number.
         monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
         raw = dispatch()
         monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "3")
@@ -1528,8 +1560,50 @@ class TestReleasedAggregatePrecision:
         assert set(raw) == set(rounded) == {1, 2}
         for org_id in raw:
             for agg in ("agg1", "agg2", "agg3"):
-                expected = coxph_logic.round_sig(np.asarray(raw[org_id][agg], dtype=float), 3)
-                np.testing.assert_array_equal(np.asarray(rounded[org_id][agg], dtype=float), expected)
+                raw_arr = np.asarray(raw[org_id][agg], dtype=float)
+                rounded_arr = np.asarray(rounded[org_id][agg], dtype=float)
+                # The wire quantisation: released values are fixed points of
+                # rounding to 7 significant figures.
+                np.testing.assert_array_equal(raw_arr, coxph_logic.round_sig(raw_arr, 7))
+                # The privacy rounding: released values are fixed points of
+                # rounding to 3 significant figures (hence also of rounding
+                # to 7).
+                np.testing.assert_array_equal(rounded_arr, coxph_logic.round_sig(rounded_arr, 3))
+                np.testing.assert_array_equal(rounded_arr, coxph_logic.round_sig(rounded_arr, 7))
+
+    def test_released_aggregates_carry_wire_precision_in_minimal(self, monkeypatch):
+        """The wire quantisation applies even when the privacy rounding is off.
+
+        Under the minimal level (aggregate rounding off) the released
+        aggregates are still quantised to float32 precision: every value
+        equals its own 7-significant-figure rounding.
+        """
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
+        client, grid = self._client_and_grid()
+        task = client.task.create(
+            input_={
+                "method": "perform_iteration",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                    "beta": [0.3, -0.2],
+                    "centre": [0.1, -0.1],
+                    "scale": [1.0, 2.0],
+                    "unique_time_events": grid,
+                },
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert results, "perform_iteration returned no results"
+        for r in results:
+            for agg in ("agg1", "agg2", "agg3"):
+                arr = np.asarray(r[agg], dtype=float)
+                np.testing.assert_array_equal(arr, coxph_logic.round_sig(arr, 7))
 
     def test_small_time_counts_suppressed(self, monkeypatch):
         """compute_summed_z merges per-time event counts below the minimum."""

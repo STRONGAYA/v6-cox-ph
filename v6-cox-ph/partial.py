@@ -23,6 +23,7 @@ from .privacy_guards import (
     guarded_risk_set_aggregates,
     prepare_node_data,
     prepare_time_column,
+    quantise_wire_aggregates,
     round_released_aggregates,
     suppress_small_time_counts,
     validate_iteration_input,
@@ -196,8 +197,10 @@ def perform_iteration(
             settings.min_risk_set_size,
         )
 
-        # Round the released aggregates to the configured precision.
+        # Round the released aggregates to the configured precision, then
+        # quantise them to float32 precision for the wire (always on).
         agg1, agg2, agg3 = round_released_aggregates(agg1, agg2, agg3, settings.aggregate_sig_figs)
+        agg1, agg2, agg3 = quantise_wire_aggregates(agg1, agg2, agg3)
 
         # The result dict is built from the wire model, so its keys and nesting
         # are pinned in one place (IterationResult).

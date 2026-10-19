@@ -37,6 +37,7 @@ load_privacy_settings = privacy_guards.load_privacy_settings
 load_resource_caps = privacy_guards.load_resource_caps
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
+quantise_wire_aggregates = privacy_guards.quantise_wire_aggregates
 round_released_aggregates = privacy_guards.round_released_aggregates
 suppress_small_time_counts = privacy_guards.suppress_small_time_counts
 tail_cutoff = privacy_guards.tail_cutoff
@@ -1151,3 +1152,50 @@ class TestRoundReleasedAggregates:
         assert out1.dtype == agg1.dtype
         assert out2.dtype == agg2.dtype
         assert out3.dtype == agg3.dtype
+
+
+@pytest.mark.unit
+class TestQuantiseWireAggregates:
+    """Tests for quantise_wire_aggregates (exact values, always on)."""
+
+    def test_quantises_to_float32_precision(self):
+        agg1 = np.array([123.4567890123, 0.0123456789012, 0.0])
+        agg2 = np.array([[1.0, -987.6543210987]])
+        agg3 = np.array([[[0.00123456789012, 2.0], [3.0, 4.0]]])
+        out1, out2, out3 = quantise_wire_aggregates(agg1, agg2, agg3)
+        np.testing.assert_array_equal(out1, [123.4568, 0.01234568, 0.0])
+        np.testing.assert_array_equal(out2, [[1.0, -987.6543]])
+        np.testing.assert_array_equal(out3, [[[0.001234568, 2.0], [3.0, 4.0]]])
+
+    def test_shapes_and_dtypes_preserved(self):
+        agg1 = np.array([123.4567890123, 0.0123456789012])
+        agg2 = np.array([[1.23456789012, 2.34567890123], [3.45678901234, 4.56789012345]])
+        agg3 = np.arange(8, dtype=float).reshape(2, 2, 2) / 7.0
+        out1, out2, out3 = quantise_wire_aggregates(agg1, agg2, agg3)
+        assert out1.shape == agg1.shape
+        assert out2.shape == agg2.shape
+        assert out3.shape == agg3.shape
+        assert out1.dtype == agg1.dtype
+        assert out2.dtype == agg2.dtype
+        assert out3.dtype == agg3.dtype
+
+    def test_noop_on_coarser_values(self):
+        """Values rounded to fewer figures (the standard/strict presets) pass through."""
+        agg1 = np.array([123.456, 0.0123, 1.0, 0.0])
+        agg2 = np.array([[1.0, -988.0]])
+        agg3 = np.array([[[0.00123, 2.0], [3.0, 4.0]]])
+        out1, out2, out3 = quantise_wire_aggregates(agg1, agg2, agg3)
+        np.testing.assert_array_equal(out1, agg1)
+        np.testing.assert_array_equal(out2, agg2)
+        np.testing.assert_array_equal(out3, agg3)
+
+    def test_idempotent(self):
+        """Quantising an already quantised array changes nothing."""
+        agg1 = np.array([123.4567890123, 0.0123456789012, 987.6543210987])
+        agg2 = np.array([[1.23456789012, -2.34567890123]])
+        agg3 = np.arange(8, dtype=float).reshape(2, 2, 2) / 7.0
+        once1, once2, once3 = quantise_wire_aggregates(agg1, agg2, agg3)
+        twice1, twice2, twice3 = quantise_wire_aggregates(once1, once2, once3)
+        np.testing.assert_array_equal(twice1, once1)
+        np.testing.assert_array_equal(twice2, once2)
+        np.testing.assert_array_equal(twice3, once3)
