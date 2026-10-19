@@ -310,6 +310,7 @@ def survival_curves(
     scale: np.ndarray,
     expl_vars: List[str],
     covariate_profiles: Optional[List[Dict[str, float]]],
+    curve_time_sig_figs: Optional[int] = None,
 ) -> tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
     """
     Breslow baseline cumulative hazard and survival curves, all centrally.
@@ -322,6 +323,13 @@ def survival_curves(
     variables left out are taken at the centre. Everything is computed from
     quantities that are already aggregated: no new data leaves a node.
 
+    The curve time keys are rounded to ``curve_time_sig_figs`` significant
+    figures when it is given; the event-time grid itself (and the hazard
+    values) are unaffected. Rounding can merge nearby times into one key;
+    the dicts are built in ascending time order, so a merged key carries
+    the value at the largest original time. ``None`` (the default) reports
+    the exact grid times.
+
     Returns
     -------
     tuple[dict, dict]
@@ -333,15 +341,21 @@ def survival_curves(
     h0_steps = np.where(d > 0, d / s0, 0.0)
     h0 = np.cumsum(h0_steps)
 
-    baseline_cumulative_hazard = {str(t): float(h) for t, h in zip(grid_times, h0)}
-    curves: Dict[str, Dict[str, float]] = {"0": {str(t): float(np.exp(-h)) for t, h in zip(grid_times, h0)}}
+    grid_arr = np.asarray(grid_times, dtype=float)
+    if curve_time_sig_figs is None:
+        key_times = grid_arr
+    else:
+        key_times = round_sig(grid_arr, curve_time_sig_figs)
+
+    baseline_cumulative_hazard = {str(t): float(h) for t, h in zip(key_times, h0)}
+    curves: Dict[str, Dict[str, float]] = {"0": {str(t): float(np.exp(-h)) for t, h in zip(key_times, h0)}}
 
     for profile_index, profile in enumerate(covariate_profiles or [], start=1):
         x_star = np.array(
             [(float(profile.get(var, centre[j])) - centre[j]) / scale[j] for j, var in enumerate(expl_vars)]
         )
         profile_exponent = float(np.exp(np.dot(beta, x_star)))
-        curves[str(profile_index)] = {str(t): float(np.exp(-h * profile_exponent)) for t, h in zip(grid_times, h0)}
+        curves[str(profile_index)] = {str(t): float(np.exp(-h * profile_exponent)) for t, h in zip(key_times, h0)}
 
     return baseline_cumulative_hazard, curves
 

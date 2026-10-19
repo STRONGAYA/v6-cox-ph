@@ -28,6 +28,7 @@ from .privacy_guards import (
     ENV_MAX_GRID_POINTS,
     ENV_TIME_BIN_WIDTH,
     WIRE_AGGREGATE_SIG_FIGS,
+    load_curve_time_sig_figs,
     load_resource_caps,
 )
 
@@ -102,6 +103,10 @@ def central(
             f"Too many explanatory variables: {len(expl_vars)} requested, the configured "
             f"maximum ({ENV_MAX_COVARIATES}) is {caps.max_covariates}."
         )
+
+    # The reported curve time keys are coarsened to this many significant
+    # figures (an empty COXPH_CURVE_TIME_SIG_FIGS reports exact times).
+    curve_time_sig_figs = load_curve_time_sig_figs()
 
     # Collect all organisations unless specified
     ids: list
@@ -414,6 +419,7 @@ def central(
         scale,
         expl_vars,
         validated.covariate_profiles,
+        curve_time_sig_figs,
     )
 
     lr_statistic = 2 * (log_likelihood - log_likelihood_null)
@@ -434,6 +440,7 @@ def central(
         "algorithm_version": _algorithm_version(),
         "baseline_cumulative_hazard": baseline_cumulative_hazard,
         "survival_curves": survival_curves,
+        "curve_time_sig_figs": curve_time_sig_figs,
         "privacy_guards": privacy_guards,
     }
 

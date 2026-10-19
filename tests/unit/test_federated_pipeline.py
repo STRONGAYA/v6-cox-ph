@@ -1234,6 +1234,64 @@ class TestSurvivalCurves:
                         f"(time {grid[i] if i < len(grid) else '?'})"
                     )
 
+    def test_curve_time_keys_coarsened(self, monkeypatch):
+        """COXPH_CURVE_TIME_SIG_FIGS coarsens the reported curve time keys.
+
+        An empty value reports the exact event times; 2 significant figures
+        merge nearby times into one key, and a merged key carries the value
+        at the largest original time.
+        """
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "")
+        exact = _run_central(datasets, [1, 2])
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "2")
+        coarse = _run_central(datasets, [1, 2])
+
+        assert exact["curve_time_sig_figs"] is None
+        assert coarse["curve_time_sig_figs"] == 2
+
+        # Expected coarsening of the exact run: ascending times, so the
+        # later (larger) time overwrites the earlier one on a key collision.
+        key_to_time = {}
+        for t in sorted(exact["baseline_cumulative_hazard"], key=float):
+            key = str(float(coxph_logic.round_sig(float(t), 2)))
+            key_to_time[key] = t
+        expected = {key: exact["baseline_cumulative_hazard"][t] for key, t in key_to_time.items()}
+        assert coarse["baseline_cumulative_hazard"] == expected
+        # Merging actually happened on this data (2 figures on 1-decimal times)
+        assert len(expected) < len(exact["baseline_cumulative_hazard"])
+        # The survival curves share the coarsened keys and values
+        for profile, curve in coarse["survival_curves"].items():
+            expected_curve = {key: exact["survival_curves"][profile][t] for key, t in key_to_time.items()}
+            assert curve == expected_curve
+
+    def test_curve_time_sig_figs_default_is_six(self, monkeypatch):
+        """The curve time keys are coarsened to 6 significant figures by default.
+
+        The test data's event times carry one decimal, so 6 significant
+        figures leave the keys exact; an empty value reports them exactly
+        too, and the two runs agree.
+        """
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        monkeypatch.delenv("COXPH_CURVE_TIME_SIG_FIGS", raising=False)
+        result = _run_central(datasets, [1, 2])
+        assert result["curve_time_sig_figs"] == 6
+
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "")
+        exact = _run_central(datasets, [1, 2])
+        assert exact["curve_time_sig_figs"] is None
+        assert result["baseline_cumulative_hazard"] == exact["baseline_cumulative_hazard"]
+        assert result["survival_curves"] == exact["survival_curves"]
+
 
 @pytest.mark.unit
 class TestPrivacyGuardsSummary:

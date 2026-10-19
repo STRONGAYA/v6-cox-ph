@@ -33,6 +33,7 @@ check_sample_size = privacy_guards.check_sample_size
 drop_incomplete_rows = privacy_guards.drop_incomplete_rows
 ensure_spawned_by_central = privacy_guards.ensure_spawned_by_central
 guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
+load_curve_time_sig_figs = privacy_guards.load_curve_time_sig_figs
 load_privacy_settings = privacy_guards.load_privacy_settings
 load_resource_caps = privacy_guards.load_resource_caps
 prepare_node_data = privacy_guards.prepare_node_data
@@ -243,6 +244,37 @@ class TestLoadResourceCaps:
         monkeypatch.setenv("COXPH_MAX_GRID_POINTS", "-1")
         with pytest.raises(UserInputError, match="COXPH_MAX_GRID_POINTS"):
             load_resource_caps()
+
+
+@pytest.mark.unit
+class TestLoadCurveTimeSigFigs:
+    """Tests for load_curve_time_sig_figs (central-side curve coarsening)."""
+
+    @pytest.fixture
+    def clean_env(self, monkeypatch):
+        monkeypatch.delenv("COXPH_CURVE_TIME_SIG_FIGS", raising=False)
+
+    def test_default(self, clean_env):
+        """The curve time keys are coarsened to 6 significant figures by default."""
+        assert load_curve_time_sig_figs() == 6
+
+    def test_custom_value(self, clean_env, monkeypatch):
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "10")
+        assert load_curve_time_sig_figs() == 10
+
+    def test_empty_string_reports_exact_times(self, clean_env, monkeypatch):
+        """An empty COXPH_CURVE_TIME_SIG_FIGS reports the exact event times."""
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "")
+        assert load_curve_time_sig_figs() is None
+
+    def test_invalid_values_raise(self, clean_env, monkeypatch):
+        """Invalid values raise UserInputError naming the variable."""
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "0")
+        with pytest.raises(UserInputError, match="COXPH_CURVE_TIME_SIG_FIGS"):
+            load_curve_time_sig_figs()
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "fine")
+        with pytest.raises(UserInputError, match="COXPH_CURVE_TIME_SIG_FIGS"):
+            load_curve_time_sig_figs()
 
 
 @pytest.mark.unit

@@ -62,6 +62,15 @@ The resource caps are loaded centrally (``load_resource_caps``):
 
 - ``COXPH_MAX_COVARIATES`` (int >= 1, default 20).
 - ``COXPH_MAX_GRID_POINTS`` (int >= 1, default 1000).
+
+The reported curve time keys are coarsened centrally as well
+(``load_curve_time_sig_figs``):
+
+- ``COXPH_CURVE_TIME_SIG_FIGS`` (int >= 1, default 6; an empty string
+  reports the exact event times) — the time keys of the baseline
+  cumulative hazard and the survival curves are rounded to this many
+  significant figures; times that merge into one key keep the value at
+  their largest original time.
 """
 
 from __future__ import annotations
@@ -93,6 +102,7 @@ ENV_MIN_TIME_EVENT_COUNT = "COXPH_MIN_TIME_EVENT_COUNT"
 ENV_AGGREGATE_SIG_FIGS = "COXPH_AGGREGATE_SIG_FIGS"
 ENV_MAX_COVARIATES = "COXPH_MAX_COVARIATES"
 ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
+ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
@@ -100,6 +110,7 @@ DEFAULT_MIN_RISK_SET_CHANGE = 5
 DEFAULT_PRIVACY_LEVEL = "standard"
 DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
+DEFAULT_CURVE_TIME_SIG_FIGS = 6
 
 # The released aggregates travel to central as JSON numbers. Quantising them
 # to float32 precision (about 7 significant decimal digits) at serialisation
@@ -358,6 +369,33 @@ def load_resource_caps() -> ResourceCaps:
         return ResourceCaps(max_covariates=max_covariates, max_grid_points=max_grid_points)
     except ValidationError as e:
         raise UserInputError(f"Invalid resource caps: {format_validation_error(e)}") from None
+
+
+def load_curve_time_sig_figs() -> Optional[int]:
+    """Load the curve time-key coarsening from the environment (centrally).
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. The baseline
+    cumulative hazard and the survival curves are reported with their time
+    keys rounded to this many significant figures; an empty
+    ``COXPH_CURVE_TIME_SIG_FIGS`` reports the exact event times.
+
+    Returns
+    -------
+    int | None
+        The number of significant figures, or ``None`` for exact times.
+
+    Raises
+    ------
+    UserInputError
+        If the value is not an integer >= 1.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    return _resolve_optional_knob(
+        get_env_var(ENV_CURVE_TIME_SIG_FIGS, default=None),
+        DEFAULT_CURVE_TIME_SIG_FIGS,
+        ENV_CURVE_TIME_SIG_FIGS,
+    )
 
 
 def ensure_spawned_by_central(client) -> None:
