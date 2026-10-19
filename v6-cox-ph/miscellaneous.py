@@ -94,6 +94,25 @@ class CoxPHInput(BaseModel):
         return list(set(v))
 
     @model_validator(mode="after")
+    def validate_column_semantics(self) -> "CoxPHInput":
+        """The time, outcome and explanatory columns must be distinct.
+
+        The messages echo only the user-supplied column names.
+        """
+        if self.time_col == self.outcome_col:
+            raise ValueError(f"time_col and outcome_col must be different columns, both are '{self.time_col}'")
+        duplicates = sorted({var for var in self.expl_vars if self.expl_vars.count(var) > 1})
+        if duplicates:
+            raise ValueError(f"expl_vars contains duplicate variables: {duplicates}")
+        clash = [var for var in self.expl_vars if var in (self.time_col, self.outcome_col)]
+        if clash:
+            raise ValueError(
+                f"expl_vars must not name the time or outcome column; found {clash} "
+                f"(time_col='{self.time_col}', outcome_col='{self.outcome_col}')"
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_covariate_profiles(self) -> "CoxPHInput":
         """Covariate profiles may only name known explanatory variables."""
         if self.covariate_profiles is None:
@@ -151,8 +170,11 @@ def validate_coxph_input(
             organization_ids=organization_ids,
             covariate_profiles=covariate_profiles,
         )
-    except Exception as e:
-        raise UserInputError(f"Invalid Cox-PH input: {e}")
+    except ValidationError as e:
+        # The formatted message never echoes the offending input: pydantic's
+        # default message embeds it, and the message ends up in the container
+        # log the researcher reads.
+        raise UserInputError(f"Invalid Cox-PH input: {format_validation_error(e)}") from None
 
 
 class IterationInput(BaseModel):

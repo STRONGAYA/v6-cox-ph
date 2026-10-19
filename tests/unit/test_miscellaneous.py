@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from vantage6.algorithm.tools.exceptions import UserInputError
 
 # Add the algorithm module to the path
@@ -15,6 +16,7 @@ algorithm_path = Path(__file__).parent.parent.parent / "v6-cox-ph"
 sys.path.insert(0, str(algorithm_path))
 
 from miscellaneous import (  # noqa: E402
+    CoxPHInput,
     validate_coxph_input,
 )
 
@@ -121,3 +123,61 @@ class TestValidateCoxphInput:
         assert validated.time_col == "time"
         assert validated.outcome_col == "event"
         assert validated.expl_vars == ["age"]
+
+    def test_validate_input_time_col_equals_outcome_col(self):
+        """Test that time_col == outcome_col raises UserInputError."""
+        with pytest.raises(UserInputError, match="different columns"):
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="time",
+                expl_vars=["age"],
+            )
+
+    def test_validate_input_duplicate_expl_vars(self):
+        """Test that duplicate explanatory variables raise UserInputError."""
+        with pytest.raises(UserInputError, match="duplicate variables"):
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event",
+                expl_vars=["age", "treatment", "age"],
+            )
+
+    def test_validate_input_expl_var_names_time_col(self):
+        """Test that an explanatory variable naming the time column is rejected."""
+        with pytest.raises(UserInputError, match="time or outcome column"):
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event",
+                expl_vars=["time", "age"],
+            )
+
+    def test_validate_input_expl_var_names_outcome_col(self):
+        """Test that an explanatory variable naming the outcome column is rejected."""
+        with pytest.raises(UserInputError, match="time or outcome column"):
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event",
+                expl_vars=["age", "event"],
+            )
+
+    def test_model_rejects_semantic_violations_directly(self):
+        """The model itself raises ValidationError for semantic violations."""
+        with pytest.raises(ValidationError):
+            CoxPHInput(time_col="time", outcome_col="time", expl_vars=["age"])
+        with pytest.raises(ValidationError):
+            CoxPHInput(time_col="time", outcome_col="event", expl_vars=["age", "age"])
+        with pytest.raises(ValidationError):
+            CoxPHInput(time_col="time", outcome_col="event", expl_vars=["event"])
+
+    def test_wrapped_error_is_formatted_without_input(self):
+        """The UserInputError wraps the one-line formatted validation message."""
+        with pytest.raises(UserInputError) as excinfo:
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event",
+                expl_vars=["age"],
+                organization_ids=[-1],
+            )
+        message = str(excinfo.value)
+        assert message.startswith("Invalid Cox-PH input:")
+        assert "https://errors.pydantic.dev" not in message
