@@ -75,9 +75,10 @@ Guard-effect summary
 The result carries a ``privacy_guards`` object — an aggregate summary of the
 guards that were active on the nodes (configuration, not data; there is no
 per-node breakdown): ``active`` (bool), ``max_min_risk_set_change`` (the
-largest ``k`` any node used) and ``time_binning`` (bool). When any guard was
-active a warning is appended: the estimates are then approximate (see the
-bias study in ``Validation.rst``).
+largest ``k`` any node used), ``time_binning`` (bool) and
+``max_min_time_event_count`` (the largest minimum per-time event count any
+node used). When any guard was active a warning is appended: the estimates
+are then approximate (see the bias study in ``Validation.rst``).
 
 Survival curves
 ----------------
@@ -113,9 +114,9 @@ Node configuration (algorithm_env)
 Privacy guards are configured through node environment variables
 (``algorithm_env``):
 
-============================== =========== =========== =========================
+============================== =========== ============ ========================
 Variable                        Type        Default      Description
-============================== =========== =========== =========================
+============================== =========== ============ ========================
 ``SAMPLE_SIZE_THRESHOLD``       int         10          Minimum rows and events
                                                         (strictly greater).
 ``COXPH_TIME_BIN_WIDTH``        float       (disabled)  Event-time bin width. When
@@ -128,7 +129,15 @@ Variable                        Type        Default      Description
                                                         ``1`` to disable tail
                                                         censoring and the jump
                                                         guard.
-============================== =========== =========== =========================
+``COXPH_PRIVACY_LEVEL``         string     ``standard`` The hardening level:
+                                                        ``minimal``, ``standard``
+                                                        or ``strict``. See
+                                                        ``Privacy.rst``.
+``COXPH_MAX_COVARIATES``        int        20           Maximum number of
+                                                        explanatory variables.
+``COXPH_MAX_GRID_POINTS``       int        1000         Maximum pooled event-time
+                                                        grid points.
+============================== =========== ============ ========================
 
 See ``docs/coxph/Privacy.rst`` for the privacy implications of these
 settings.
