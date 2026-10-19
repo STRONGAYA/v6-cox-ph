@@ -85,8 +85,14 @@ def _lifelines_reference(df, expl_vars):
 
 @pytest.fixture
 def guards_off(monkeypatch):
-    """Disable the risk-set jump guard (k=1) and binning for exactness tests."""
+    """Disable the risk-set jump guard (k=1) and binning for exactness tests.
+
+    COXPH_PRIVACY_LEVEL=minimal also switches the hardening bundle off
+    (reconstruction row bound, small-count time suppression, aggregate
+    rounding): the exactness tests must run with only the mandatory guards.
+    """
     monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+    monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
     monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
 
 
@@ -416,6 +422,7 @@ class TestWireContractPinning:
                 "sample_size_threshold",
                 "min_risk_set_change",
                 "time_bin_width",
+                "min_time_event_count",
             }
 
     def test_perform_iteration_result_keys(self, guards_off):

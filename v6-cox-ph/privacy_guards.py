@@ -739,6 +739,66 @@ def tail_cutoff(times: pd.Series, k: int) -> float | None:
     return float(np.sort(vals)[-k])
 
 
+def suppress_small_time_counts(times, freqs, min_count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Suppress small per-time event counts on the event-time grid.
+
+    Small-cell suppression on the shared event-time grid: a per-time event
+    count of 1 identifies a singleton. Times whose count is below
+    ``min_count`` are merged into the *following* time — a group's total
+    count is accumulated until it reaches ``min_count``, and the group is
+    then emitted at its largest time with the summed count. Merged cells tie
+    those events at the group's largest time (the same kind of small
+    perturbation as time binning) and the event total is preserved, so
+    ``n_events`` is unchanged. If the trailing group never reaches
+    ``min_count`` and at least one group was already emitted, it is merged
+    backward into the previous emitted group (its count is added, the
+    previous group's time is kept); a single-time grid is emitted unchanged.
+
+    Parameters
+    ----------
+    times : array-like
+        Sorted unique event times (float, ascending).
+    freqs : array-like
+        Positive integer event counts, one per time.
+    min_count : int
+        The minimum released per-time count. ``min_count <= 1`` returns the
+        inputs unchanged.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        ``(merged_times, merged_counts)`` as float64 / int64 arrays,
+        ascending, with the counts summing to the input total.
+    """
+    times_arr = np.asarray(times, dtype=float)
+    freqs_arr = np.asarray(freqs)
+    if min_count is None or min_count <= 1 or times_arr.size == 0:
+        return times_arr.astype(np.float64), freqs_arr.astype(np.int64)
+
+    merged_times: list[float] = []
+    merged_counts: list[int] = []
+    group_count = 0
+    group_time = 0.0
+    for t, f in zip(times_arr, freqs_arr):
+        # Times ascend, so t is the largest time of the group so far.
+        group_time = float(t)
+        group_count += int(f)
+        if group_count >= min_count:
+            merged_times.append(group_time)
+            merged_counts.append(group_count)
+            group_count = 0
+    if group_count > 0:
+        if merged_times:
+            # Trailing group below the minimum: merge it backward into the
+            # previous emitted group.
+            merged_counts[-1] += group_count
+        else:
+            # Nothing was emitted yet: the whole grid is one group.
+            merged_times.append(group_time)
+            merged_counts.append(group_count)
+    return np.asarray(merged_times, dtype=np.float64), np.asarray(merged_counts, dtype=np.int64)
+
+
 def prepare_time_column(
     df: pd.DataFrame,
     time_col: str,

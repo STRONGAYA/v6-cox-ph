@@ -23,6 +23,7 @@ from .privacy_guards import (
     guarded_risk_set_aggregates,
     prepare_node_data,
     prepare_time_column,
+    suppress_small_time_counts,
     validate_iteration_input,
 )
 
@@ -81,12 +82,20 @@ def compute_summed_z(
         times["freq"] = times[outcome_col]
         times = times.drop(columns=outcome_col)
 
+        # Small-cell suppression on the event-time grid: per-time counts below
+        # the configured minimum are merged into the following time.
+        merged_times, merged_counts = suppress_small_time_counts(
+            times[time_col].to_numpy(dtype=float), times["freq"].to_numpy(), settings.min_time_event_count
+        )
+        times = pd.DataFrame({time_col: merged_times, "freq": merged_counts})
+
         # The node's privacy settings (configuration, not data) let central
         # report which guards were active during the run.
         privacy_settings = {
             "sample_size_threshold": settings.sample_size_threshold,
             "min_risk_set_change": settings.min_risk_set_change,
             "time_bin_width": settings.time_bin_width,
+            "min_time_event_count": settings.min_time_event_count,
         }
         # The result dict is built from the wire model, so its keys and nesting
         # are pinned in one place (SummedZResult).

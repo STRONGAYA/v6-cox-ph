@@ -37,6 +37,7 @@ load_privacy_settings = privacy_guards.load_privacy_settings
 load_resource_caps = privacy_guards.load_resource_caps
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
+suppress_small_time_counts = privacy_guards.suppress_small_time_counts
 tail_cutoff = privacy_guards.tail_cutoff
 validate_expl_vars = privacy_guards.validate_expl_vars
 validate_iteration_input = privacy_guards.validate_iteration_input
@@ -726,6 +727,61 @@ class TestTailCutoff:
         message = str(exc_info.value)
         assert "5" in message
         assert "2" not in message
+
+
+@pytest.mark.unit
+class TestSuppressSmallTimeCounts:
+    """Tests for suppress_small_time_counts (exact values)."""
+
+    def test_min_count_one_is_noop(self):
+        times = np.array([1.0, 2.0, 3.0])
+        freqs = np.array([1, 5, 2])
+        merged_times, merged_counts = suppress_small_time_counts(times, freqs, 1)
+        np.testing.assert_array_equal(merged_times, times)
+        np.testing.assert_array_equal(merged_counts, freqs)
+
+    def test_merges_below_min_into_following_time(self):
+        """Groups accumulate until they reach the minimum, at the largest time."""
+        times = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        freqs = np.array([1, 1, 3, 1, 1])
+        merged_times, merged_counts = suppress_small_time_counts(times, freqs, 2)
+        np.testing.assert_array_equal(merged_times, [2.0, 3.0, 5.0])
+        np.testing.assert_array_equal(merged_counts, [2, 3, 2])
+        assert merged_times.dtype == np.float64
+        assert merged_counts.dtype == np.int64
+
+    def test_trailing_small_group_merges_backward(self):
+        """A trailing group below the minimum joins the previous emitted group."""
+        times = np.array([1.0, 2.0])
+        freqs = np.array([3, 1])
+        merged_times, merged_counts = suppress_small_time_counts(times, freqs, 2)
+        np.testing.assert_array_equal(merged_times, [1.0])
+        np.testing.assert_array_equal(merged_counts, [4])
+
+    def test_single_time_unchanged(self):
+        merged_times, merged_counts = suppress_small_time_counts(np.array([7.0]), np.array([1]), 5)
+        np.testing.assert_array_equal(merged_times, [7.0])
+        np.testing.assert_array_equal(merged_counts, [1])
+
+    def test_empty_input(self):
+        merged_times, merged_counts = suppress_small_time_counts(np.array([]), np.array([]), 2)
+        assert merged_times.shape == (0,)
+        assert merged_counts.shape == (0,)
+        assert merged_times.dtype == np.float64
+        assert merged_counts.dtype == np.int64
+
+    def test_counts_sum_preserved(self):
+        """The event total is unchanged and the output grid stays ascending."""
+        rng = np.random.default_rng(0)
+        times = np.unique(np.sort(rng.uniform(0, 100, size=50)))
+        freqs = rng.integers(1, 4, size=len(times))
+        for min_count in (1, 2, 3, 5):
+            merged_times, merged_counts = suppress_small_time_counts(times, freqs, min_count)
+            assert merged_counts.sum() == freqs.sum()
+            assert np.all(np.diff(merged_times) > 0)
+            # Every emitted group reaches the minimum, except a grid that is a
+            # single group in total.
+            assert len(merged_counts) == 1 or np.all(merged_counts >= min_count)
 
 
 @pytest.mark.unit
