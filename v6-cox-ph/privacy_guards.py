@@ -52,7 +52,7 @@ The resource caps are loaded centrally (``load_resource_caps``):
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -64,6 +64,7 @@ from vantage6.algorithm.tools.exceptions import (
     UserInputError,
 )
 
+from .coxph_logic import round_sig
 from .miscellaneous import format_validation_error
 from vantage6.algorithm.tools.util import info, warn
 
@@ -85,9 +86,16 @@ DEFAULT_PRIVACY_LEVEL = "standard"
 DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
 
+
 # Hardening bundles selected by COXPH_PRIVACY_LEVEL. "minimal" leaves only the
 # mandatory guards; "standard" is the default; "strict" hardens further.
-PRIVACY_LEVEL_PRESETS = {
+class _LevelPreset(TypedDict):
+    reconstruction_row_factor: int
+    min_time_event_count: int
+    aggregate_sig_figs: Optional[int]
+
+
+PRIVACY_LEVEL_PRESETS: dict[str, _LevelPreset] = {
     "minimal": {"reconstruction_row_factor": 1, "min_time_event_count": 1, "aggregate_sig_figs": None},
     "standard": {"reconstruction_row_factor": 10, "min_time_event_count": 2, "aggregate_sig_figs": 6},
     "strict": {"reconstruction_row_factor": 20, "min_time_event_count": 5, "aggregate_sig_figs": 4},
@@ -543,6 +551,38 @@ def guarded_risk_set_aggregates(
     agg2 = s1[effective]
     agg3 = s2[effective]
     return agg1, agg2, agg3
+
+
+def round_released_aggregates(agg1, agg2, agg3, sig_figs):
+    """Round the released risk-set aggregates to ``sig_figs`` significant figures.
+
+    The risk-set sums S0/S1/S2 leave the node at full float precision;
+    rounding them to a configurable number of significant figures (from the
+    privacy-level bundle, overridable through ``COXPH_AGGREGATE_SIG_FIGS``,
+    an empty value disables the rounding) limits how precisely the
+    aggregates pin down small groups. ``sig_figs=None`` returns the arrays
+    unchanged. Shapes and dtypes are preserved.
+
+    Parameters
+    ----------
+    agg1, agg2, agg3 : np.ndarray
+        The released aggregates: ``agg1`` (T,), ``agg2`` (T, p) and ``agg3``
+        (T, p, p).
+    sig_figs : int | None
+        Number of significant figures, or ``None`` to disable rounding.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        The rounded ``agg1``, ``agg2`` and ``agg3``.
+    """
+    if sig_figs is None:
+        return agg1, agg2, agg3
+    return (
+        round_sig(agg1, sig_figs),
+        round_sig(agg2, sig_figs),
+        round_sig(agg3, sig_figs),
+    )
 
 
 def validate_survival_columns(df: pd.DataFrame, time_col: str, outcome_col: Optional[str]) -> None:

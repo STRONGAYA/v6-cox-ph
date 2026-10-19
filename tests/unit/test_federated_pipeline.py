@@ -1264,6 +1264,13 @@ class TestGuardBiasRegression:
         datasets = self._simulate(20261005)
         covs = ["x1", "x2"]
 
+        # The bound covers the jump guard's bias (the study varied k only).
+        # The standard hardening bundle rounds the released aggregates, which
+        # adds a jitter floor to the centrally computed log-likelihood; on
+        # this dataset the step-halving loop then stalls before the
+        # convergence tolerance, so both runs here use the minimal level and
+        # the comparison stays about the jump guard.
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         unguarded = self._run(datasets)

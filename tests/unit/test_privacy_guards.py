@@ -37,6 +37,7 @@ load_privacy_settings = privacy_guards.load_privacy_settings
 load_resource_caps = privacy_guards.load_resource_caps
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
+round_released_aggregates = privacy_guards.round_released_aggregates
 suppress_small_time_counts = privacy_guards.suppress_small_time_counts
 tail_cutoff = privacy_guards.tail_cutoff
 validate_expl_vars = privacy_guards.validate_expl_vars
@@ -1012,3 +1013,38 @@ class TestRiskSetEquivalence:
         np.testing.assert_allclose(new1, ref1, rtol=1e-12, atol=1e-14)
         # The grid points beyond every row have empty risk sets
         assert new1[1] == 0.0 and new1[2] == 0.0
+
+
+@pytest.mark.unit
+class TestRoundReleasedAggregates:
+    """Tests for round_released_aggregates (exact values)."""
+
+    def test_none_returns_identical_arrays(self):
+        agg1 = np.array([123.456, 0.0123456])
+        agg2 = np.array([[1.23456, 2.34567], [3.45678, 4.56789]])
+        agg3 = np.arange(8, dtype=float).reshape(2, 2, 2) / 7.0
+        out1, out2, out3 = round_released_aggregates(agg1, agg2, agg3, None)
+        assert out1 is agg1
+        assert out2 is agg2
+        assert out3 is agg3
+
+    def test_sig_figs_rounds_exact_values(self):
+        agg1 = np.array([123.456, 0.0123456, 0.0])
+        agg2 = np.array([[1.0, -987.654]])
+        agg3 = np.array([[[0.00123456, 2.0], [3.0, 4.0]]])
+        out1, out2, out3 = round_released_aggregates(agg1, agg2, agg3, 3)
+        np.testing.assert_array_equal(out1, [123.0, 0.0123, 0.0])
+        np.testing.assert_array_equal(out2, [[1.0, -988.0]])
+        np.testing.assert_array_equal(out3, [[[0.00123, 2.0], [3.0, 4.0]]])
+
+    def test_shapes_and_dtypes_preserved(self):
+        agg1 = np.array([123.456, 0.0123456])
+        agg2 = np.array([[1.23456, 2.34567], [3.45678, 4.56789]])
+        agg3 = np.arange(8, dtype=float).reshape(2, 2, 2) / 7.0
+        out1, out2, out3 = round_released_aggregates(agg1, agg2, agg3, 4)
+        assert out1.shape == agg1.shape
+        assert out2.shape == agg2.shape
+        assert out3.shape == agg3.shape
+        assert out1.dtype == agg1.dtype
+        assert out2.dtype == agg2.dtype
+        assert out3.dtype == agg3.dtype

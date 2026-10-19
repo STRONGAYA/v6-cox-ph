@@ -23,6 +23,7 @@ from .privacy_guards import (
     guarded_risk_set_aggregates,
     prepare_node_data,
     prepare_time_column,
+    round_released_aggregates,
     suppress_small_time_counts,
     validate_iteration_input,
 )
@@ -187,6 +188,9 @@ def perform_iteration(
         agg1, agg2, agg3 = guarded_risk_set_aggregates(
             df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
         )
+
+        # Round the released aggregates to the configured precision.
+        agg1, agg2, agg3 = round_released_aggregates(agg1, agg2, agg3, settings.aggregate_sig_figs)
 
         # The result dict is built from the wire model, so its keys and nesting
         # are pinned in one place (IterationResult).
