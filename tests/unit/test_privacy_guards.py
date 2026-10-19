@@ -96,6 +96,13 @@ class TestLoadPrivacySettings:
         with pytest.raises(UserInputError, match="must be"):
             load_privacy_settings()
 
+    def test_invalid_setting_error_not_chained(self, monkeypatch):
+        """The settings error carries no chained cause (no traceback in the log)."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "0")
+        with pytest.raises(UserInputError) as exc_info:
+            load_privacy_settings()
+        assert exc_info.value.__cause__ is None
+
 
 @pytest.mark.unit
 class TestCheckSampleSize:
@@ -291,6 +298,15 @@ class TestValidateIterationInput:
     def test_scale_non_finite(self, settings):
         with pytest.raises(UserInputError, match="scale contains non-finite"):
             validate_iteration_input([0.1, 0.2], [0.0, 0.0], [1.0, np.inf], [1.0], ["a", "b"], settings)
+
+    def test_error_not_chained_and_echoes_no_input(self, settings):
+        """A rejected payload surfaces a clean error: no chained traceback, no input values."""
+        with pytest.raises(UserInputError) as exc_info:
+            validate_iteration_input([0.1], [0.0], [1.0], [7.5, 2.5], ["a"], settings)
+        assert exc_info.value.__cause__ is None
+        message = str(exc_info.value)
+        assert "7.5" not in message
+        assert "2.5" not in message
 
 
 @pytest.mark.unit
@@ -533,10 +549,13 @@ class TestTailCutoff:
         assert tail_cutoff(times, k=3) == 3.0
 
     def test_fewer_than_k_raises(self):
-        """Fewer than k valid times raises PrivacyViolation."""
+        """Fewer than k valid times raises PrivacyViolation naming k, never the count."""
         times = pd.Series([1.0, 2.0])
-        with pytest.raises(PrivacyViolation):
+        with pytest.raises(PrivacyViolation) as exc_info:
             tail_cutoff(times, k=5)
+        message = str(exc_info.value)
+        assert "5" in message
+        assert "2" not in message
 
 
 @pytest.mark.unit

@@ -125,9 +125,10 @@ def load_privacy_settings() -> PrivacySettings:
             min_risk_set_change=min_risk_set_change,
         )
     except ValidationError as e:
-        # The offending values are node configuration, not data; echoing them
-        # is what the current messages do and is safe.
-        raise UserInputError(f"Invalid privacy settings: {format_validation_error(e)}") from e
+        # The message is formatted without the offending input; the chained
+        # traceback would reach the container log the researcher reads, so
+        # the cause is suppressed.
+        raise UserInputError(f"Invalid privacy settings: {format_validation_error(e)}") from None
 
 
 def ensure_spawned_by_central(client) -> None:
@@ -501,7 +502,9 @@ def validate_iteration_input(
             context={"expl_vars": expl_vars, "settings": settings},
         )
     except ValidationError as e:
-        raise UserInputError(format_validation_error(e)) from e
+        # Formatted without the offending input, and without the chained
+        # traceback that would reach the container log.
+        raise UserInputError(format_validation_error(e)) from None
 
     beta_arr = np.asarray(beta, dtype=float)
     centre_arr = np.asarray(centre, dtype=float)
@@ -541,9 +544,9 @@ def tail_cutoff(times: pd.Series, k: int) -> float | None:
         return None
     vals = pd.to_numeric(times, errors="coerce").dropna().to_numpy()
     if len(vals) < k:
-        raise PrivacyViolation(
-            f"Tail censoring requires at least {k} valid times but only " f"{len(vals)} are available."
-        )
+        # The message names the configured k only; the actual number of valid
+        # times is a count and must not reach the container log.
+        raise PrivacyViolation(f"Tail censoring requires at least {k} valid times; fewer are available.")
     return float(np.sort(vals)[-k])
 
 

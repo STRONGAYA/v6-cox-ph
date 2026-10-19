@@ -10,7 +10,12 @@ or directly to the user (if they requested partial results).
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
-from vantage6.algorithm.tools.exceptions import PrivacyThresholdViolation
+from vantage6.algorithm.tools.exceptions import (
+    AlgorithmError,
+    PrivacyThresholdViolation,
+    PrivacyViolation,
+    UserInputError,
+)
 from vantage6.algorithm.tools.util import info
 
 from .miscellaneous import IterationResult, SummedZResult
@@ -52,45 +57,53 @@ def compute_summed_z(
     dict
         A dictionary containing the sum of the explanatory variables.
     """
-    info("Computing summed Z statistics")
+    try:
+        info("Computing summed Z statistics")
 
-    df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
+        df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 
-    if not threshold_met:
-        raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
+        if not threshold_met:
+            raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
-    df = prepare_time_column(df, time_col, settings, outcome_col)
+        df = prepare_time_column(df, time_col, settings, outcome_col)
 
-    events = df[df[outcome_col] == 1]
-    z_sum = events[expl_vars].sum().to_dict()
-    # Sum of squares over the event cases: with z_sum this yields the pooled
-    # covariate centre and spread over events without another round-trip.
-    sum_squares = events[expl_vars].pow(2).sum().to_dict()
+        events = df[df[outcome_col] == 1]
+        z_sum = events[expl_vars].sum().to_dict()
+        # Sum of squares over the event cases: with z_sum this yields the pooled
+        # covariate centre and spread over events without another round-trip.
+        sum_squares = events[expl_vars].pow(2).sum().to_dict()
 
-    # Also return per-time event counts from the same NaN-dropped,
-    # censored DataFrame so that central can build aggregated_time_events
-    # that are consistent with z_sum and the risk sets.
-    times = events.groupby(time_col, as_index=False).count()
-    times = times.sort_values(by=time_col)[[time_col, outcome_col]]
-    times["freq"] = times[outcome_col]
-    times = times.drop(columns=outcome_col)
+        # Also return per-time event counts from the same NaN-dropped,
+        # censored DataFrame so that central can build aggregated_time_events
+        # that are consistent with z_sum and the risk sets.
+        times = events.groupby(time_col, as_index=False).count()
+        times = times.sort_values(by=time_col)[[time_col, outcome_col]]
+        times["freq"] = times[outcome_col]
+        times = times.drop(columns=outcome_col)
 
-    # The node's privacy settings (configuration, not data) let central
-    # report which guards were active during the run.
-    privacy_settings = {
-        "sample_size_threshold": settings.sample_size_threshold,
-        "min_risk_set_change": settings.min_risk_set_change,
-        "time_bin_width": settings.time_bin_width,
-    }
-    # The result dict is built from the wire model, so its keys and nesting
-    # are pinned in one place (SummedZResult).
-    return SummedZResult(
-        organization_id=client.organization_id,
-        sum=z_sum,
-        sum_squares=sum_squares,
-        times=times.to_dict(),
-        privacy_settings=privacy_settings,
-    ).model_dump()
+        # The node's privacy settings (configuration, not data) let central
+        # report which guards were active during the run.
+        privacy_settings = {
+            "sample_size_threshold": settings.sample_size_threshold,
+            "min_risk_set_change": settings.min_risk_set_change,
+            "time_bin_width": settings.time_bin_width,
+        }
+        # The result dict is built from the wire model, so its keys and nesting
+        # are pinned in one place (SummedZResult).
+        return SummedZResult(
+            organization_id=client.organization_id,
+            sum=z_sum,
+            sum_squares=sum_squares,
+            times=times.to_dict(),
+            privacy_settings=privacy_settings,
+        ).model_dump()
+    except (UserInputError, PrivacyThresholdViolation, PrivacyViolation, AlgorithmError):
+        # Typed vantage6 errors are part of the contract; they surface as-is.
+        raise
+    except Exception as e:
+        # Unexpected library errors must not leak their text into the
+        # container log the researcher reads; the type name is enough.
+        raise AlgorithmError(f"Unexpected error in compute_summed_z: {type(e).__name__}") from None
 
 
 @data(1)
@@ -144,32 +157,40 @@ def perform_iteration(
     dict
         A dictionary containing the aggregates computed during the iteration.
     """
-    info("Computing aggregates for the derivation of the partial likelihood")
+    try:
+        info("Computing aggregates for the derivation of the partial likelihood")
 
-    df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
+        df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
 
-    # A node that passed compute_summed_z passes this check as well (the same
-    # rows are analysed); the threshold here is defence in depth.
-    if not threshold_met:
-        raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
+        # A node that passed compute_summed_z passes this check as well (the same
+        # rows are analysed); the threshold here is defence in depth.
+        if not threshold_met:
+            raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
-    beta_arr, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
-        beta, centre, scale, unique_time_events, expl_vars, settings
-    )
+        beta_arr, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
+            beta, centre, scale, unique_time_events, expl_vars, settings
+        )
 
-    df = prepare_time_column(df, time_col, settings, outcome_col)
+        df = prepare_time_column(df, time_col, settings, outcome_col)
 
-    X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
+        X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 
-    agg1, agg2, agg3 = guarded_risk_set_aggregates(
-        df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
-    )
+        agg1, agg2, agg3 = guarded_risk_set_aggregates(
+            df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
+        )
 
-    # The result dict is built from the wire model, so its keys and nesting
-    # are pinned in one place (IterationResult).
-    return IterationResult(
-        organization_id=client.organization_id,
-        agg1=agg1.tolist(),
-        agg2=agg2.tolist(),
-        agg3=agg3.tolist(),
-    ).model_dump()
+        # The result dict is built from the wire model, so its keys and nesting
+        # are pinned in one place (IterationResult).
+        return IterationResult(
+            organization_id=client.organization_id,
+            agg1=agg1.tolist(),
+            agg2=agg2.tolist(),
+            agg3=agg3.tolist(),
+        ).model_dump()
+    except (UserInputError, PrivacyThresholdViolation, PrivacyViolation, AlgorithmError):
+        # Typed vantage6 errors are part of the contract; they surface as-is.
+        raise
+    except Exception as e:
+        # Unexpected library errors must not leak their text into the
+        # container log the researcher reads; the type name is enough.
+        raise AlgorithmError(f"Unexpected error in perform_iteration: {type(e).__name__}") from None
