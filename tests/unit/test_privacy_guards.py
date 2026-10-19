@@ -27,12 +27,14 @@ privacy_guards = import_module("v6-cox-ph.privacy_guards")
 DEFAULT_MIN_RISK_SET_CHANGE = privacy_guards.DEFAULT_MIN_RISK_SET_CHANGE
 DEFAULT_SAMPLE_SIZE_THRESHOLD = privacy_guards.DEFAULT_SAMPLE_SIZE_THRESHOLD
 PrivacySettings = privacy_guards.PrivacySettings
+ResourceCaps = privacy_guards.ResourceCaps
 bin_times = privacy_guards.bin_times
 check_sample_size = privacy_guards.check_sample_size
 drop_incomplete_rows = privacy_guards.drop_incomplete_rows
 ensure_spawned_by_central = privacy_guards.ensure_spawned_by_central
 guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
 load_privacy_settings = privacy_guards.load_privacy_settings
+load_resource_caps = privacy_guards.load_resource_caps
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
 tail_cutoff = privacy_guards.tail_cutoff
@@ -46,15 +48,31 @@ from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
 class TestLoadPrivacySettings:
     """Tests for load_privacy_settings."""
 
-    def test_defaults(self, monkeypatch):
+    @pytest.fixture
+    def clean_env(self, monkeypatch):
+        """Remove every privacy env var so the defaults / presets apply."""
+        for var in [
+            "SAMPLE_SIZE_THRESHOLD",
+            "COXPH_TIME_BIN_WIDTH",
+            "COXPH_MIN_RISK_SET_CHANGE",
+            "COXPH_PRIVACY_LEVEL",
+            "COXPH_RECONSTRUCTION_ROW_FACTOR",
+            "COXPH_MIN_TIME_EVENT_COUNT",
+            "COXPH_AGGREGATE_SIG_FIGS",
+        ]:
+            monkeypatch.delenv(var, raising=False)
+
+    def test_defaults(self, clean_env):
         """Default settings when no env vars are set."""
-        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
-        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         s = load_privacy_settings()
         assert s.sample_size_threshold == DEFAULT_SAMPLE_SIZE_THRESHOLD
         assert s.min_risk_set_change == DEFAULT_MIN_RISK_SET_CHANGE
         assert s.time_bin_width is None
+        # The default privacy level is "standard" with its hardening bundle.
+        assert s.privacy_level == "standard"
+        assert s.reconstruction_row_factor == 10
+        assert s.min_time_event_count == 2
+        assert s.aggregate_sig_figs == 6
 
     def test_custom_values(self, monkeypatch):
         """Custom values from env vars."""
@@ -65,6 +83,70 @@ class TestLoadPrivacySettings:
         assert s.sample_size_threshold == 15
         assert s.min_risk_set_change == 8
         assert s.time_bin_width == 10.0
+
+    def test_level_strict(self, clean_env, monkeypatch):
+        """The strict level prescribes the strict hardening bundle."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "strict")
+        s = load_privacy_settings()
+        assert s.privacy_level == "strict"
+        assert s.reconstruction_row_factor == 20
+        assert s.min_time_event_count == 5
+        assert s.aggregate_sig_figs == 4
+
+    def test_level_minimal(self, clean_env, monkeypatch):
+        """The minimal level turns the optional hardening off."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        s = load_privacy_settings()
+        assert s.privacy_level == "minimal"
+        assert s.reconstruction_row_factor == 1
+        assert s.min_time_event_count == 1
+        assert s.aggregate_sig_figs is None
+
+    def test_level_case_insensitive(self, clean_env, monkeypatch):
+        """The level is matched case-insensitively (and trimmed)."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "  StRiCt ")
+        s = load_privacy_settings()
+        assert s.privacy_level == "strict"
+        assert s.reconstruction_row_factor == 20
+
+    def test_invalid_level(self, clean_env, monkeypatch):
+        """An unknown level raises UserInputError naming the allowed values."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "paranoid")
+        with pytest.raises(UserInputError, match="COXPH_PRIVACY_LEVEL"):
+            load_privacy_settings()
+
+    def test_explicit_knob_beats_level(self, clean_env, monkeypatch):
+        """A set override beats the level preset; unset knobs keep it."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "strict")
+        monkeypatch.setenv("COXPH_RECONSTRUCTION_ROW_FACTOR", "7")
+        monkeypatch.setenv("COXPH_MIN_TIME_EVENT_COUNT", "3")
+        s = load_privacy_settings()
+        assert s.reconstruction_row_factor == 7
+        assert s.min_time_event_count == 3
+        assert s.aggregate_sig_figs == 4
+
+    def test_empty_sig_figs_disables_rounding(self, clean_env, monkeypatch):
+        """An empty COXPH_AGGREGATE_SIG_FIGS switches the rounding off."""
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
+        s = load_privacy_settings()
+        assert s.aggregate_sig_figs is None
+
+    def test_invalid_knob_values(self, clean_env, monkeypatch):
+        """Invalid override values raise UserInputError naming the variable."""
+        monkeypatch.setenv("COXPH_RECONSTRUCTION_ROW_FACTOR", "0")
+        with pytest.raises(UserInputError, match="COXPH_RECONSTRUCTION_ROW_FACTOR"):
+            load_privacy_settings()
+        monkeypatch.setenv("COXPH_RECONSTRUCTION_ROW_FACTOR", "wide")
+        with pytest.raises(UserInputError, match="COXPH_RECONSTRUCTION_ROW_FACTOR"):
+            load_privacy_settings()
+        monkeypatch.delenv("COXPH_RECONSTRUCTION_ROW_FACTOR")
+        monkeypatch.setenv("COXPH_MIN_TIME_EVENT_COUNT", "-2")
+        with pytest.raises(UserInputError, match="COXPH_MIN_TIME_EVENT_COUNT"):
+            load_privacy_settings()
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT")
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "0")
+        with pytest.raises(UserInputError, match="COXPH_AGGREGATE_SIG_FIGS"):
+            load_privacy_settings()
 
     def test_invalid_threshold(self, monkeypatch):
         """Non-positive threshold raises UserInputError."""
@@ -105,6 +187,42 @@ class TestLoadPrivacySettings:
 
 
 @pytest.mark.unit
+class TestLoadResourceCaps:
+    """Tests for load_resource_caps."""
+
+    @pytest.fixture
+    def clean_env(self, monkeypatch):
+        monkeypatch.delenv("COXPH_MAX_COVARIATES", raising=False)
+        monkeypatch.delenv("COXPH_MAX_GRID_POINTS", raising=False)
+
+    def test_defaults(self, clean_env):
+        caps = load_resource_caps()
+        assert isinstance(caps, ResourceCaps)
+        assert caps.max_covariates == 20
+        assert caps.max_grid_points == 1000
+
+    def test_custom_values(self, clean_env, monkeypatch):
+        monkeypatch.setenv("COXPH_MAX_COVARIATES", "50")
+        monkeypatch.setenv("COXPH_MAX_GRID_POINTS", "5000")
+        caps = load_resource_caps()
+        assert caps.max_covariates == 50
+        assert caps.max_grid_points == 5000
+
+    def test_invalid_values_raise(self, clean_env, monkeypatch):
+        """Invalid cap values raise UserInputError naming the variable."""
+        monkeypatch.setenv("COXPH_MAX_COVARIATES", "0")
+        with pytest.raises(UserInputError, match="COXPH_MAX_COVARIATES"):
+            load_resource_caps()
+        monkeypatch.setenv("COXPH_MAX_COVARIATES", "many")
+        with pytest.raises(UserInputError, match="COXPH_MAX_COVARIATES"):
+            load_resource_caps()
+        monkeypatch.delenv("COXPH_MAX_COVARIATES")
+        monkeypatch.setenv("COXPH_MAX_GRID_POINTS", "-1")
+        with pytest.raises(UserInputError, match="COXPH_MAX_GRID_POINTS"):
+            load_resource_caps()
+
+
+@pytest.mark.unit
 class TestCheckSampleSize:
     """Tests for check_sample_size."""
 
@@ -114,6 +232,9 @@ class TestCheckSampleSize:
             sample_size_threshold=10,
             time_bin_width=None,
             min_risk_set_change=5,
+            # These tests pin threshold semantics; the reconstruction row
+            # bound has its own test class.
+            reconstruction_row_factor=1,
         )
 
     def test_sufficient_rows_and_events(self, settings):
@@ -146,6 +267,50 @@ class TestCheckSampleSize:
         df = pd.DataFrame({"x": range(20)})
         with pytest.raises(UserInputError, match="Outcome column"):
             check_sample_size(df, "event", settings)
+
+
+@pytest.mark.unit
+class TestReconstructionRowBound:
+    """The sample-size check also enforces rows >= factor * k."""
+
+    @pytest.fixture
+    def settings(self):
+        # Reconstruction bound = 10 * 5 = 50 rows.
+        return PrivacySettings(
+            sample_size_threshold=10,
+            time_bin_width=None,
+            min_risk_set_change=5,
+            reconstruction_row_factor=10,
+        )
+
+    def test_boundary_inclusive(self, settings):
+        """49 rows fails the bound, 50 rows meets it (events above threshold)."""
+        df_49 = pd.DataFrame({"event": [1] * 49})
+        assert check_sample_size(df_49, "event", settings) is False
+        df_50 = pd.DataFrame({"event": [1] * 50})
+        assert check_sample_size(df_50, "event", settings) is True
+
+    def test_bound_uses_configured_factor_and_k(self):
+        """The bound is factor * k of the loaded settings."""
+        settings = PrivacySettings(
+            sample_size_threshold=2,
+            time_bin_width=None,
+            min_risk_set_change=3,
+            reconstruction_row_factor=4,
+        )
+        # Bound = 4 * 3 = 12 rows.
+        assert check_sample_size(pd.DataFrame({"event": [1] * 11}), "event", settings) is False
+        assert check_sample_size(pd.DataFrame({"event": [1] * 12}), "event", settings) is True
+
+    def test_warning_names_bound_not_count(self, settings, capsys):
+        """The warning names the configured bound, never the actual count."""
+        # vantage6's warn writes to stdout rather than the logging module, so
+        # the text is captured with capsys instead of caplog.
+        df = pd.DataFrame({"event": [1] * 49})
+        assert check_sample_size(df, "event", settings) is False
+        out = capsys.readouterr().out
+        assert "10 x k=5" in out
+        assert "49" not in out
 
 
 @pytest.mark.unit
@@ -321,12 +486,14 @@ class TestPrepareNodeData:
 
     @pytest.fixture
     def node_df(self):
+        # 60 rows: the default privacy level's reconstruction bound (10 x k=5
+        # = 50 rows) must not trip the threshold in these guard-order tests.
         return pd.DataFrame(
             {
-                "time": [float(i) for i in range(1, 31)],
-                "event": [1] * 15 + [0] * 15,
-                "age": [50.0] * 30,
-                "treatment": [0, 1] * 15,
+                "time": [float(i) for i in range(1, 61)],
+                "event": [1] * 30 + [0] * 30,
+                "age": [50.0] * 60,
+                "treatment": [0, 1] * 30,
             }
         )
 
@@ -386,7 +553,7 @@ class TestPrepareNodeData:
             "check_sample_size",
         ]
         assert threshold_met is True
-        assert len(df) == 30
+        assert len(df) == 60
 
     def test_guard_order_without_expl_vars(self, client, node_df, default_env, monkeypatch):
         """Without expl_vars, validate_expl_vars is skipped; order is stable."""
@@ -417,7 +584,7 @@ class TestPrepareNodeData:
     def test_need_outcome_false_checks_rows_only(self, client, default_env, monkeypatch):
         """need_outcome=False checks rows only (perform_iteration today)."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
-        df = pd.DataFrame({"time": [1.0] * 30, "age": [50.0] * 30})
+        df = pd.DataFrame({"time": [1.0] * 60, "age": [50.0] * 60})
         _, _, threshold_met = prepare_node_data(client, df, "time", None, ["age"], need_outcome=False)
         assert threshold_met is True
         df_small = pd.DataFrame({"time": [1.0] * 5, "age": [50.0] * 5})
@@ -427,6 +594,9 @@ class TestPrepareNodeData:
     def test_nan_rows_dropped_before_threshold(self, client, default_env, monkeypatch):
         """Rows with NaN in any analysed column are dropped before the threshold."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "12")
+        # The reconstruction row bound is switched off: this test isolates the
+        # NaN-dropping / threshold semantics, not the row bound.
+        monkeypatch.setenv("COXPH_RECONSTRUCTION_ROW_FACTOR", "1")
         df = pd.DataFrame(
             {
                 "time": [1.0] * 30,

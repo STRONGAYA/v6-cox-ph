@@ -21,6 +21,33 @@ via ``get_env_var``:
   coarsened to a regular grid ``floor(t / w) * w``.
 - ``COXPH_MIN_RISK_SET_CHANGE`` (int, default 5) — the minimum number of
   individuals by which consecutive shared risk-set aggregates must differ.
+- ``COXPH_PRIVACY_LEVEL`` (string, default ``"standard"``, case-insensitive)
+  — selects a preset bundle of hardening knobs. ``"minimal"`` leaves only the
+  mandatory guards; ``"standard"`` is the default; ``"strict"`` hardens
+  further. The presets are:
+
+  - ``"minimal"``: ``reconstruction_row_factor`` 1 (off),
+    ``min_time_event_count`` 1 (off), ``aggregate_sig_figs`` off (``None``).
+  - ``"standard"``: ``reconstruction_row_factor`` 10,
+    ``min_time_event_count`` 2, ``aggregate_sig_figs`` 6.
+  - ``"strict"``: ``reconstruction_row_factor`` 20, ``min_time_event_count``
+    5, ``aggregate_sig_figs`` 4.
+
+  Each knob can also be set individually; an explicitly set, non-empty
+  variable beats the level preset:
+
+- ``COXPH_RECONSTRUCTION_ROW_FACTOR`` (int >= 1) — the sample-size check also
+  requires ``rows >= factor * k``, so a node stays many times larger than the
+  smallest released group.
+- ``COXPH_MIN_TIME_EVENT_COUNT`` (int >= 1) — per-time event counts below this
+  are merged into the following time before they are shared.
+- ``COXPH_AGGREGATE_SIG_FIGS`` (int >= 1; an empty string disables rounding) —
+  released risk-set aggregates are rounded to this many significant figures.
+
+The resource caps are loaded centrally (``load_resource_caps``):
+
+- ``COXPH_MAX_COVARIATES`` (int >= 1, default 20).
+- ``COXPH_MAX_GRID_POINTS`` (int >= 1, default 1000).
 """
 
 from __future__ import annotations
@@ -30,7 +57,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import jwt
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
     PrivacyViolation,
@@ -44,10 +71,27 @@ from vantage6.algorithm.tools.util import info, warn
 ENV_SAMPLE_SIZE_THRESHOLD = "SAMPLE_SIZE_THRESHOLD"
 ENV_TIME_BIN_WIDTH = "COXPH_TIME_BIN_WIDTH"
 ENV_MIN_RISK_SET_CHANGE = "COXPH_MIN_RISK_SET_CHANGE"
+ENV_PRIVACY_LEVEL = "COXPH_PRIVACY_LEVEL"
+ENV_RECONSTRUCTION_ROW_FACTOR = "COXPH_RECONSTRUCTION_ROW_FACTOR"
+ENV_MIN_TIME_EVENT_COUNT = "COXPH_MIN_TIME_EVENT_COUNT"
+ENV_AGGREGATE_SIG_FIGS = "COXPH_AGGREGATE_SIG_FIGS"
+ENV_MAX_COVARIATES = "COXPH_MAX_COVARIATES"
+ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
 DEFAULT_MIN_RISK_SET_CHANGE = 5
+DEFAULT_PRIVACY_LEVEL = "standard"
+DEFAULT_MAX_COVARIATES = 20
+DEFAULT_MAX_GRID_POINTS = 1000
+
+# Hardening bundles selected by COXPH_PRIVACY_LEVEL. "minimal" leaves only the
+# mandatory guards; "standard" is the default; "strict" hardens further.
+PRIVACY_LEVEL_PRESETS = {
+    "minimal": {"reconstruction_row_factor": 1, "min_time_event_count": 1, "aggregate_sig_figs": None},
+    "standard": {"reconstruction_row_factor": 10, "min_time_event_count": 2, "aggregate_sig_figs": 6},
+    "strict": {"reconstruction_row_factor": 20, "min_time_event_count": 5, "aggregate_sig_figs": 4},
+}
 
 
 class PrivacySettings(BaseModel):
@@ -59,6 +103,14 @@ class PrivacySettings(BaseModel):
     vantage6's ``get_env_var`` (which decodes base32-encoded
     ``algorithm_env``); ``pydantic-settings`` would read ``os.environ``
     directly and bypass that decoding, so it is not used.
+
+    ``privacy_level`` records which hardening bundle was selected. The
+    three knobs the level prescribes — ``reconstruction_row_factor``,
+    ``min_time_event_count`` and ``aggregate_sig_figs`` — are resolved in
+    ``load_privacy_settings``: an explicitly set, non-empty environment
+    variable beats the level preset, and an empty
+    ``COXPH_AGGREGATE_SIG_FIGS`` switches the aggregate rounding off
+    (``None``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -66,6 +118,18 @@ class PrivacySettings(BaseModel):
     sample_size_threshold: int = Field(gt=0)
     time_bin_width: Optional[float] = Field(default=None, gt=0)
     min_risk_set_change: int = Field(ge=1)
+    privacy_level: str = Field(default=DEFAULT_PRIVACY_LEVEL)
+    reconstruction_row_factor: int = Field(default=10, ge=1)
+    min_time_event_count: int = Field(default=2, ge=1)
+    aggregate_sig_figs: Optional[int] = Field(default=6, ge=1)
+
+    @field_validator("privacy_level")
+    @classmethod
+    def _known_privacy_level(cls, v: str) -> str:
+        if v not in PRIVACY_LEVEL_PRESETS:
+            allowed = ", ".join(f"'{name}'" for name in PRIVACY_LEVEL_PRESETS)
+            raise ValueError(f"privacy_level must be one of {allowed}")
+        return v
 
     @model_validator(mode="after")
     def _threshold_covers_k(self) -> "PrivacySettings":
@@ -79,22 +143,78 @@ class PrivacySettings(BaseModel):
         return self
 
 
+class ResourceCaps(BaseModel):
+    """Centrally enforced resource caps, read from the environment.
+
+    Frozen Pydantic model; ``load_resource_caps`` supplies the defaults and
+    validates the values (configuration, not data).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    max_covariates: int = Field(ge=1)
+    max_grid_points: int = Field(ge=1)
+
+
+def _parse_positive_int(raw, name: str) -> int:
+    """Parse an ``int >= 1`` from an environment value, or raise UserInputError."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise UserInputError(f"{name} must be an integer >= 1, got {raw!r}") from None
+    if value < 1:
+        raise UserInputError(f"{name} must be an integer >= 1, got {raw!r}") from None
+    return value
+
+
+def _resolve_privacy_level(raw) -> str:
+    """Normalise COXPH_PRIVACY_LEVEL (case-insensitive) or raise UserInputError."""
+    level = str(raw).strip().lower()
+    if level not in PRIVACY_LEVEL_PRESETS:
+        allowed = ", ".join(f"'{name}'" for name in PRIVACY_LEVEL_PRESETS)
+        raise UserInputError(f"{ENV_PRIVACY_LEVEL} must be one of {allowed} (case-insensitive), got {raw!r}")
+    return level
+
+
+def _resolve_knob(raw, preset_value: int, name: str) -> int:
+    """Resolve a hardening knob: explicit env var (non-empty) beats the preset."""
+    if raw is None or str(raw).strip() == "":
+        return preset_value
+    return _parse_positive_int(raw, name)
+
+
+def _resolve_sig_figs(raw, preset_value: Optional[int]) -> Optional[int]:
+    """Resolve the rounding precision; an empty env var switches it off."""
+    if raw is None:
+        return preset_value
+    if str(raw).strip() == "":
+        return None
+    return _parse_positive_int(raw, ENV_AGGREGATE_SIG_FIGS)
+
+
 def load_privacy_settings() -> PrivacySettings:
     """Load privacy settings from node environment variables.
 
     Uses ``get_env_var`` so that base32-encoded ``algorithm_env`` values are
     decoded the same way as in the rest of vantage6.
 
+    The hardening knobs are resolved per knob: an explicitly set, non-empty
+    environment variable beats the ``COXPH_PRIVACY_LEVEL`` preset, and an
+    empty ``COXPH_AGGREGATE_SIG_FIGS`` disables the aggregate rounding.
+
     Returns
     -------
     PrivacySettings
         Validated settings. ``time_bin_width`` is ``None`` when binning is
+        disabled; ``aggregate_sig_figs`` is ``None`` when rounding is
         disabled.
 
     Raises
     ------
     UserInputError
-        If a setting value is not a positive number.
+        If a setting value is not a positive number, the privacy level is
+        not one of the allowed values, or a hardening knob is not an
+        integer >= 1.
     """
     from vantage6.algorithm.tools.util import get_env_var
 
@@ -118,17 +238,70 @@ def load_privacy_settings() -> PrivacySettings:
                 f"{ENV_TIME_BIN_WIDTH} must be a positive float, got " f"{time_bin_width_raw!r}"
             ) from e
 
+    privacy_level = _resolve_privacy_level(get_env_var(ENV_PRIVACY_LEVEL, default=DEFAULT_PRIVACY_LEVEL))
+    preset = PRIVACY_LEVEL_PRESETS[privacy_level]
+    reconstruction_row_factor = _resolve_knob(
+        get_env_var(ENV_RECONSTRUCTION_ROW_FACTOR, default=None),
+        preset["reconstruction_row_factor"],
+        ENV_RECONSTRUCTION_ROW_FACTOR,
+    )
+    min_time_event_count = _resolve_knob(
+        get_env_var(ENV_MIN_TIME_EVENT_COUNT, default=None),
+        preset["min_time_event_count"],
+        ENV_MIN_TIME_EVENT_COUNT,
+    )
+    aggregate_sig_figs = _resolve_sig_figs(
+        get_env_var(ENV_AGGREGATE_SIG_FIGS, default=None),
+        preset["aggregate_sig_figs"],
+    )
+
     try:
         return PrivacySettings(
             sample_size_threshold=sample_size_threshold,
             time_bin_width=time_bin_width,
             min_risk_set_change=min_risk_set_change,
+            privacy_level=privacy_level,
+            reconstruction_row_factor=reconstruction_row_factor,
+            min_time_event_count=min_time_event_count,
+            aggregate_sig_figs=aggregate_sig_figs,
         )
     except ValidationError as e:
         # The message is formatted without the offending input; the chained
         # traceback would reach the container log the researcher reads, so
         # the cause is suppressed.
         raise UserInputError(f"Invalid privacy settings: {format_validation_error(e)}") from None
+
+
+def load_resource_caps() -> ResourceCaps:
+    """Load the resource caps from the environment (centrally enforced).
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. The caps bound the
+    problem size the algorithm accepts; they are configuration, not data.
+
+    Returns
+    -------
+    ResourceCaps
+        Validated caps (``max_covariates``, ``max_grid_points``).
+
+    Raises
+    ------
+    UserInputError
+        If a cap is not an integer >= 1.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    max_covariates = _parse_positive_int(
+        get_env_var(ENV_MAX_COVARIATES, default=str(DEFAULT_MAX_COVARIATES)),
+        ENV_MAX_COVARIATES,
+    )
+    max_grid_points = _parse_positive_int(
+        get_env_var(ENV_MAX_GRID_POINTS, default=str(DEFAULT_MAX_GRID_POINTS)),
+        ENV_MAX_GRID_POINTS,
+    )
+    try:
+        return ResourceCaps(max_covariates=max_covariates, max_grid_points=max_grid_points)
+    except ValidationError as e:
+        raise UserInputError(f"Invalid resource caps: {format_validation_error(e)}") from None
 
 
 def ensure_spawned_by_central(client) -> None:
@@ -419,6 +592,13 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     container log is returned to the researcher with the run, and a
     below-threshold count is exactly what the threshold protects.
 
+    The sample-size threshold bounds *participation*, not reconstruction: a
+    node whose entire content enters one released risk set can be
+    reconstructed from the aggregates. A second, reconstruction bound
+    therefore also applies — the node must have at least
+    ``reconstruction_row_factor * k`` rows, which keeps the node many times
+    larger than the smallest released group.
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -432,12 +612,21 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     Returns
     -------
     bool
-        ``True`` when rows > threshold and (when checked) events > threshold.
+        ``True`` when rows > threshold, rows >= factor * k and (when checked)
+        events > threshold.
     """
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
         warn(f"Sample size threshold not met: row count does not exceed {threshold}.")
+        return False
+
+    reconstruction_bound = settings.reconstruction_row_factor * settings.min_risk_set_change
+    if n_rows < reconstruction_bound:
+        warn(
+            f"Sample size threshold not met: row count does not meet the reconstruction bound "
+            f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change})."
+        )
         return False
 
     if outcome_col is not None:
