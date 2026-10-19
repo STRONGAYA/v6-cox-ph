@@ -196,21 +196,36 @@ def central(
     # when any guard was active, because the estimates are then approximate.
     max_min_risk_set_change = max(int(s.get("min_risk_set_change") or 1) for s in node_privacy_settings)
     time_binning = any(s.get("time_bin_width") for s in node_privacy_settings)
-    guards_active = max_min_risk_set_change > 1 or time_binning
+    max_min_time_event_count = max(int(s.get("min_time_event_count") or 1) for s in node_privacy_settings)
+    guards_active = max_min_risk_set_change > 1 or time_binning or max_min_time_event_count > 1
     privacy_guards = {
         "active": guards_active,
         "max_min_risk_set_change": max_min_risk_set_change,
         "time_binning": time_binning,
+        "max_min_time_event_count": max_min_time_event_count,
     }
     guards_warning = None
     if guards_active:
         guards_warning = (
             "Privacy guards were active on one or more nodes "
             f"(maximum minimum risk-set change k={max_min_risk_set_change}, "
-            f"time binning {'on' if time_binning else 'off'}); "
+            f"time binning {'on' if time_binning else 'off'}, "
+            f"minimum per-time event count m={max_min_time_event_count}); "
             "the estimates are approximate."
         )
         warn(guards_warning)
+
+    # The nodes round the aggregates they release to a configurable number
+    # of significant figures, so the centrally computed log-likelihood
+    # carries a rounding jitter of order events * 10^(1 - N) per node. Near
+    # the optimum the true per-step gain falls below that jitter, so a
+    # decrease smaller than the jitter floor is not a real decrease.
+    jitter = sum(
+        float(time_event_df["freq"].sum()) * 10.0 ** (1 - int(settings["aggregate_sig_figs"]))
+        for time_event_df, settings in zip(time_event_dfs, node_privacy_settings)
+        if settings.get("aggregate_sig_figs") is not None
+    )
+    ll_tolerance = max(1e-12, jitter)
 
     # The gradient in the standardised space needs the event-case covariate
     # sums in that space as well.
@@ -280,7 +295,7 @@ def central(
         if log_likelihood_null is None and not beta.any():
             log_likelihood_null = ll_here
 
-        if accepted is not None and ll_here < accepted["log_likelihood"] - 1e-12:
+        if accepted is not None and ll_here < accepted["log_likelihood"] - ll_tolerance:
             # The step away from the accepted beta decreased the likelihood:
             # halve it and retry from the accepted point. The accepted state
             # is reported if the budget runs out mid-halving.

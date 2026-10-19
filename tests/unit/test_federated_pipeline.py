@@ -423,6 +423,7 @@ class TestWireContractPinning:
                 "min_risk_set_change",
                 "time_bin_width",
                 "min_time_event_count",
+                "aggregate_sig_figs",
             }
 
     def test_perform_iteration_result_keys(self, guards_off):
@@ -1164,10 +1165,16 @@ class TestPrivacyGuardsSummary:
             [1, 2],
         )
         summary = result["privacy_guards"]
-        assert set(summary.keys()) == {"active", "max_min_risk_set_change", "time_binning"}
+        assert set(summary.keys()) == {
+            "active",
+            "max_min_risk_set_change",
+            "time_binning",
+            "max_min_time_event_count",
+        }
         assert summary["active"] is True
         assert summary["max_min_risk_set_change"] == 5
         assert summary["time_binning"] is False
+        assert summary["max_min_time_event_count"] == 2
         assert any("guards were active" in w for w in result["warnings"])
 
     def test_guards_off_summary(self, guards_off):
@@ -1181,9 +1188,16 @@ class TestPrivacyGuardsSummary:
             [1, 2],
         )
         summary = result["privacy_guards"]
+        assert set(summary.keys()) == {
+            "active",
+            "max_min_risk_set_change",
+            "time_binning",
+            "max_min_time_event_count",
+        }
         assert summary["active"] is False
         assert summary["max_min_risk_set_change"] == 1
         assert summary["time_binning"] is False
+        assert summary["max_min_time_event_count"] == 1
         assert not any("guards were active" in w for w in result["warnings"])
 
     def test_binning_summary(self, monkeypatch):
@@ -1199,9 +1213,16 @@ class TestPrivacyGuardsSummary:
             [1, 2],
         )
         summary = result["privacy_guards"]
+        assert set(summary.keys()) == {
+            "active",
+            "max_min_risk_set_change",
+            "time_binning",
+            "max_min_time_event_count",
+        }
         assert summary["active"] is True
         assert summary["time_binning"] is True
         assert summary["max_min_risk_set_change"] == 1
+        assert summary["max_min_time_event_count"] == 2
 
 
 @pytest.mark.unit
@@ -1265,12 +1286,6 @@ class TestGuardBiasRegression:
         covs = ["x1", "x2"]
 
         # The bound covers the jump guard's bias (the study varied k only).
-        # The standard hardening bundle rounds the released aggregates, which
-        # adds a jitter floor to the centrally computed log-likelihood; on
-        # this dataset the step-halving loop then stalls before the
-        # convergence tolerance, so both runs here use the minimal level and
-        # the comparison stays about the jump guard.
-        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         unguarded = self._run(datasets)
@@ -1288,6 +1303,17 @@ class TestGuardBiasRegression:
             assert (
                 deviation <= self.BOUND
             ), f"Guard bias for {var} is {deviation:.4f}, above the regression bound {self.BOUND}"
+
+    def test_standard_bundle_converges(self, monkeypatch):
+        """The full standard bundle converges end-to-end on the study dataset."""
+        monkeypatch.delenv("COXPH_PRIVACY_LEVEL", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        monkeypatch.delenv("COXPH_AGGREGATE_SIG_FIGS", raising=False)
+        datasets = self._simulate(20261005)
+        result = self._run(datasets)
+        assert result["converged"] is True
 
 
 def _run_central_with_kwargs(datasets, client_org_ids, **kwargs):
@@ -1390,3 +1416,110 @@ class TestCentralInputValidation:
         with pytest.raises(UserInputError, match="COXPH_MAX_GRID_POINTS") as excinfo:
             _run_central_with_kwargs(datasets, [1, 2])
         assert str(len(grid)) not in str(excinfo.value)
+
+
+@pytest.mark.unit
+class TestReleasedAggregatePrecision:
+    """The partials apply the configured precision to what they release."""
+
+    def _client_and_grid(self):
+        df1, df2, _ = _load_datasets()
+        client = MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        grid = sorted(
+            {
+                t
+                for r in client.wait_for_results(task_id=task["id"])
+                for t in pd.DataFrame.from_dict(r["times"])["time"].tolist()
+            }
+        )
+        return client, grid
+
+    def test_perform_iteration_rounds_released_aggregates(self, monkeypatch):
+        """COXPH_AGGREGATE_SIG_FIGS rounds agg1/agg2/agg3 to that many figures."""
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+        client, grid = self._client_and_grid()
+        iter_kwargs = {
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": EXPL_VARS,
+            "beta": [0.3, -0.2],
+            "centre": [0.1, -0.1],
+            "scale": [1.0, 2.0],
+            "unique_time_events": grid,
+        }
+
+        def dispatch():
+            task = client.task.create(
+                input_={"method": "perform_iteration", "kwargs": iter_kwargs},
+                organizations=[1, 2],
+            )
+            results = client.wait_for_results(task_id=task["id"])
+            return {r["organization_id"]: r for r in results}
+
+        # An empty COXPH_AGGREGATE_SIG_FIGS disables the rounding: raw values.
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
+        raw = dispatch()
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "3")
+        rounded = dispatch()
+
+        assert set(raw) == set(rounded) == {1, 2}
+        for org_id in raw:
+            for agg in ("agg1", "agg2", "agg3"):
+                expected = coxph_logic.round_sig(np.asarray(raw[org_id][agg], dtype=float), 3)
+                np.testing.assert_array_equal(np.asarray(rounded[org_id][agg], dtype=float), expected)
+
+    def test_small_time_counts_suppressed(self, monkeypatch):
+        """compute_summed_z merges per-time event counts below the minimum."""
+        monkeypatch.delenv("COXPH_PRIVACY_LEVEL", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        # 60 rows: an event at each of the 54 smallest distinct times (every
+        # per-time count is 1, below the standard-level minimum of 2) and a
+        # censored row at each of the 6 largest times, so the tail censoring
+        # of the shared preparation leaves the event rows untouched.
+        n_rows = 60
+        n_events = 54
+        df = pd.DataFrame(
+            {
+                "time": [float(t) for t in range(1, n_rows + 1)],
+                "event": [1] * n_events + [0] * (n_rows - n_events),
+                "x1": np.linspace(-1.0, 1.0, n_rows),
+            }
+        )
+        client = MockAlgorithmClient(
+            datasets=[[{"database": df, "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": ["x1"]},
+            },
+            organizations=[1],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert len(results) == 1
+        times = pd.DataFrame.from_dict(results[0]["times"])
+
+        # No released per-time count is below the minimum, the event total is
+        # preserved, and every merged time is one of the original times.
+        assert (times["freq"] >= 2).all()
+        assert int(times["freq"].sum()) == int(df["event"].sum())
+        assert set(times["time"].tolist()) <= set(df["time"].tolist())
+        assert len(times) < n_events

@@ -97,6 +97,7 @@ def compute_summed_z(
             "min_risk_set_change": settings.min_risk_set_change,
             "time_bin_width": settings.time_bin_width,
             "min_time_event_count": settings.min_time_event_count,
+            "aggregate_sig_figs": settings.aggregate_sig_figs,
         }
         # The result dict is built from the wire model, so its keys and nesting
         # are pinned in one place (SummedZResult).
