@@ -222,7 +222,17 @@ deliberately runs glibc and unlocked to test the declared range.
 - Privacy settings are read from node ``algorithm_env`` via ``get_env_var``:
   ``SAMPLE_SIZE_THRESHOLD`` (default 10), ``COXPH_TIME_BIN_WIDTH`` (disabled
   by default), ``COXPH_MIN_RISK_SET_CHANGE`` (default 5, must be >= 1, and
-  ``SAMPLE_SIZE_THRESHOLD + 1 >= COXPH_MIN_RISK_SET_CHANGE``).
+  ``SAMPLE_SIZE_THRESHOLD + 1 >= COXPH_MIN_RISK_SET_CHANGE``). The hardening
+  knobs are selected by the ``COXPH_PRIVACY_LEVEL`` preset (``minimal`` /
+  ``standard`` / ``strict``) and can be overridden individually — an
+  explicitly set variable beats the preset:
+  ``COXPH_RECONSTRUCTION_ROW_FACTOR``, ``COXPH_MIN_TIME_EVENT_COUNT``,
+  ``COXPH_AGGREGATE_SIG_FIGS`` and ``COXPH_MIN_RISK_SET_SIZE`` (the last two
+  accept an empty string to switch the knob off). Central additionally reads
+  ``COXPH_MAX_COVARIATES`` (default 20), ``COXPH_MAX_GRID_POINTS`` (default
+  1000) and ``COXPH_CURVE_TIME_SIG_FIGS`` (default 6; an empty string
+  reports the exact curve times). The full semantics live in
+  ``docs/coxph/Privacy.rst``.
 - The parent-task guard fails closed: if the task lookup fails or the token
   is missing (and the client is not a ``MockAlgorithmClient``), raise
   ``AlgorithmError``, never proceed.

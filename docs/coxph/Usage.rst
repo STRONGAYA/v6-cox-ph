@@ -63,6 +63,9 @@ The central function returns a dictionary with:
   covariate scale).
 - ``algorithm_version`` (str): the algorithm package version the result was
   computed with.
+- ``curve_time_sig_figs`` (int or null): the number of significant figures
+  the ``baseline_cumulative_hazard`` and ``survival_curves`` time keys are
+  rounded to (``None`` when the exact event times are reported).
 
 ``overall_p_value`` is the Wald test; ``lr_p_value`` is the likelihood-ratio
 test. When the log-likelihood decreases after a Newton step the optimiser
@@ -75,10 +78,13 @@ Guard-effect summary
 The result carries a ``privacy_guards`` object — an aggregate summary of the
 guards that were active on the nodes (configuration, not data; there is no
 per-node breakdown): ``active`` (bool), ``max_min_risk_set_change`` (the
-largest ``k`` any node used), ``time_binning`` (bool) and
+largest ``k`` any node used), ``time_binning`` (bool),
 ``max_min_time_event_count`` (the largest minimum per-time event count any
-node used). When any guard was active a warning is appended: the estimates
-are then approximate (see the bias study in ``Validation.rst``).
+node used) and ``max_min_risk_set_size`` (the largest configured risk-set
+size floor any node used; ``None`` when no node configured one — the floor
+only takes effect when ``k > 1``). When any guard was active a warning is
+appended: the estimates are then approximate (see the bias study in
+``Validation.rst``).
 
 Survival curves
 ----------------
@@ -97,7 +103,10 @@ The result also contains:
   1-based index.
 
 Both are computed centrally from quantities that are already aggregated —
-no new data leaves a node for them.
+no new data leaves a node for them. The time keys are rounded to
+``COXPH_CURVE_TIME_SIG_FIGS`` significant figures (default 6, read
+centrally; an empty value reports the exact event times); times that merge
+into one key keep the value at the largest original time.
 
 The Wald statistic is reported as ``Z = Coef / SE`` and the p-value as
 ``p = 2 * Phi(-|Z|)``. When ``converged`` is ``False`` a warning is appended
@@ -127,8 +136,9 @@ Variable                        Type        Default      Description
                                                         shared aggregates differ
                                                         by 0 or ``>= k``. Set to
                                                         ``1`` to disable tail
-                                                        censoring and the jump
-                                                        guard.
+                                                        censoring and the
+                                                        risk-set guards (jump
+                                                        guard and size floor).
 ``COXPH_PRIVACY_LEVEL``         string     ``standard`` The hardening level:
                                                         ``minimal``, ``standard``
                                                         or ``strict``. See
@@ -137,6 +147,16 @@ Variable                        Type        Default      Description
                                                         explanatory variables.
 ``COXPH_MAX_GRID_POINTS``       int        1000         Maximum pooled event-time
                                                         grid points.
+``COXPH_MIN_RISK_SET_SIZE``     int        (preset)     Absolute floor on the size
+                                                        of a released risk set: while
+                                                        fewer individuals are at risk,
+                                                        the node holds the last
+                                                        released aggregates. Only
+                                                        effective when ``k > 1``.
+``COXPH_CURVE_TIME_SIG_FIGS``   int         6           Significant figures of the
+                                                        reported curve time keys (read
+                                                        centrally). An empty value
+                                                        reports the exact event times.
 ============================== =========== ============ ========================
 
 See ``docs/coxph/Privacy.rst`` for the privacy implications of these

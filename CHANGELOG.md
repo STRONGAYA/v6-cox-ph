@@ -20,6 +20,26 @@ function signatures and result keys) is unchanged.
   ``COXPH_TIME_BIN_WIDTH``, ``COXPH_MIN_RISK_SET_CHANGE``) are validated by
   a frozen model with declarative bounds; invalid settings raise
   ``UserInputError`` as before.
+- The risk-set aggregates that travel to central are quantised to float32
+  precision (about 7 significant figures) at serialisation — always on,
+  applied after the configurable aggregate rounding — which caps the size of
+  the JSON payloads. The log-likelihood decrease test that triggers
+  step-halving now uses a tolerance derived from the effective released
+  precision (the coarser of the configured rounding and the wire
+  quantisation), so rounding jitter cannot masquerade as a real decrease.
+- A new risk-set size floor, ``COXPH_MIN_RISK_SET_SIZE`` (preset-carried: off
+  under ``minimal``, 50 under ``standard``, 100 under ``strict``; an empty
+  string disables it): while fewer than this many individuals are at risk,
+  the partial holds the last released aggregates instead of releasing a
+  smaller set. Like the minimum-change guard it only takes effect when
+  ``COXPH_MIN_RISK_SET_CHANGE`` > 1, so ``k = 1`` disables both. The
+  ``privacy_guards`` result summary gains ``max_min_risk_set_size`` and the
+  warning names the configured floor when it is active.
+- The time keys of ``baseline_cumulative_hazard`` and ``survival_curves`` are
+  rounded to ``COXPH_CURVE_TIME_SIG_FIGS`` significant figures (default 6,
+  read centrally; an empty string reports the exact event times); times that
+  merge into one key keep the value at their largest original time. The
+  result gains a ``curve_time_sig_figs`` field reporting the setting in use.
 
 ## 2.0.0 (2026-10-05)
 

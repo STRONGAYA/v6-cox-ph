@@ -12,11 +12,13 @@ partial: parent-task check, settings load, explanatory-variable validation
 (``compute_summed_z`` and ``perform_iteration``), NaN row dropping,
 sample-size threshold, iteration-input validation (``perform_iteration``
 only), time-column preparation (binning, tail censoring), and the risk-set
-jump guard (``perform_iteration`` only). On top of these mandatory guards,
+guards (``perform_iteration`` only). On top of these mandatory guards,
 the node's privacy level adds the reconstruction row bound, small-count
-suppression of the shared event counts and rounding of the released
-aggregates (see Configuration below); two central-side resource caps bound
-the size of the run (see Resource caps below).
+suppression of the shared event counts, an absolute floor on the size of a
+released risk set and rounding of the released aggregates (see
+Configuration below); two central-side resource caps bound the size of the
+run (see Resource caps below), and the reported curve time keys are
+coarsened centrally (see Curve time-key coarsening below).
 
 Parent-task guard
 ~~~~~~~~~~~~~~~~~
@@ -68,8 +70,9 @@ With ``k = COXPH_MIN_RISK_SET_CHANGE`` (default 5), rows with ``time > t_cut``
 — where ``t_cut`` is the k-th largest time on the node — are administratively
 censored (``time := t_cut`` and, where the outcome column is available,
 ``event := 0``). This guarantees ``|R(t)| >= k`` for every non-empty shared
-risk set. Setting ``k <= 1`` disables both tail censoring and the jump guard
-(used by exactness tests).
+risk set. Setting ``k <= 1`` disables tail censoring and the whole
+risk-set guard family — the jump guard and the size floor below (used by
+exactness tests).
 
 Risk-set jump guard
 ~~~~~~~~~~~~~~~~~~~
@@ -79,6 +82,21 @@ In ``perform_iteration``, walking the requested time grid, if moving from
 individuals from the node's risk set, the node keeps using ``R(t_i)``
 ("hold"). Consecutive shared aggregates therefore differ by 0 or by at
 least ``k`` individuals.
+
+Risk-set size floor
+~~~~~~~~~~~~~~~~~~~
+
+The jump guard bounds how fast the shared risk-set aggregates may change,
+not how small a released risk set may be. ``COXPH_MIN_RISK_SET_SIZE`` (the
+privacy level's ``min_risk_set_size``: off at ``minimal``, 50 at
+``standard``, 100 at ``strict`` — the reconstruction bound ``factor * k``)
+sets an absolute floor: while fewer than that many individuals are at risk
+at a grid point, the node holds the last released aggregates instead of
+releasing a smaller risk set (the same hold pattern as the jump guard; no
+truncation). The tail of the grid is then reported at the last released
+set, which makes the estimates approximate there. The floor belongs to
+the risk-set guard family: ``k <= 1`` disables it together with the jump
+guard, and the first grid point is always released whatever its size.
 
 Small-count time suppression
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -112,6 +130,45 @@ values are recoverable to the rounding precision. The rounding is
 consistent with the existing two-significant-figure rounding of the pooled
 centre and scale. Lowering the number of significant figures trades
 accuracy for privacy.
+
+The released aggregates are additionally quantised to float32 precision
+(about 7 significant figures) at serialisation — always on, applied after
+the configured rounding. A bare float32 cast would serialise to a longer
+float64 representation, so the payload cut comes from decimal
+quantisation. Where the configured rounding is coarser (``standard`` 6,
+``strict`` 4) the quantisation is a no-op; at ``minimal`` it is the only
+precision limit on the wire. Central accounts for the effective released
+precision when it judges whether a log-likelihood change is real.
+
+Curve time-key coarsening
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``baseline_cumulative_hazard`` and ``survival_curves`` are keyed by the
+pooled event times. Those keys are rounded to
+``COXPH_CURVE_TIME_SIG_FIGS`` significant figures (default 6, read
+centrally; an empty string reports the exact event times). The event-time
+grid itself and the hazard values are unaffected; when rounding merges
+nearby times into one key, the value at the largest original time is
+kept, consistent with the small-count time suppression.
+
+When the coarsening is on (the default), the reported times are rounded:
+nearby event times merge into a single curve step, so the exact event
+times are not all visible on the curves. When it is off (an empty
+``COXPH_CURVE_TIME_SIG_FIGS``), the curves are keyed by the exact event
+times. Note that the ``times`` payload of ``compute_summed_z`` carries
+the node's (small-count-suppressed) event times exactly either way.
+
+What the coarsening protects depends on where the aggregator runs. When
+the aggregator is inside the task-sending organisation — the default
+vantage6 deployment, where ``central`` runs on the researcher's own node —
+the researcher can read the sub-task results, so the exact times in the
+``compute_summed_z`` payloads are visible regardless of the curve
+coarsening; the coarsening then bounds only what the *reported output*
+reveals. When the aggregator is a separate organisation and the partials'
+inputs and outputs are encrypted end-to-end against that organisation's
+key, the researcher never sees the per-node aggregates; the curves are
+then the only time surface in the result, and the coarsening is what
+bounds the time precision of the final output.
 
 Resource caps
 ~~~~~~~~~~~~~
@@ -158,32 +215,36 @@ Variable                            Type        Default
 ``COXPH_RECONSTRUCTION_ROW_FACTOR`` int         (preset)
 ``COXPH_MIN_TIME_EVENT_COUNT``      int         (preset)
 ``COXPH_AGGREGATE_SIG_FIGS``        int         (preset)
+``COXPH_MIN_RISK_SET_SIZE``         int         (preset)
 ``COXPH_MAX_COVARIATES``            int         20
 ``COXPH_MAX_GRID_POINTS``           int         1000
+``COXPH_CURVE_TIME_SIG_FIGS``       int         6
 =================================== =========== ============
 
 ``COXPH_PRIVACY_LEVEL`` is the primary variable: the one variable a node
 administrator sets to choose the hardening level. The level presets the
-three hardening settings:
+four hardening settings:
 
-============ ========== ================ =========
-Level        Row factor Min. time events Sig. figs
-============ ========== ================ =========
-``minimal``  off        off              off
-``standard`` 10         2                6
-``strict``   20         5                4
-============ ========== ================ =========
+============ ========== ================ ========= ==================
+Level        Row factor Min. time events Sig. figs Min. risk-set size
+============ ========== ================ ========= ==================
+``minimal``  off        off              off       off
+``standard`` 10         2                6         50
+``strict``   20         5                4         100
+============ ========== ================ ========= ==================
 
 ``minimal`` applies only the mandatory guards (sample-size threshold,
 ``k``, tail censoring, jump guard); it is meant for validation studies, not
-for sensitive data. Three advanced overrides each beat the level preset
+for sensitive data. Four advanced overrides each beat the level preset
 when set: ``COXPH_RECONSTRUCTION_ROW_FACTOR`` (int, at least 1),
-``COXPH_MIN_TIME_EVENT_COUNT`` (int, at least 1) and
+``COXPH_MIN_TIME_EVENT_COUNT`` (int, at least 1),
 ``COXPH_AGGREGATE_SIG_FIGS`` (int, at least 1; an empty string disables
-rounding). Precedence is: an explicitly set variable beats the level
-preset, which beats the built-in default. A node administrator normally
-sets nothing — the default ``standard`` level applies. The two caps are
-central-side; see Resource caps above.
+rounding) and ``COXPH_MIN_RISK_SET_SIZE`` (int, at least 1; an empty string
+disables the floor). Precedence is: an explicitly set variable beats the
+level preset, which beats the built-in default. A node administrator
+normally sets nothing — the default ``standard`` level applies. The two
+caps and ``COXPH_CURVE_TIME_SIG_FIGS`` are central-side; see Resource caps
+and Curve time-key coarsening above.
 
 ``COXPH_MIN_RISK_SET_CHANGE`` must be at least 1, and
 ``SAMPLE_SIZE_THRESHOLD + 1`` must be greater than or equal to it;
@@ -212,9 +273,11 @@ Guard-effect summary
 The result carries a ``privacy_guards`` object: an aggregate summary of the
 guards that were active (configuration, not data; there is no per-node
 breakdown). It reports the maximum ``k`` any node used, whether time
-binning was on, and the maximum minimum time event count across nodes. A
-warning is appended when any of these is active, because the estimates
-are then approximate.
+binning was on, the maximum minimum time event count across nodes, and the
+maximum configured risk-set size floor across nodes (``None`` when no node
+configured one; the floor only takes effect when ``k > 1``). A warning is
+appended when any of these is active, because the estimates are then
+approximate.
 
 Data sharing
 ------------
@@ -257,9 +320,11 @@ researcher that ran ``central``:
   and risk-set sums that the researcher already sees; no new partial runs
   and no new data leaves a node. What the curve reveals is, per grid time,
   the pooled event count over the risk-set sum — information the shared
-  aggregates already contained. The tail censoring and the jump guard carry
-  through: every non-empty risk set behind a curve step covers at least
-  ``k`` individuals on every node.
+  aggregates already contained. The tail censoring and the risk-set guards
+  carry through: every non-empty risk set behind a curve step covers at
+  least ``k`` individuals on every node, and the curve time keys are
+  coarsened to ``COXPH_CURVE_TIME_SIG_FIGS`` significant figures (see
+  Curve time-key coarsening above).
 
 Aggregated model coefficients are shared with the data stations by the
 central aggregator during the iteration process.
@@ -274,16 +339,17 @@ Vulnerabilities to known attacks
 ** Reconstruction — mitigated. **
 The partials no longer return row-level data or exact per-event-time sums
 that allow record reconstruction by differencing. Per-event-time risk-set
-sums are shared, but the jump guard and tail censoring ensure every shared,
-non-empty risk set covers at least ``k`` individuals and consecutive
-aggregates differ by 0 or by at least ``k``. **Residual risk:** an
-aggregator that collects the released sums over the smallest shared risk
-set across several ``beta`` values obtains an exact equation system over
-that group's covariate values. The guards — a larger ``k``, the
-reconstruction row bound, coarser event times and rounded aggregates —
-raise the cost of solving that system but cannot eliminate it. Differential
-privacy on the released aggregates, or secure aggregation, is the complete
-fix and is planned for a future release.
+sums are shared, but the jump guard, the size floor and tail censoring
+ensure every shared, non-empty risk set covers at least ``k`` individuals
+and consecutive aggregates differ by 0 or by at least ``k``.
+**Residual risk:** an aggregator that collects the released sums over the
+smallest shared risk set across several ``beta`` values obtains an exact
+equation system over that group's covariate values. The guards — a larger
+``k``, the reconstruction row bound, the risk-set size floor, coarser event
+times and rounded, float32-precision aggregates — raise the cost of
+solving that system but cannot eliminate it. Differential privacy on the
+released aggregates, or secure aggregation, is the complete fix and is
+planned for a future release.
 
 ** Differencing — mitigated. **
 The risk-set jump guard prevents an aggregator from differencing consecutive
