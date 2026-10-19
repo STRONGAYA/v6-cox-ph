@@ -197,20 +197,29 @@ def central(
     max_min_risk_set_change = max(int(s.get("min_risk_set_change") or 1) for s in node_privacy_settings)
     time_binning = any(s.get("time_bin_width") for s in node_privacy_settings)
     max_min_time_event_count = max(int(s.get("min_time_event_count") or 1) for s in node_privacy_settings)
+    # The absolute risk-set floor is configuration too; it only takes effect
+    # on nodes whose jump guard is on (k > 1), which the warning names.
+    floors = [int(s["min_risk_set_size"]) for s in node_privacy_settings if s.get("min_risk_set_size") is not None]
+    max_min_risk_set_size = max(floors) if floors else None
     guards_active = max_min_risk_set_change > 1 or time_binning or max_min_time_event_count > 1
     privacy_guards = {
         "active": guards_active,
         "max_min_risk_set_change": max_min_risk_set_change,
         "time_binning": time_binning,
         "max_min_time_event_count": max_min_time_event_count,
+        "max_min_risk_set_size": max_min_risk_set_size,
     }
     guards_warning = None
     if guards_active:
+        floor_note = ""
+        if max_min_risk_set_size is not None and max_min_risk_set_change > 1:
+            floor_note = f", minimum risk-set size R={max_min_risk_set_size}"
         guards_warning = (
             "Privacy guards were active on one or more nodes "
             f"(maximum minimum risk-set change k={max_min_risk_set_change}, "
             f"time binning {'on' if time_binning else 'off'}, "
-            f"minimum per-time event count m={max_min_time_event_count}); "
+            f"minimum per-time event count m={max_min_time_event_count}"
+            f"{floor_note}); "
             "the estimates are approximate."
         )
         warn(guards_warning)

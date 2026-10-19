@@ -45,7 +45,7 @@ def _load_datasets():
     return df1, df2, df3
 
 
-def _run_central(datasets, organization_ids):
+def _run_central(datasets, organization_ids, expl_vars=None):
     """Run ``central`` through the mock client and return the result dict."""
     client = MockAlgorithmClient(
         datasets=datasets,
@@ -58,7 +58,7 @@ def _run_central(datasets, organization_ids):
             "kwargs": {
                 "time_col": "time",
                 "outcome_col": "event",
-                "expl_vars": EXPL_VARS,
+                "expl_vars": EXPL_VARS if expl_vars is None else expl_vars,
                 "organization_ids": organization_ids,
             },
         },
@@ -83,6 +83,36 @@ def _lifelines_reference(df, expl_vars):
     }
 
 
+def _simulate_survival_data(seed: int, n_rows: int = 200, n_nodes: int = 3) -> list:
+    """Simulate survival datasets (fixed seed) for the guard-bias scenarios.
+
+    ``n_nodes`` nodes of ``n_rows`` rows each; event times follow an
+    exponential hazard with the study's true coefficients, censored
+    uniformly. The guard scenarios need nodes well above the reconstruction
+    bound so the guards approximate the fit rather than flatten it.
+    """
+    beta_true = np.array([0.5, -0.3])
+    rng = np.random.default_rng(seed)
+    datasets = []
+    for _ in range(n_nodes):
+        X = rng.normal(size=(n_rows, 2))
+        eta = X @ beta_true
+        hazard = 0.02 * np.exp(eta)
+        event_time = rng.exponential(1.0 / hazard)
+        censor_time = rng.uniform(0.0, 60.0)
+        datasets.append(
+            pd.DataFrame(
+                {
+                    "time": np.minimum(event_time, censor_time),
+                    "event": (event_time <= censor_time).astype(int),
+                    "x1": X[:, 0],
+                    "x2": X[:, 1],
+                }
+            )
+        )
+    return datasets
+
+
 @pytest.fixture
 def guards_off(monkeypatch):
     """Disable the risk-set jump guard (k=1) and binning for exactness tests.
@@ -94,6 +124,7 @@ def guards_off(monkeypatch):
     monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
     monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
     monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+    monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
 
 
 @pytest.fixture
@@ -424,6 +455,7 @@ class TestWireContractPinning:
                 "time_bin_width",
                 "min_time_event_count",
                 "aggregate_sig_figs",
+                "min_risk_set_size",
             }
 
     def test_perform_iteration_result_keys(self, guards_off):
@@ -552,10 +584,16 @@ class TestDefaultGuardsPrivacyProperty:
     """With default guards (k=5), shared risk-set aggregates are protected."""
 
     def test_agg1_changes_at_least_k(self, monkeypatch):
-        """Every positive decrease in per-node agg1 is >= k and min >= k."""
+        """Every positive decrease in per-node agg1 is >= k and min >= k.
+
+        The default bundle also carries the absolute floor (standard level:
+        R = 50): every released value is at least R, except values held at
+        the first grid point, which is always released whatever its size.
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         k = 5
+        r = 50
         df1, df2, _ = _load_datasets()
         datasets = [
             [{"database": df1, "db_type": "csv"}],
@@ -577,20 +615,39 @@ class TestDefaultGuardsPrivacyProperty:
             non_zero = [v for v in values if v > 1e-9]
             assert non_zero, f"node {node_idx}: all agg1 are zero"
             assert min(non_zero) >= k - 1e-9, f"node {node_idx}: min non-zero agg1 {min(non_zero)} < k={k}"
+            # Floor: every released value is >= R, except values held at the
+            # always-released first grid point.
+            for i, v in enumerate(values):
+                if v > 1e-9:
+                    assert v >= r - 1e-9 or abs(v - values[0]) <= 1e-9, (
+                        f"node {node_idx}: agg1 {v} at {i} is below the floor R={r} "
+                        f"and is not the held first grid point"
+                    )
 
     def test_coefficients_within_loose_bound(self, monkeypatch):
-        """With default guards, coefficients stay within 0.1 of lifelines."""
+        """With default guards, coefficients stay within 0.1 of lifelines.
+
+        The scenario uses 200-row nodes (the bias-study size): there the
+        default floor R=50 holds only the tail of each node's risk-set
+        trajectory, so the guards approximate the fit. Nodes at the
+        reconstruction bound (50 rows) are a different regime — the floor
+        holds nearly the whole trajectory and the estimates are approximate
+        by design; that regime is covered by the privacy-property test
+        above, not by a closeness bound.
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        df1, df2, _ = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-        ]
-        result = _run_central(datasets, [1, 2])
-        ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
+        datasets = _simulate_survival_data(20261005)
+        result = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        assert result["converged"] is True
+        assert result["privacy_guards"]["active"] is True
+        ref = _lifelines_reference(pd.concat(datasets), ["x1", "x2"])
         model = pd.DataFrame(result["model"]).T
-        for var in EXPL_VARS:
+        for var in ["x1", "x2"]:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
                 f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
             )
@@ -1170,12 +1227,15 @@ class TestPrivacyGuardsSummary:
             "max_min_risk_set_change",
             "time_binning",
             "max_min_time_event_count",
+            "max_min_risk_set_size",
         }
         assert summary["active"] is True
         assert summary["max_min_risk_set_change"] == 5
         assert summary["time_binning"] is False
         assert summary["max_min_time_event_count"] == 2
+        assert summary["max_min_risk_set_size"] == 50
         assert any("guards were active" in w for w in result["warnings"])
+        assert any("minimum risk-set size R=50" in w for w in result["warnings"])
 
     def test_guards_off_summary(self, guards_off):
         """Guards disabled: inactive, no warning."""
@@ -1193,11 +1253,13 @@ class TestPrivacyGuardsSummary:
             "max_min_risk_set_change",
             "time_binning",
             "max_min_time_event_count",
+            "max_min_risk_set_size",
         }
         assert summary["active"] is False
         assert summary["max_min_risk_set_change"] == 1
         assert summary["time_binning"] is False
         assert summary["max_min_time_event_count"] == 1
+        assert summary["max_min_risk_set_size"] is None
         assert not any("guards were active" in w for w in result["warnings"])
 
     def test_binning_summary(self, monkeypatch):
@@ -1218,11 +1280,16 @@ class TestPrivacyGuardsSummary:
             "max_min_risk_set_change",
             "time_binning",
             "max_min_time_event_count",
+            "max_min_risk_set_size",
         }
         assert summary["active"] is True
         assert summary["time_binning"] is True
         assert summary["max_min_risk_set_change"] == 1
         assert summary["max_min_time_event_count"] == 2
+        # The floor is configured (standard level) but k=1 disables it; the
+        # summary reports the configuration, the warning does not name it.
+        assert summary["max_min_risk_set_size"] == 50
+        assert not any("minimum risk-set size" in w for w in result["warnings"])
 
 
 @pytest.mark.unit
@@ -1236,29 +1303,10 @@ class TestGuardBiasRegression:
     study to re-derive it (do not loosen it without re-running the study).
     """
 
-    BETA_TRUE = np.array([0.5, -0.3])
     BOUND = 0.05
 
     def _simulate(self, seed: int, n_rows: int = 200) -> list:
-        rng = np.random.default_rng(seed)
-        datasets = []
-        for _ in range(3):
-            X = rng.normal(size=(n_rows, 2))
-            eta = X @ self.BETA_TRUE
-            hazard = 0.02 * np.exp(eta)
-            event_time = rng.exponential(1.0 / hazard)
-            censor_time = rng.uniform(0.0, 60.0)
-            datasets.append(
-                pd.DataFrame(
-                    {
-                        "time": np.minimum(event_time, censor_time),
-                        "event": (event_time <= censor_time).astype(int),
-                        "x1": X[:, 0],
-                        "x2": X[:, 1],
-                    }
-                )
-            )
-        return datasets
+        return _simulate_survival_data(seed, n_rows=n_rows)
 
     def _run(self, datasets):
         client = MockAlgorithmClient(
@@ -1311,6 +1359,7 @@ class TestGuardBiasRegression:
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
         monkeypatch.delenv("COXPH_AGGREGATE_SIG_FIGS", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
         datasets = self._simulate(20261005)
         result = self._run(datasets)
         assert result["converged"] is True

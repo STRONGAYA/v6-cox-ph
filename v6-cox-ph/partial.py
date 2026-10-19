@@ -98,6 +98,7 @@ def compute_summed_z(
             "time_bin_width": settings.time_bin_width,
             "min_time_event_count": settings.min_time_event_count,
             "aggregate_sig_figs": settings.aggregate_sig_figs,
+            "min_risk_set_size": settings.min_risk_set_size,
         }
         # The result dict is built from the wire model, so its keys and nesting
         # are pinned in one place (SummedZResult).
@@ -187,7 +188,12 @@ def perform_iteration(
         X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 
         agg1, agg2, agg3 = guarded_risk_set_aggregates(
-            df[time_col], unique_time_events, settings.min_risk_set_change, X_all, beta_arr
+            df[time_col],
+            unique_time_events,
+            settings.min_risk_set_change,
+            X_all,
+            beta_arr,
+            settings.min_risk_set_size,
         )
 
         # Round the released aggregates to the configured precision.

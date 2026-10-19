@@ -57,6 +57,7 @@ class TestLoadPrivacySettings:
             "SAMPLE_SIZE_THRESHOLD",
             "COXPH_TIME_BIN_WIDTH",
             "COXPH_MIN_RISK_SET_CHANGE",
+            "COXPH_MIN_RISK_SET_SIZE",
             "COXPH_PRIVACY_LEVEL",
             "COXPH_RECONSTRUCTION_ROW_FACTOR",
             "COXPH_MIN_TIME_EVENT_COUNT",
@@ -75,6 +76,7 @@ class TestLoadPrivacySettings:
         assert s.reconstruction_row_factor == 10
         assert s.min_time_event_count == 2
         assert s.aggregate_sig_figs == 6
+        assert s.min_risk_set_size == 50
 
     def test_custom_values(self, monkeypatch):
         """Custom values from env vars."""
@@ -94,6 +96,7 @@ class TestLoadPrivacySettings:
         assert s.reconstruction_row_factor == 20
         assert s.min_time_event_count == 5
         assert s.aggregate_sig_figs == 4
+        assert s.min_risk_set_size == 100
 
     def test_level_minimal(self, clean_env, monkeypatch):
         """The minimal level turns the optional hardening off."""
@@ -103,6 +106,7 @@ class TestLoadPrivacySettings:
         assert s.reconstruction_row_factor == 1
         assert s.min_time_event_count == 1
         assert s.aggregate_sig_figs is None
+        assert s.min_risk_set_size is None
 
     def test_level_case_insensitive(self, clean_env, monkeypatch):
         """The level is matched case-insensitively (and trimmed)."""
@@ -122,16 +126,24 @@ class TestLoadPrivacySettings:
         monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "strict")
         monkeypatch.setenv("COXPH_RECONSTRUCTION_ROW_FACTOR", "7")
         monkeypatch.setenv("COXPH_MIN_TIME_EVENT_COUNT", "3")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "30")
         s = load_privacy_settings()
         assert s.reconstruction_row_factor == 7
         assert s.min_time_event_count == 3
         assert s.aggregate_sig_figs == 4
+        assert s.min_risk_set_size == 30
 
     def test_empty_sig_figs_disables_rounding(self, clean_env, monkeypatch):
         """An empty COXPH_AGGREGATE_SIG_FIGS switches the rounding off."""
         monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
         s = load_privacy_settings()
         assert s.aggregate_sig_figs is None
+
+    def test_empty_min_risk_set_size_disables_floor(self, clean_env, monkeypatch):
+        """An empty COXPH_MIN_RISK_SET_SIZE switches the floor off."""
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "")
+        s = load_privacy_settings()
+        assert s.min_risk_set_size is None
 
     def test_invalid_knob_values(self, clean_env, monkeypatch):
         """Invalid override values raise UserInputError naming the variable."""
@@ -149,6 +161,14 @@ class TestLoadPrivacySettings:
         monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "0")
         with pytest.raises(UserInputError, match="COXPH_AGGREGATE_SIG_FIGS"):
             load_privacy_settings()
+        monkeypatch.delenv("COXPH_AGGREGATE_SIG_FIGS")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "0")
+        with pytest.raises(UserInputError, match="COXPH_MIN_RISK_SET_SIZE"):
+            load_privacy_settings()
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "small")
+        with pytest.raises(UserInputError, match="COXPH_MIN_RISK_SET_SIZE"):
+            load_privacy_settings()
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE")
 
     def test_invalid_threshold(self, monkeypatch):
         """Non-positive threshold raises UserInputError."""
@@ -897,6 +917,89 @@ class TestGuardedRiskSetMasks:
         # t=1: 10 at risk. t=11: 0 at risk (removed 10 >= 5)
         assert masks[0].sum() == 10
         assert masks[1].sum() == 0
+
+
+@pytest.mark.unit
+class TestMinRiskSetFloor:
+    """The absolute risk-set floor holds small risk sets (perform_iteration).
+
+    At beta = 0 with a single covariate, agg1[t] equals the risk-set size
+    |R(t)|, so the effective-index walk is observable directly on agg1.
+    """
+
+    @pytest.fixture
+    def times(self):
+        # 10 individuals with distinct times 1..10
+        return pd.Series([float(i) for i in range(1, 11)])
+
+    def _agg1(self, times, grid, k, min_risk_set_size):
+        X = np.zeros((len(times), 1))
+        beta = np.zeros(1)
+        agg1, _, _ = guarded_risk_set_aggregates(times, grid, k, X, beta, min_risk_set_size)
+        return agg1
+
+    def test_holds_below_floor(self, times):
+        """Risk sets below the floor are held at the last released aggregates."""
+        grid = [float(i) for i in range(1, 11)]
+        # |R| = [10, 9, ..., 1]; with k=5 the jump guard alone releases down
+        # to 5, while the floor R=8 holds everything at the first set.
+        agg1 = self._agg1(times, grid, k=5, min_risk_set_size=8)
+        np.testing.assert_array_equal(agg1, np.full(10, 10.0))
+
+    def test_jump_guard_alone_releases_smaller_sets(self, times):
+        """Without the floor the same walk releases risk sets below R."""
+        grid = [float(i) for i in range(1, 11)]
+        agg1 = self._agg1(times, grid, k=5, min_risk_set_size=None)
+        np.testing.assert_array_equal(agg1, [10.0, 10.0, 10.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0])
+
+    def test_prefix_follows_jump_guard_until_floor_binds(self, times):
+        """The released prefix follows the jump guard; the tail is held."""
+        grid = [float(i) for i in range(1, 11)]
+        # k=2 releases 10, 8, 6; below R=6 the walk holds at the last
+        # released set (size 6).
+        agg1 = self._agg1(times, grid, k=2, min_risk_set_size=6)
+        np.testing.assert_array_equal(agg1, [10.0, 10.0, 8.0, 8.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0])
+
+    def test_first_grid_point_always_released(self):
+        """The first grid point is released whatever its risk-set size."""
+        times = pd.Series([1.0, 2.0, 3.0])
+        grid = [1.0, 2.0, 3.0]
+        # |R| = [3, 2, 1], all below the floor; only the first is released.
+        agg1 = self._agg1(times, grid, k=5, min_risk_set_size=50)
+        np.testing.assert_array_equal(agg1, [3.0, 3.0, 3.0])
+        assert agg1[0] == 3.0  # below R=50, released anyway
+
+    def test_k1_disables_the_floor(self, times):
+        """k <= 1 disables the whole risk-set guard family, floor included."""
+        grid = [float(i) for i in range(1, 11)]
+        with_floor = self._agg1(times, grid, k=1, min_risk_set_size=8)
+        without_floor = self._agg1(times, grid, k=1, min_risk_set_size=None)
+        np.testing.assert_array_equal(with_floor, without_floor)
+        # and they equal the plain risk-set sizes
+        np.testing.assert_array_equal(with_floor, [10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0])
+
+    def test_floor_none_matches_default_call(self, times):
+        """min_risk_set_size=None is the default and leaves the walk unchanged."""
+        grid = [float(i) for i in range(1, 11)]
+        X = np.zeros((10, 1))
+        beta = np.zeros(1)
+        explicit = guarded_risk_set_aggregates(times, grid, 5, X, beta, None)[0]
+        default = guarded_risk_set_aggregates(times, grid, 5, X, beta)[0]
+        np.testing.assert_array_equal(explicit, default)
+
+    def test_agg2_agg3_follow_the_same_effective_indices(self):
+        """agg2/agg3 are indexed by the same effective grid indices as agg1."""
+        times = pd.Series([1.0, 2.0, 3.0, 4.0])
+        grid = [1.0, 2.0, 3.0, 4.0]
+        X = np.array([[1.0], [2.0], [3.0], [4.0]])
+        beta = np.zeros(1)
+        # |R| = [4, 3, 2, 1]; k=2, R=2 -> effective = [0, 0, 2, 2]
+        agg1, agg2, agg3 = guarded_risk_set_aggregates(times, grid, 2, X, beta, 2)
+        np.testing.assert_array_equal(agg1, [4.0, 4.0, 2.0, 2.0])
+        # S1 over the risk sets: {1,2,3,4} -> 10, {3,4} -> 7
+        np.testing.assert_array_equal(agg2[:, 0], [10.0, 10.0, 7.0, 7.0])
+        # S2 over the risk sets: 1+4+9+16=30, 9+16=25
+        np.testing.assert_array_equal(agg3[:, 0, 0], [30.0, 30.0, 25.0, 25.0])
 
 
 @pytest.mark.unit

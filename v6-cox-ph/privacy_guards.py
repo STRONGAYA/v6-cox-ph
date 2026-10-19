@@ -27,11 +27,13 @@ via ``get_env_var``:
   further. The presets are:
 
   - ``"minimal"``: ``reconstruction_row_factor`` 1 (off),
-    ``min_time_event_count`` 1 (off), ``aggregate_sig_figs`` off (``None``).
+    ``min_time_event_count`` 1 (off), ``aggregate_sig_figs`` off (``None``),
+    ``min_risk_set_size`` off (``None``).
   - ``"standard"``: ``reconstruction_row_factor`` 10,
-    ``min_time_event_count`` 2, ``aggregate_sig_figs`` 6.
+    ``min_time_event_count`` 2, ``aggregate_sig_figs`` 6,
+    ``min_risk_set_size`` 50 (the reconstruction bound ``factor * k``).
   - ``"strict"``: ``reconstruction_row_factor`` 20, ``min_time_event_count``
-    5, ``aggregate_sig_figs`` 4.
+    5, ``aggregate_sig_figs`` 4, ``min_risk_set_size`` 100.
 
   Each knob can also be set individually; an explicitly set, non-empty
   variable beats the level preset:
@@ -43,6 +45,14 @@ via ``get_env_var``:
   are merged into the following time before they are shared.
 - ``COXPH_AGGREGATE_SIG_FIGS`` (int >= 1; an empty string disables rounding) —
   released risk-set aggregates are rounded to this many significant figures.
+- ``COXPH_MIN_RISK_SET_SIZE`` (int >= 1; an empty string disables the floor) —
+  an absolute floor on the size of a released risk set: while fewer than this
+  many individuals are at risk, the partial holds the last released
+  aggregates instead of releasing a smaller set (the same hold pattern as the
+  minimum-change guard; the first grid point is always released). The floor
+  is part of the risk-set guard family: it only takes effect when
+  ``COXPH_MIN_RISK_SET_CHANGE`` > 1, so ``k = 1`` disables it together with
+  the jump guard.
 
 The resource caps are loaded centrally (``load_resource_caps``):
 
@@ -72,6 +82,7 @@ from vantage6.algorithm.tools.util import info, warn
 ENV_SAMPLE_SIZE_THRESHOLD = "SAMPLE_SIZE_THRESHOLD"
 ENV_TIME_BIN_WIDTH = "COXPH_TIME_BIN_WIDTH"
 ENV_MIN_RISK_SET_CHANGE = "COXPH_MIN_RISK_SET_CHANGE"
+ENV_MIN_RISK_SET_SIZE = "COXPH_MIN_RISK_SET_SIZE"
 ENV_PRIVACY_LEVEL = "COXPH_PRIVACY_LEVEL"
 ENV_RECONSTRUCTION_ROW_FACTOR = "COXPH_RECONSTRUCTION_ROW_FACTOR"
 ENV_MIN_TIME_EVENT_COUNT = "COXPH_MIN_TIME_EVENT_COUNT"
@@ -93,12 +104,28 @@ class _LevelPreset(TypedDict):
     reconstruction_row_factor: int
     min_time_event_count: int
     aggregate_sig_figs: Optional[int]
+    min_risk_set_size: Optional[int]
 
 
 PRIVACY_LEVEL_PRESETS: dict[str, _LevelPreset] = {
-    "minimal": {"reconstruction_row_factor": 1, "min_time_event_count": 1, "aggregate_sig_figs": None},
-    "standard": {"reconstruction_row_factor": 10, "min_time_event_count": 2, "aggregate_sig_figs": 6},
-    "strict": {"reconstruction_row_factor": 20, "min_time_event_count": 5, "aggregate_sig_figs": 4},
+    "minimal": {
+        "reconstruction_row_factor": 1,
+        "min_time_event_count": 1,
+        "aggregate_sig_figs": None,
+        "min_risk_set_size": None,
+    },
+    "standard": {
+        "reconstruction_row_factor": 10,
+        "min_time_event_count": 2,
+        "aggregate_sig_figs": 6,
+        "min_risk_set_size": 50,
+    },
+    "strict": {
+        "reconstruction_row_factor": 20,
+        "min_time_event_count": 5,
+        "aggregate_sig_figs": 4,
+        "min_risk_set_size": 100,
+    },
 }
 
 
@@ -113,12 +140,12 @@ class PrivacySettings(BaseModel):
     directly and bypass that decoding, so it is not used.
 
     ``privacy_level`` records which hardening bundle was selected. The
-    three knobs the level prescribes — ``reconstruction_row_factor``,
-    ``min_time_event_count`` and ``aggregate_sig_figs`` — are resolved in
-    ``load_privacy_settings``: an explicitly set, non-empty environment
-    variable beats the level preset, and an empty
-    ``COXPH_AGGREGATE_SIG_FIGS`` switches the aggregate rounding off
-    (``None``).
+    four knobs the level prescribes — ``reconstruction_row_factor``,
+    ``min_time_event_count``, ``aggregate_sig_figs`` and
+    ``min_risk_set_size`` — are resolved in ``load_privacy_settings``: an
+    explicitly set, non-empty environment variable beats the level
+    preset, and an empty ``COXPH_AGGREGATE_SIG_FIGS`` or
+    ``COXPH_MIN_RISK_SET_SIZE`` switches that knob off (``None``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -130,6 +157,7 @@ class PrivacySettings(BaseModel):
     reconstruction_row_factor: int = Field(default=10, ge=1)
     min_time_event_count: int = Field(default=2, ge=1)
     aggregate_sig_figs: Optional[int] = Field(default=6, ge=1)
+    min_risk_set_size: Optional[int] = Field(default=None, ge=1)
 
     @field_validator("privacy_level")
     @classmethod
@@ -191,13 +219,13 @@ def _resolve_knob(raw, preset_value: int, name: str) -> int:
     return _parse_positive_int(raw, name)
 
 
-def _resolve_sig_figs(raw, preset_value: Optional[int]) -> Optional[int]:
-    """Resolve the rounding precision; an empty env var switches it off."""
+def _resolve_optional_knob(raw, preset_value: Optional[int], name: str) -> Optional[int]:
+    """Resolve an optional hardening knob; an empty env var switches it off."""
     if raw is None:
         return preset_value
     if str(raw).strip() == "":
         return None
-    return _parse_positive_int(raw, ENV_AGGREGATE_SIG_FIGS)
+    return _parse_positive_int(raw, name)
 
 
 def load_privacy_settings() -> PrivacySettings:
@@ -208,14 +236,15 @@ def load_privacy_settings() -> PrivacySettings:
 
     The hardening knobs are resolved per knob: an explicitly set, non-empty
     environment variable beats the ``COXPH_PRIVACY_LEVEL`` preset, and an
-    empty ``COXPH_AGGREGATE_SIG_FIGS`` disables the aggregate rounding.
+    empty ``COXPH_AGGREGATE_SIG_FIGS`` or ``COXPH_MIN_RISK_SET_SIZE``
+    disables that knob.
 
     Returns
     -------
     PrivacySettings
         Validated settings. ``time_bin_width`` is ``None`` when binning is
-        disabled; ``aggregate_sig_figs`` is ``None`` when rounding is
-        disabled.
+        disabled; ``aggregate_sig_figs`` and ``min_risk_set_size`` are
+        ``None`` when the respective knob is disabled.
 
     Raises
     ------
@@ -258,9 +287,15 @@ def load_privacy_settings() -> PrivacySettings:
         preset["min_time_event_count"],
         ENV_MIN_TIME_EVENT_COUNT,
     )
-    aggregate_sig_figs = _resolve_sig_figs(
+    aggregate_sig_figs = _resolve_optional_knob(
         get_env_var(ENV_AGGREGATE_SIG_FIGS, default=None),
         preset["aggregate_sig_figs"],
+        ENV_AGGREGATE_SIG_FIGS,
+    )
+    min_risk_set_size = _resolve_optional_knob(
+        get_env_var(ENV_MIN_RISK_SET_SIZE, default=None),
+        preset["min_risk_set_size"],
+        ENV_MIN_RISK_SET_SIZE,
     )
 
     try:
@@ -272,6 +307,7 @@ def load_privacy_settings() -> PrivacySettings:
             reconstruction_row_factor=reconstruction_row_factor,
             min_time_event_count=min_time_event_count,
             aggregate_sig_figs=aggregate_sig_figs,
+            min_risk_set_size=min_risk_set_size,
         )
     except ValidationError as e:
         # The message is formatted without the offending input; the chained
@@ -461,6 +497,7 @@ def guarded_risk_set_aggregates(
     k: int,
     X: np.ndarray,
     beta: np.ndarray,
+    min_risk_set_size: Optional[int] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Vectorised risk-set aggregates with the minimum-change ("jump") guard.
 
@@ -473,6 +510,15 @@ def guarded_risk_set_aggregates(
     previous set is held (``h`` stays), otherwise ``h = j+1``. This matches
     the previous mask implementation exactly (see the reference copy in
     ``tests/unit/reference_risk_sets.py``).
+
+    The absolute floor ``min_risk_set_size`` extends the same walk: while
+    fewer than that many individuals are at risk at grid point ``j``, the
+    last released aggregates are held instead of releasing a smaller risk
+    set (no truncation — the tail is reported at the last released set,
+    which makes the estimates approximate there). The floor belongs to the
+    risk-set guard family: ``k <= 1`` disables it together with the jump
+    guard, and the first grid point is always released whatever its
+    risk-set size.
 
     Complexity: O(N·p²) compute and O(N·p + T·p²) memory, instead of T×N
     boolean masks.
@@ -489,6 +535,9 @@ def guarded_risk_set_aggregates(
         The (standardised) covariate matrix, shape (N, p).
     beta : np.ndarray
         The coefficient vector, shape (p,).
+    min_risk_set_size : int | None
+        The absolute floor on the size of a released risk set; ``None``
+        disables the floor. Only effective when ``k > 1``.
 
     Returns
     -------
@@ -534,7 +583,11 @@ def guarded_risk_set_aggregates(
                 s2_bucket[:, c2, c1] = s2_bucket[:, c1, c2]
     s2 = np.cumsum(s2_bucket[::-1], axis=0)[::-1]
 
-    # Effective grid index from the counts alone (the jump guard).
+    # Effective grid index from the counts alone (the jump guard, extended
+    # by the absolute risk-set floor). The floor is part of the same guard
+    # family, so k <= 1 disables it together with the jump guard; the first
+    # grid point is always released, whatever its risk-set size.
+    floor = min_risk_set_size if (k is not None and k > 1) else None
     if k is None or k <= 1:
         effective = np.arange(n_times)
     else:
@@ -543,7 +596,9 @@ def guarded_risk_set_aggregates(
         held = 0
         for j in range(1, n_times):
             removed = count_r[held] - count_r[j]
-            if not (0 < removed < k):
+            jump_holds = 0 < removed < k
+            floor_holds = floor is not None and count_r[j] < floor
+            if not jump_holds and not floor_holds:
                 held = j
             effective[j] = held
 
