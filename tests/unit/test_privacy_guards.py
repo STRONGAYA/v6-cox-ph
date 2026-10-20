@@ -541,14 +541,15 @@ class TestPrepareNodeData:
 
     @pytest.fixture
     def node_df(self):
-        # 60 rows: the default privacy level's reconstruction bound (10 x k=5
-        # = 50 rows) must not trip the threshold in these guard-order tests.
+        # 200 rows: above the default privacy level's admission bound
+        # (max(10 x k=5, 3 x R=50) = 150 rows) so the threshold does not
+        # trip in these guard-order tests.
         return pd.DataFrame(
             {
-                "time": [float(i) for i in range(1, 61)],
-                "event": [1] * 30 + [0] * 30,
-                "age": [50.0] * 60,
-                "treatment": [0, 1] * 30,
+                "time": [float(i) for i in range(1, 201)],
+                "event": [1] * 100 + [0] * 100,
+                "age": [50.0] * 200,
+                "treatment": [0, 1] * 100,
             }
         )
 
@@ -608,7 +609,7 @@ class TestPrepareNodeData:
             "check_sample_size",
         ]
         assert threshold_met is True
-        assert len(df) == 60
+        assert len(df) == 200
 
     def test_guard_order_without_expl_vars(self, client, node_df, default_env, monkeypatch):
         """Without expl_vars, validate_expl_vars is skipped; order is stable."""
@@ -639,7 +640,7 @@ class TestPrepareNodeData:
     def test_need_outcome_false_checks_rows_only(self, client, default_env, monkeypatch):
         """need_outcome=False checks rows only (perform_iteration today)."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
-        df = pd.DataFrame({"time": [1.0] * 60, "age": [50.0] * 60})
+        df = pd.DataFrame({"time": [1.0] * 200, "age": [50.0] * 200})
         _, _, threshold_met = prepare_node_data(client, df, "time", None, ["age"], need_outcome=False)
         assert threshold_met is True
         df_small = pd.DataFrame({"time": [1.0] * 5, "age": [50.0] * 5})
@@ -649,9 +650,11 @@ class TestPrepareNodeData:
     def test_nan_rows_dropped_before_threshold(self, client, default_env, monkeypatch):
         """Rows with NaN in any analysed column are dropped before the threshold."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "12")
-        # The reconstruction row bound is switched off: this test isolates the
-        # NaN-dropping / threshold semantics, not the row bound.
+        # The reconstruction row bound and the risk-set floor are switched
+        # off: this test isolates the NaN-dropping / threshold semantics, not
+        # the row bounds.
         monkeypatch.setenv("COXPH_RECONSTRUCTION_ROW_FACTOR", "1")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "")
         df = pd.DataFrame(
             {
                 "time": [1.0] * 30,

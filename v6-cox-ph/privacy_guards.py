@@ -52,7 +52,10 @@ via ``get_env_var``:
   minimum-change guard; the first grid point is always released). The floor
   is part of the risk-set guard family: it only takes effect when
   ``COXPH_MIN_RISK_SET_CHANGE`` > 1, so ``k = 1`` disables it together with
-  the jump guard.
+  the jump guard. The sample-size check also requires ``rows >= 3 x R``
+  while the floor is in effect (see ``check_sample_size``): a node that
+  small would have (nearly) its whole content inside the smallest released
+  risk set, which the floor alone cannot hide.
 
 The released risk-set aggregates are additionally quantised to float32
 precision (about 7 significant figures) at serialisation — always on, applied
@@ -111,6 +114,12 @@ DEFAULT_PRIVACY_LEVEL = "standard"
 DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
 DEFAULT_CURVE_TIME_SIG_FIGS = 6
+
+# The sample-size check admits a node only when it has at least this many
+# times the risk-set size floor in rows (on top of the reconstruction bound
+# factor * k): a smaller node would have (nearly) its whole content inside
+# the smallest released risk set, which the floor alone cannot hide.
+FLOOR_ADMISSION_MULTIPLE = 3
 
 # The released aggregates travel to central as JSON numbers. Quantising them
 # to float32 precision (about 7 significant decimal digits) at serialisation
@@ -771,7 +780,12 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     reconstructed from the aggregates. A second, reconstruction bound
     therefore also applies — the node must have at least
     ``reconstruction_row_factor * k`` rows, which keeps the node many times
-    larger than the smallest released group.
+    larger than the smallest released group. When the risk-set size floor is
+    in effect, the admission bound additionally requires
+    ``FLOOR_ADMISSION_MULTIPLE * min_risk_set_size`` rows: a node that small
+    would have (nearly) its whole content inside the smallest released risk
+    set, and the floor would hold nearly the whole risk-set trajectory at
+    the first grid point.
 
     Parameters
     ----------
@@ -786,8 +800,10 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     Returns
     -------
     bool
-        ``True`` when rows > threshold, rows >= factor * k and (when checked)
-        events > threshold.
+        ``True`` when rows > threshold, rows >= the admission bound
+        (``max(factor * k, FLOOR_ADMISSION_MULTIPLE * R)`` with the floor
+        term only while the floor is in effect) and (when checked) events >
+        threshold.
     """
     threshold = settings.sample_size_threshold
     n_rows = len(df)
@@ -795,12 +811,25 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
         warn(f"Sample size threshold not met: row count does not exceed {threshold}.")
         return False
 
+    # The admission bound covers both reconstruction routes; the warning
+    # names the configured bound only, never the actual count.
     reconstruction_bound = settings.reconstruction_row_factor * settings.min_risk_set_change
-    if n_rows < reconstruction_bound:
-        warn(
-            f"Sample size threshold not met: row count does not meet the reconstruction bound "
-            f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change})."
-        )
+    floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
+    admission_bound = reconstruction_bound
+    if floor is not None:
+        admission_bound = max(admission_bound, FLOOR_ADMISSION_MULTIPLE * floor)
+    if n_rows < admission_bound:
+        if floor is not None:
+            warn(
+                f"Sample size threshold not met: row count does not meet the admission bound "
+                f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change}, "
+                f"{FLOOR_ADMISSION_MULTIPLE} x R={floor}: at least {admission_bound} rows)."
+            )
+        else:
+            warn(
+                f"Sample size threshold not met: row count does not meet the reconstruction bound "
+                f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change})."
+            )
         return False
 
     if outcome_col is not None:

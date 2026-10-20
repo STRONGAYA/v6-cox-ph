@@ -545,11 +545,12 @@ class TestNaNPolicy:
             )
 
 
-def _per_node_agg1_at_beta_zero(datasets, organization_ids):
+def _per_node_agg1_at_beta_zero(datasets, organization_ids, expl_vars=None):
     """Dispatch perform_iteration at beta=0 and return per-node agg1 lists.
 
     At beta=0, exp(beta . X) = 1, so agg1[t] equals the risk-set size |R(t)|.
     """
+    expl_vars = EXPL_VARS if expl_vars is None else expl_vars
     client = MockAlgorithmClient(
         datasets=datasets,
         module="v6-cox-ph",
@@ -560,7 +561,7 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
     task = client.task.create(
         input_={
             "method": "compute_summed_z",
-            "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": expl_vars},
         },
         organizations=organization_ids,
     )
@@ -578,7 +579,7 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
             "kwargs": {
                 "time_col": "time",
                 "outcome_col": "event",
-                "expl_vars": EXPL_VARS,
+                "expl_vars": expl_vars,
                 "beta": [0.0, 0.0],
                 "centre": [0.0, 0.0],
                 "scale": [1.0, 1.0],
@@ -601,17 +602,19 @@ class TestDefaultGuardsPrivacyProperty:
         The default bundle also carries the absolute floor (standard level:
         R = 50): every released value is at least R, except values held at
         the first grid point, which is always released whatever its size.
+
+        The scenario uses 200-row nodes: above the standard level's
+        admission bound (max(10 x k=5, 3 x R=50) = 150 rows), so the nodes
+        are admitted and the floor holds only the tail of each node's
+        risk-set trajectory.
         """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         k = 5
         r = 50
-        df1, df2, _ = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-        ]
-        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2])
+        expl_vars = ["x1", "x2"]
+        datasets = [[{"database": df, "db_type": "csv"}] for df in _simulate_survival_data(20261005)]
+        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2, 3], expl_vars=expl_vars)
 
         for node_idx, agg1 in enumerate(per_node_agg1):
             values = [float(v) for v in agg1]
@@ -1208,21 +1211,22 @@ class TestSurvivalCurves:
             )
 
     def test_curve_steps_respect_k(self, monkeypatch):
-        """With default guards every curve time is backed by risk sets >= k."""
+        """With default guards every curve time is backed by risk sets >= k.
+
+        The scenario uses 200-row nodes, admitted under the standard
+        level's admission bound (150 rows).
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         k = 5
-        df1, df2, _ = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-        ]
-        result = _run_central(datasets, [1, 2])
+        expl_vars = ["x1", "x2"]
+        datasets = [[{"database": df, "db_type": "csv"}] for df in _simulate_survival_data(20261005)]
+        result = _run_central(datasets, [1, 2, 3], expl_vars=expl_vars)
         assert result["converged"] is True
 
         # At beta = 0 the per-node agg1 equals the node's risk-set size; the
         # guards guarantee every non-zero value is >= k.
-        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2])
+        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2, 3], expl_vars=expl_vars)
         grid = sorted(
             (float(t) for t in result["baseline_cumulative_hazard"]),
         )
@@ -1234,7 +1238,7 @@ class TestSurvivalCurves:
                         f"(time {grid[i] if i < len(grid) else '?'})"
                     )
 
-    def test_curve_time_keys_coarsened(self, monkeypatch):
+    def test_curve_time_keys_coarsened(self, monkeypatch, guards_off):
         """COXPH_CURVE_TIME_SIG_FIGS coarsens the reported curve time keys.
 
         An empty value reports the exact event times; 2 significant figures
@@ -1270,7 +1274,7 @@ class TestSurvivalCurves:
             expected_curve = {key: exact["survival_curves"][profile][t] for key, t in key_to_time.items()}
             assert curve == expected_curve
 
-    def test_curve_time_sig_figs_default_is_six(self, monkeypatch):
+    def test_curve_time_sig_figs_default_is_six(self, monkeypatch, guards_off):
         """The curve time keys are coarsened to 6 significant figures by default.
 
         The test data's event times carry one decimal, so 6 significant
@@ -1298,16 +1302,18 @@ class TestPrivacyGuardsSummary:
     """The result carries an aggregate summary of the active guards."""
 
     def test_default_guards_summary(self, monkeypatch):
-        """Default guards: active, k=5, no binning, warning appended."""
+        """Default guards: active, k=5, no binning, warning appended.
+
+        The scenario uses 200-row nodes, admitted under the standard
+        level's admission bound (150 rows).
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        df1, df2, _ = _load_datasets()
+        datasets = _simulate_survival_data(20261005)
         result = _run_central(
-            [
-                [{"database": df1, "db_type": "csv"}],
-                [{"database": df2, "db_type": "csv"}],
-            ],
-            [1, 2],
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
         )
         summary = result["privacy_guards"]
         assert set(summary.keys()) == {
@@ -1523,7 +1529,7 @@ class TestCentralInputValidation:
         with pytest.raises(UserInputError, match="Too many explanatory variables"):
             _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=expl_vars)
 
-    def test_event_time_grid_cap_rejected(self, monkeypatch):
+    def test_event_time_grid_cap_rejected(self, monkeypatch, guards_off):
         """A pooled event-time grid beyond COXPH_MAX_GRID_POINTS is rejected.
 
         The error message names the configured cap and the remedies, never
@@ -1585,7 +1591,7 @@ class TestReleasedAggregatePrecision:
         )
         return client, grid
 
-    def test_perform_iteration_rounds_released_aggregates(self, monkeypatch):
+    def test_perform_iteration_rounds_released_aggregates(self, monkeypatch, guards_off):
         """COXPH_AGGREGATE_SIG_FIGS rounds agg1/agg2/agg3 to that many figures."""
         coxph_logic = import_module("v6-cox-ph.coxph_logic")
         client, grid = self._client_and_grid()
@@ -1623,10 +1629,12 @@ class TestReleasedAggregatePrecision:
                 # The wire quantisation: released values are fixed points of
                 # rounding to 7 significant figures.
                 np.testing.assert_array_equal(raw_arr, coxph_logic.round_sig(raw_arr, 7))
-                # The privacy rounding: released values are fixed points of
-                # rounding to 3 significant figures (hence also of rounding
-                # to 7).
-                np.testing.assert_array_equal(rounded_arr, coxph_logic.round_sig(rounded_arr, 3))
+                # The privacy rounding: released values equal their own
+                # 3-significant-figure rounding, up to the 1-ulp wobble of
+                # the multiply-round-divide round_sig — the wire quantisation
+                # to 7 figures applied on top reaches the value through a
+                # different division and can shift it by one ulp.
+                np.testing.assert_allclose(rounded_arr, coxph_logic.round_sig(rounded_arr, 3), rtol=1e-15, atol=0.0)
                 np.testing.assert_array_equal(rounded_arr, coxph_logic.round_sig(rounded_arr, 7))
 
     def test_released_aggregates_carry_wire_precision_in_minimal(self, monkeypatch):
@@ -1669,6 +1677,10 @@ class TestReleasedAggregatePrecision:
         monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        # The risk-set floor is switched off: this test isolates the
+        # small-count suppression, so the 60-row node only has to meet the
+        # reconstruction bound (10 x k=5 = 50 rows).
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "")
         # 60 rows: an event at each of the 54 smallest distinct times (every
         # per-time count is 1, below the standard-level minimum of 2) and a
         # censored row at each of the 6 largest times, so the tail censoring
