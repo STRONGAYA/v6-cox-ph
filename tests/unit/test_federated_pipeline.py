@@ -1322,12 +1322,15 @@ class TestPrivacyGuardsSummary:
             "time_binning",
             "max_min_time_event_count",
             "max_min_risk_set_size",
+            "max_held_event_fraction",
         }
         assert summary["active"] is True
         assert summary["max_min_risk_set_change"] == 5
         assert summary["time_binning"] is False
         assert summary["max_min_time_event_count"] == 2
         assert summary["max_min_risk_set_size"] == 50
+        held = summary["max_held_event_fraction"]
+        assert 0.0 <= held <= 1.0
         assert any("guards were active" in w for w in result["warnings"])
         assert any("minimum risk-set size R=50" in w for w in result["warnings"])
 
@@ -1348,12 +1351,15 @@ class TestPrivacyGuardsSummary:
             "time_binning",
             "max_min_time_event_count",
             "max_min_risk_set_size",
+            "max_held_event_fraction",
         }
         assert summary["active"] is False
         assert summary["max_min_risk_set_change"] == 1
         assert summary["time_binning"] is False
         assert summary["max_min_time_event_count"] == 1
         assert summary["max_min_risk_set_size"] is None
+        # Guards off (k=1): nothing can be held, so the fraction is 0.
+        assert summary["max_held_event_fraction"] == 0.0
         assert not any("guards were active" in w for w in result["warnings"])
 
     def test_binning_summary(self, monkeypatch):
@@ -1375,6 +1381,7 @@ class TestPrivacyGuardsSummary:
             "time_binning",
             "max_min_time_event_count",
             "max_min_risk_set_size",
+            "max_held_event_fraction",
         }
         assert summary["active"] is True
         assert summary["time_binning"] is True
@@ -1383,6 +1390,8 @@ class TestPrivacyGuardsSummary:
         # The floor is configured (standard level) but k=1 disables it; the
         # summary reports the configuration, the warning does not name it.
         assert summary["max_min_risk_set_size"] == 50
+        # k=1 disables the risk-set guards: nothing can be held.
+        assert summary["max_held_event_fraction"] == 0.0
         assert not any("minimum risk-set size" in w for w in result["warnings"])
 
 

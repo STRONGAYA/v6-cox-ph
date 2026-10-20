@@ -279,6 +279,36 @@ def partial_log_likelihood(
     return float(np.dot(beta, np.asarray(z_sum, dtype=float)) - np.sum(freqs * np.log(s0)))
 
 
+def held_event_fraction(agg1, freq, min_risk_set_change: int) -> float:
+    """
+    The fraction of a node's events scored against a held (unchanged) risk set.
+
+    ``agg1`` is the node's released risk-set sizes on the event-time grid at
+    ``beta = 0``, where they are exact integers under the released
+    precision, and ``freq`` the node's per-time event counts on the same
+    grid. A grid point beyond the first is *held* when the released risk
+    set is unchanged since the first release (``agg1[i] == agg1[0]``): the
+    true risk set strictly decreases at every event time (the event rows
+    leave it), so a released set still equal to the first release at a
+    later event time is necessarily a held (stale) release. The fraction is
+    the share of the node's events at held grid points; the first grid
+    point is always released and never counts as held.
+
+    With the risk-set guards off (``min_risk_set_change <= 1``) nothing can
+    be held, so the fraction is 0 by definition.
+    """
+    if min_risk_set_change <= 1:
+        return 0.0
+    agg1 = np.asarray(agg1, dtype=float)
+    freq = np.asarray(freq, dtype=float)
+    total = float(freq.sum())
+    if total <= 0 or len(agg1) < 2:
+        return 0.0
+    unchanged = agg1[1:] == agg1[0]
+    held_events = float(freq[1:][unchanged].sum())
+    return held_events / total
+
+
 def pooled_standardisation(z_sum, sum_squares, n_events: float) -> tuple[np.ndarray, np.ndarray]:
     """
     The pooled covariate centre and scale over the event cases.

@@ -21,7 +21,7 @@ from vantage6.algorithm.tools.util import info, warn
 from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
 from .coxph_logic import partial_log_likelihood, pooled_standardisation
 from .coxph_logic import survival_curves as survival_curves_from_aggregates
-from .coxph_logic import format_results_dataframe
+from .coxph_logic import format_results_dataframe, held_event_fraction
 from .miscellaneous import IterationResult, SummedZResult, format_validation_error, validate_coxph_input
 from .privacy_guards import (
     ENV_MAX_COVARIATES,
@@ -35,6 +35,10 @@ from .privacy_guards import (
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
 # it to force non-convergence.
 MAX_ITERATIONS = 20
+
+# The held-event fraction diagnostic warns when more than this share of a
+# node's events was scored against a held (unchanged) risk set.
+HELD_FRACTION_WARN_THRESHOLD = 0.25
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -156,6 +160,7 @@ def central(
     sum_squares = None
     time_event_dfs = []
     node_privacy_settings = []
+    node_info = {}
     for output in results:
         result = _parse_result(
             SummedZResult, output, {"expected_ids": ids, "expl_vars": expl_vars, "time_col": time_col}
@@ -167,8 +172,16 @@ def central(
             z_sum += pd.Series(result.sum)
             sum_squares += pd.Series(result.sum_squares)
         # Collect per-time event counts (NaN-consistent with z_sum)
-        time_event_dfs.append(pd.DataFrame.from_dict(result.times))
+        time_event_df = pd.DataFrame.from_dict(result.times)
+        time_event_dfs.append(time_event_df)
         node_privacy_settings.append(result.privacy_settings)
+        # Per-node event counts and settings, paired by organisation id for
+        # the held-fraction diagnostic (results are not in dispatch order).
+        node_info[result.organization_id] = (
+            time_event_df[time_col].to_numpy(dtype=float),
+            time_event_df["freq"].to_numpy(dtype=float),
+            result.privacy_settings,
+        )
 
     # Build aggregated_time_events from compute_summed_z results: it drops
     # NaN in time, outcome and expl_vars, so its event counts are consistent
@@ -208,7 +221,7 @@ def central(
     floors = [int(s["min_risk_set_size"]) for s in node_privacy_settings if s.get("min_risk_set_size") is not None]
     max_min_risk_set_size = max(floors) if floors else None
     guards_active = max_min_risk_set_change > 1 or time_binning or max_min_time_event_count > 1
-    privacy_guards = {
+    privacy_guards: dict = {
         "active": guards_active,
         "max_min_risk_set_change": max_min_risk_set_change,
         "time_binning": time_binning,
@@ -259,6 +272,7 @@ def central(
     last_step: np.ndarray | None = None
     converged = False
     convergence_cause: str | None = None
+    held_fraction_warning: str | None = None
     epoch = 0
 
     for epoch in range(epochs):
@@ -296,6 +310,7 @@ def central(
         summed_agg1 = np.zeros(n_times)
         summed_agg2 = np.zeros((n_times, n_covs))
         summed_agg3 = np.zeros((n_times, n_covs, n_covs))
+        round1_agg1 = {}
 
         for output in results:
             iteration_result = _parse_result(
@@ -304,6 +319,29 @@ def central(
             summed_agg1 += np.asarray(iteration_result.agg1, dtype=float)
             summed_agg2 += np.asarray(iteration_result.agg2, dtype=float)
             summed_agg3 += np.asarray(iteration_result.agg3, dtype=float)
+            if epoch == 0:
+                round1_agg1[iteration_result.organization_id] = np.asarray(iteration_result.agg1, dtype=float)
+
+        if epoch == 0:
+            # Round 1 runs at beta = 0, where the released risk-set sizes
+            # are exact integers: a release still at the first released
+            # risk set is exactly agg1[i] == agg1[0], and (the true risk
+            # set strictly decreases at every event time) necessarily a
+            # held (stale) one. The share of each node's events scored
+            # against a held risk set diagnoses how much of the timeline
+            # the guards held back; the maximum across nodes is reported
+            # in the privacy guards summary.
+            max_held_event_fraction = _max_held_event_fraction(round1_agg1, node_info, unique_time_events)
+            privacy_guards["max_held_event_fraction"] = max_held_event_fraction
+            if max_held_event_fraction > HELD_FRACTION_WARN_THRESHOLD:
+                held_fraction_warning = (
+                    f"The risk-set guards held back a large share of the event timeline: "
+                    f"{max_held_event_fraction:.3f} of the events (maximum across nodes) were "
+                    f"scored against an unchanged (held) risk set, above the warn threshold "
+                    f"{HELD_FRACTION_WARN_THRESHOLD}; the estimates may be dominated by held "
+                    f"risk sets."
+                )
+                warn(held_fraction_warning)
 
         # The log-likelihood at the current beta, from aggregates that are
         # already collected (no extra round-trip).
@@ -366,10 +404,7 @@ def central(
         beta = beta - step
 
     n_iterations = epoch + 1
-    if guards_warning is not None:
-        central_warnings = [guards_warning]
-    else:
-        central_warnings = []
+    central_warnings = [w for w in (guards_warning, held_fraction_warning) if w is not None]
     if accepted is None:
         raise AlgorithmError("The optimiser never accepted an evaluation; no model can be reported.")
     beta = accepted["beta"]
@@ -466,6 +501,30 @@ def _released_sig_figs(settings) -> int:
     if configured is None:
         return WIRE_AGGREGATE_SIG_FIGS
     return min(int(configured), WIRE_AGGREGATE_SIG_FIGS)
+
+
+def _max_held_event_fraction(round1_agg1: dict, node_info: dict, grid: list) -> float:
+    """The maximum across nodes of the held-event fraction.
+
+    ``round1_agg1`` holds each node's released risk-set sizes at
+    ``beta = 0`` (round 1) and ``node_info`` pairs each organisation with
+    its per-time event counts and privacy settings; both are keyed by
+    organisation id because the results are not in dispatch order. A node's
+    event counts are aligned with the pooled event-time grid (its own
+    times are a subset of it) and the fraction is computed by
+    ``held_event_fraction``. A node whose risk-set guards are off
+    (k <= 1) cannot hold anything and contributes 0.
+    """
+    grid_arr = np.asarray(grid, dtype=float)
+    fractions = []
+    for org_id, agg1 in round1_agg1.items():
+        node_times, node_freqs, settings = node_info[org_id]
+        indices = np.searchsorted(grid_arr, node_times)
+        freq = np.zeros(len(grid_arr))
+        np.add.at(freq, indices, node_freqs)
+        min_risk_set_change = int(settings.get("min_risk_set_change") or 1)
+        fractions.append(held_event_fraction(agg1, freq, min_risk_set_change))
+    return max(fractions) if fractions else 0.0
 
 
 def _parse_result(model_cls: type[_ModelT], output: object, context: dict) -> _ModelT:
