@@ -74,6 +74,14 @@ The reported curve time keys are coarsened centrally as well
   cumulative hazard and the survival curves are rounded to this many
   significant figures; times that merge into one key keep the value at
   their largest original time.
+
+The held-event fraction abort cap is loaded centrally too
+(``load_max_held_event_fraction``):
+
+- ``COXPH_MAX_HELD_EVENT_FRACTION`` (float in (0, 1], default 0.5; an
+  empty string disables the abort) — above this share of a node's
+  events scored against a held (unchanged) risk set, central aborts the
+  run: the fit is dominated by held risk sets.
 """
 
 from __future__ import annotations
@@ -106,6 +114,7 @@ ENV_AGGREGATE_SIG_FIGS = "COXPH_AGGREGATE_SIG_FIGS"
 ENV_MAX_COVARIATES = "COXPH_MAX_COVARIATES"
 ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
 ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
+ENV_MAX_HELD_EVENT_FRACTION = "COXPH_MAX_HELD_EVENT_FRACTION"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
@@ -114,6 +123,7 @@ DEFAULT_PRIVACY_LEVEL = "standard"
 DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
 DEFAULT_CURVE_TIME_SIG_FIGS = 6
+DEFAULT_MAX_HELD_EVENT_FRACTION = 0.5
 
 # The sample-size check admits a node only when it has at least this many
 # times the risk-set size floor in rows (on top of the reconstruction bound
@@ -405,6 +415,41 @@ def load_curve_time_sig_figs() -> Optional[int]:
         DEFAULT_CURVE_TIME_SIG_FIGS,
         ENV_CURVE_TIME_SIG_FIGS,
     )
+
+
+def load_max_held_event_fraction() -> Optional[float]:
+    """Load the central abort cap on the held-event fraction.
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. Above this share
+    of a node's events scored against a held (unchanged) risk set, central
+    aborts the run with ``UserInputError``: the fit is dominated by held
+    risk sets and the estimates are not trustworthy. An empty
+    ``COXPH_MAX_HELD_EVENT_FRACTION`` disables the abort.
+
+    Returns
+    -------
+    float | None
+        The cap, or ``None`` when the abort is disabled.
+
+    Raises
+    ------
+    UserInputError
+        If the value is not a float in (0, 1].
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    raw = get_env_var(ENV_MAX_HELD_EVENT_FRACTION, default=None)
+    if raw is None:
+        return DEFAULT_MAX_HELD_EVENT_FRACTION
+    if str(raw).strip() == "":
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise UserInputError(f"{ENV_MAX_HELD_EVENT_FRACTION} must be a float in (0, 1], got {raw!r}") from None
+    if not 0.0 < value <= 1.0:
+        raise UserInputError(f"{ENV_MAX_HELD_EVENT_FRACTION} must be a float in (0, 1], got {raw!r}")
+    return value
 
 
 def ensure_spawned_by_central(client) -> None:

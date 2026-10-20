@@ -26,9 +26,11 @@ from .miscellaneous import IterationResult, SummedZResult, format_validation_err
 from .privacy_guards import (
     ENV_MAX_COVARIATES,
     ENV_MAX_GRID_POINTS,
+    ENV_MAX_HELD_EVENT_FRACTION,
     ENV_TIME_BIN_WIDTH,
     WIRE_AGGREGATE_SIG_FIGS,
     load_curve_time_sig_figs,
+    load_max_held_event_fraction,
     load_resource_caps,
 )
 
@@ -111,6 +113,11 @@ def central(
     # The reported curve time keys are coarsened to this many significant
     # figures (an empty COXPH_CURVE_TIME_SIG_FIGS reports exact times).
     curve_time_sig_figs = load_curve_time_sig_figs()
+
+    # The held-event fraction abort cap (central side): above this share of
+    # a node's events scored against a held (unchanged) risk set the run
+    # aborts; an empty COXPH_MAX_HELD_EVENT_FRACTION disables the abort.
+    max_held_event_fraction_cap = load_max_held_event_fraction()
 
     # Collect all organisations unless specified
     ids: list
@@ -333,6 +340,20 @@ def central(
             # in the privacy guards summary.
             max_held_event_fraction = _max_held_event_fraction(round1_agg1, node_info, unique_time_events)
             privacy_guards["max_held_event_fraction"] = max_held_event_fraction
+            if max_held_event_fraction_cap is not None and max_held_event_fraction > max_held_event_fraction_cap:
+                # The fit is dominated by held risk sets; the estimates
+                # would not be trustworthy. The message names the configured
+                # cap and the measured fraction (the same statistic the
+                # result reports) and the remedies.
+                raise UserInputError(
+                    f"The held-event fraction {max_held_event_fraction:.3f} (maximum across nodes) "
+                    f"exceeds the configured cap {max_held_event_fraction_cap} "
+                    f"({ENV_MAX_HELD_EVENT_FRACTION}): the risk-set guards held back too much of "
+                    f"the event timeline and the fit is dominated by held risk sets. Use larger "
+                    f"nodes, lower the risk-set guards by policy (COXPH_MIN_RISK_SET_CHANGE, "
+                    f"COXPH_MIN_RISK_SET_SIZE), or run with the minimal privacy level "
+                    f"(COXPH_PRIVACY_LEVEL=minimal) for validation."
+                )
             if max_held_event_fraction > HELD_FRACTION_WARN_THRESHOLD:
                 held_fraction_warning = (
                     f"The risk-set guards held back a large share of the event timeline: "
