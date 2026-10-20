@@ -40,6 +40,30 @@ function signatures and result keys) is unchanged.
   read centrally; an empty string reports the exact event times); times that
   merge into one key keep the value at their largest original time. The
   result gains a ``curve_time_sig_figs`` field reporting the setting in use.
+- The sample-size check also enforces an admission bound while the risk-set
+  size floor is in effect: a node must have at least
+  ``max(reconstruction_row_factor * k, 3 * min_risk_set_size)`` rows — 150
+  rows at ``standard``, 300 at ``strict``; ``minimal`` is unchanged. Nodes
+  below the bound are refused the same fail-closed way as below-threshold
+  nodes.
+- The result's ``privacy_guards`` summary gains ``max_held_event_fraction``:
+  the maximum across nodes of the share of a node's events scored against a
+  held (unchanged) risk set. A warning is appended above 0.25.
+- Central aborts a run whose held-event fraction exceeds
+  ``COXPH_MAX_HELD_EVENT_FRACTION`` (float in (0, 1], default 0.5, read
+  centrally; an empty string disables the abort) with a ``UserInputError``
+  naming the cap and the remedies.
+- Convergence is declared when the largest Newton step falls to ``1e-6``,
+  or when the log-likelihood gain stays at rounding level for two
+  consecutive accepted evaluations while the step stays below ``1e-3``
+  (the secondary tolerance lets the ``strict`` preset's coarse aggregates
+  converge). The result gains ``convergence_tolerance``, the tolerance that
+  fired.
+- The small-count time suppression is now consistent with the risk sets:
+  ``perform_iteration`` moves the event rows' times up to their merged time
+  (censored rows keep their time), so the analysed rows, the shared
+  event-time grid and the risk sets describe the same event times. The
+  ``times`` payload of ``compute_summed_z`` is unchanged.
 
 ## 2.0.0 (2026-10-05)
 

@@ -53,6 +53,16 @@ therefore also have at least ``factor * k`` rows, where ``k`` is
 sample-size threshold, the warning on failure names the configured bound,
 never the actual row count.
 
+While the risk-set size floor is in effect, the admission bound
+additionally requires ``3 x R`` rows, where ``R`` is the floor
+(``COXPH_MIN_RISK_SET_SIZE``): a node that small would have (nearly) its
+whole content inside the smallest released risk set, which the floor alone
+cannot hide. A node must therefore have at least ``max(factor * k, 3 * R)``
+rows. At the presets that is 150 rows at ``standard`` (``max(10 x 5,
+3 x 50)``) and 300 rows at ``strict`` (``max(20 x 5, 3 x 100)``);
+``minimal`` has no floor and is unchanged. Nodes below the bound are
+refused the same fail-closed way as below-threshold nodes.
+
 Time binning
 ~~~~~~~~~~~~
 
@@ -98,6 +108,29 @@ set, which makes the estimates approximate there. The floor belongs to
 the risk-set guard family: ``k <= 1`` disables it together with the jump
 guard, and the first grid point is always released whatever its size.
 
+Held-event fraction
+~~~~~~~~~~~~~~~~~~~
+
+The jump guard and the size floor hold the last released aggregates while
+the true risk set shrinks below the release conditions. A run whose fit is
+dominated by held risk sets is attenuated towards zero yet still reports
+``converged``. Central therefore measures, per node, the share of the
+node's events scored against a held (unchanged) risk set: a grid point
+beyond the first is held when the released risk set is still equal to the
+first release — the true risk set strictly decreases at every event time
+(the event rows leave it), so a released set still equal to the first
+release at a later event time is necessarily stale. The maximum across
+nodes is reported as ``privacy_guards.max_held_event_fraction``.
+
+Above 0.25 a warning is appended: the estimates may be dominated by held
+risk sets. Above the cap ``COXPH_MAX_HELD_EVENT_FRACTION`` (float in
+(0, 1], default 0.5, read centrally; an empty string disables the abort)
+central raises ``UserInputError`` before the fit continues: the message
+names the configured cap, the measured maximum and the remedies — larger
+nodes, lowering the risk-set guards by policy (``COXPH_MIN_RISK_SET_CHANGE``,
+``COXPH_MIN_RISK_SET_SIZE``), or running at the ``minimal`` level for
+validation.
+
 Small-count time suppression
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -112,6 +145,14 @@ of events is unchanged. The suppression applies to the ``times`` payload of
 ``compute_summed_z`` and therefore to the event-time grid the whole run
 uses, including the keys of the returned ``baseline_cumulative_hazard``
 and ``survival_curves``.
+
+``perform_iteration`` applies the same merge to the node's rows: the event
+rows' times are moved up to their merged time (censored rows keep their
+time), so the risk sets match the shared grid and the partial likelihood
+is consistent with the suppressed counts. The move applies whenever the
+minimum per-time event count is above 1, whatever the risk-set guards; the
+tail censoring runs first, so a merged time never exceeds the cut-off.
+The analysed rows and the total number of events are unchanged.
 
 With high-precision event times most per-time counts are singletons and
 the grid coarsens substantially; the model stays valid but the estimates
@@ -219,6 +260,7 @@ Variable                            Type        Default
 ``COXPH_MAX_COVARIATES``            int         20
 ``COXPH_MAX_GRID_POINTS``           int         1000
 ``COXPH_CURVE_TIME_SIG_FIGS``       int         6
+``COXPH_MAX_HELD_EVENT_FRACTION``   float       0.5
 =================================== =========== ============
 
 ``COXPH_PRIVACY_LEVEL`` is the primary variable: the one variable a node
@@ -243,8 +285,9 @@ rounding) and ``COXPH_MIN_RISK_SET_SIZE`` (int, at least 1; an empty string
 disables the floor). Precedence is: an explicitly set variable beats the
 level preset, which beats the built-in default. A node administrator
 normally sets nothing — the default ``standard`` level applies. The two
-caps and ``COXPH_CURVE_TIME_SIG_FIGS`` are central-side; see Resource caps
-and Curve time-key coarsening above.
+caps, ``COXPH_CURVE_TIME_SIG_FIGS`` and ``COXPH_MAX_HELD_EVENT_FRACTION``
+are central-side; see Resource caps, Curve time-key coarsening and
+Held-event fraction above.
 
 ``COXPH_MIN_RISK_SET_CHANGE`` must be at least 1, and
 ``SAMPLE_SIZE_THRESHOLD + 1`` must be greater than or equal to it;
@@ -273,11 +316,13 @@ Guard-effect summary
 The result carries a ``privacy_guards`` object: an aggregate summary of the
 guards that were active (configuration, not data; there is no per-node
 breakdown). It reports the maximum ``k`` any node used, whether time
-binning was on, the maximum minimum time event count across nodes, and the
+binning was on, the maximum minimum time event count across nodes, the
 maximum configured risk-set size floor across nodes (``None`` when no node
-configured one; the floor only takes effect when ``k > 1``). A warning is
-appended when any of these is active, because the estimates are then
-approximate.
+configured one; the floor only takes effect when ``k > 1``) and the
+maximum held-event fraction across nodes (see Held-event fraction above).
+A warning is appended when any of these is active, because the estimates
+are then approximate; a further warning is appended when the held-event
+fraction exceeds 0.25.
 
 Data sharing
 ------------
