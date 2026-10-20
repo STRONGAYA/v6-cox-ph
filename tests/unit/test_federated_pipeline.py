@@ -10,6 +10,11 @@ Exactness tests run with ``COXPH_MIN_RISK_SET_CHANGE=1`` (guards disabled) so
 the federated result matches lifelines closely. A separate test exercises the
 default guards (``k=5``) and asserts the risk-set privacy property on per-node
 ``agg1`` at ``beta = 0``.
+
+The released aggregates are always quantised to float32 precision on the
+wire (about 7 significant figures), so exactness is capped at that floor:
+the tightest exactness tolerances sit just above it (1e-5 / 1e-6), far below
+any real decomposition or assembly error.
 """
 
 import sys
@@ -19,7 +24,7 @@ from importlib import import_module
 import numpy as np
 import pandas as pd
 import pytest
-from vantage6.algorithm.tools.exceptions import AlgorithmError, PrivacyThresholdViolation
+from vantage6.algorithm.tools.exceptions import AlgorithmError, PrivacyThresholdViolation, UserInputError
 
 # Add the algorithm module and repo root to the path
 repo_root = Path(__file__).parent.parent.parent
@@ -45,7 +50,7 @@ def _load_datasets():
     return df1, df2, df3
 
 
-def _run_central(datasets, organization_ids):
+def _run_central(datasets, organization_ids, expl_vars=None):
     """Run ``central`` through the mock client and return the result dict."""
     client = MockAlgorithmClient(
         datasets=datasets,
@@ -58,7 +63,7 @@ def _run_central(datasets, organization_ids):
             "kwargs": {
                 "time_col": "time",
                 "outcome_col": "event",
-                "expl_vars": EXPL_VARS,
+                "expl_vars": EXPL_VARS if expl_vars is None else expl_vars,
                 "organization_ids": organization_ids,
             },
         },
@@ -83,11 +88,48 @@ def _lifelines_reference(df, expl_vars):
     }
 
 
+def _simulate_survival_data(seed: int, n_rows: int = 200, n_nodes: int = 3) -> list:
+    """Simulate survival datasets (fixed seed) for the guard-bias scenarios.
+
+    ``n_nodes`` nodes of ``n_rows`` rows each; event times follow an
+    exponential hazard with the study's true coefficients, censored
+    uniformly. The guard scenarios need nodes well above the reconstruction
+    bound so the guards approximate the fit rather than flatten it.
+    """
+    beta_true = np.array([0.5, -0.3])
+    rng = np.random.default_rng(seed)
+    datasets = []
+    for _ in range(n_nodes):
+        X = rng.normal(size=(n_rows, 2))
+        eta = X @ beta_true
+        hazard = 0.02 * np.exp(eta)
+        event_time = rng.exponential(1.0 / hazard)
+        censor_time = rng.uniform(0.0, 60.0)
+        datasets.append(
+            pd.DataFrame(
+                {
+                    "time": np.minimum(event_time, censor_time),
+                    "event": (event_time <= censor_time).astype(int),
+                    "x1": X[:, 0],
+                    "x2": X[:, 1],
+                }
+            )
+        )
+    return datasets
+
+
 @pytest.fixture
 def guards_off(monkeypatch):
-    """Disable the risk-set jump guard (k=1) and binning for exactness tests."""
+    """Disable the risk-set jump guard (k=1) and binning for exactness tests.
+
+    COXPH_PRIVACY_LEVEL=minimal also switches the hardening bundle off
+    (reconstruction row bound, small-count time suppression, aggregate
+    rounding): the exactness tests must run with only the mandatory guards.
+    """
     monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+    monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
     monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+    monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
 
 
 @pytest.fixture
@@ -170,7 +212,14 @@ class TestFederatedEqualsPooled:
     """The federated run must equal a centralised run on the pooled data."""
 
     def test_coefficients_identical_to_pooled(self, guards_off):
-        """Federated (2 nodes) coefficients equal pooled single-node to 1e-8."""
+        """Federated (2 nodes) coefficients equal pooled single-node to 1e-6.
+
+        The wire quantisation is not additive — each node's aggregates are
+        quantised to float32 precision before central sums them, while the
+        pooled node quantises the total — so the two runs agree only up to
+        the wire precision (measured 9.6e-9 on this data; 1e-6 keeps
+        headroom while still catching any real decomposition error).
+        """
         df1, df2, _ = _load_datasets()
 
         fed = _run_central(
@@ -190,7 +239,7 @@ class TestFederatedEqualsPooled:
             np.testing.assert_allclose(
                 fed_model.loc[var, "Coef"],
                 pooled_model.loc[var, "Coef"],
-                atol=1e-8,
+                atol=1e-6,
                 err_msg=f"coef differs from pooled for {var}",
             )
 
@@ -416,6 +465,9 @@ class TestWireContractPinning:
                 "sample_size_threshold",
                 "min_risk_set_change",
                 "time_bin_width",
+                "min_time_event_count",
+                "aggregate_sig_figs",
+                "min_risk_set_size",
             }
 
     def test_perform_iteration_result_keys(self, guards_off):
@@ -493,11 +545,12 @@ class TestNaNPolicy:
             )
 
 
-def _per_node_agg1_at_beta_zero(datasets, organization_ids):
+def _per_node_agg1_at_beta_zero(datasets, organization_ids, expl_vars=None):
     """Dispatch perform_iteration at beta=0 and return per-node agg1 lists.
 
     At beta=0, exp(beta . X) = 1, so agg1[t] equals the risk-set size |R(t)|.
     """
+    expl_vars = EXPL_VARS if expl_vars is None else expl_vars
     client = MockAlgorithmClient(
         datasets=datasets,
         module="v6-cox-ph",
@@ -508,7 +561,7 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
     task = client.task.create(
         input_={
             "method": "compute_summed_z",
-            "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": expl_vars},
         },
         organizations=organization_ids,
     )
@@ -526,7 +579,7 @@ def _per_node_agg1_at_beta_zero(datasets, organization_ids):
             "kwargs": {
                 "time_col": "time",
                 "outcome_col": "event",
-                "expl_vars": EXPL_VARS,
+                "expl_vars": expl_vars,
                 "beta": [0.0, 0.0],
                 "centre": [0.0, 0.0],
                 "scale": [1.0, 1.0],
@@ -544,16 +597,24 @@ class TestDefaultGuardsPrivacyProperty:
     """With default guards (k=5), shared risk-set aggregates are protected."""
 
     def test_agg1_changes_at_least_k(self, monkeypatch):
-        """Every positive decrease in per-node agg1 is >= k and min >= k."""
+        """Every positive decrease in per-node agg1 is >= k and min >= k.
+
+        The default bundle also carries the absolute floor (standard level:
+        R = 50): every released value is at least R, except values held at
+        the first grid point, which is always released whatever its size.
+
+        The scenario uses 200-row nodes: above the standard level's
+        admission bound (max(10 x k=5, 3 x R=50) = 150 rows), so the nodes
+        are admitted and the floor holds only the tail of each node's
+        risk-set trajectory.
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         k = 5
-        df1, df2, _ = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-        ]
-        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2])
+        r = 50
+        expl_vars = ["x1", "x2"]
+        datasets = [[{"database": df, "db_type": "csv"}] for df in _simulate_survival_data(20261005)]
+        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2, 3], expl_vars=expl_vars)
 
         for node_idx, agg1 in enumerate(per_node_agg1):
             values = [float(v) for v in agg1]
@@ -569,20 +630,38 @@ class TestDefaultGuardsPrivacyProperty:
             non_zero = [v for v in values if v > 1e-9]
             assert non_zero, f"node {node_idx}: all agg1 are zero"
             assert min(non_zero) >= k - 1e-9, f"node {node_idx}: min non-zero agg1 {min(non_zero)} < k={k}"
+            # Floor: every released value is >= R, except values held at the
+            # always-released first grid point.
+            for i, v in enumerate(values):
+                if v > 1e-9:
+                    assert v >= r - 1e-9 or abs(v - values[0]) <= 1e-9, (
+                        f"node {node_idx}: agg1 {v} at {i} is below the floor R={r} "
+                        f"and is not the held first grid point"
+                    )
 
     def test_coefficients_within_loose_bound(self, monkeypatch):
-        """With default guards, coefficients stay within 0.1 of lifelines."""
+        """With default guards, coefficients stay within 0.1 of lifelines.
+
+        The scenario uses 150-row nodes — exactly the standard level's
+        admission bound (max(10 x k=5, 3 x R=50) = 150 rows), so this is
+        the smallest node size the default guards admit. There the default
+        floor R=50 holds only the tail of each node's risk-set
+        trajectory, so the guards approximate the fit. Smaller nodes are
+        refused by the admission bound (TestAdmissionBound below).
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        df1, df2, _ = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-        ]
-        result = _run_central(datasets, [1, 2])
-        ref = _lifelines_reference(pd.concat([df1, df2]), EXPL_VARS)
+        datasets = _simulate_survival_data(20261005, n_rows=150)
+        result = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        assert result["converged"] is True
+        assert result["privacy_guards"]["active"] is True
+        ref = _lifelines_reference(pd.concat(datasets), ["x1", "x2"])
         model = pd.DataFrame(result["model"]).T
-        for var in EXPL_VARS:
+        for var in ["x1", "x2"]:
             assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
                 f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
             )
@@ -794,7 +873,13 @@ class TestAffineTransform:
         return beta
 
     def test_standardised_equals_unstandardised(self, guards_off):
-        """central's standardised fit equals a centre-0/scale-1 fit to 1e-10."""
+        """central's standardised fit equals a centre-0/scale-1 fit to 1e-6.
+
+        The affine invariance holds up to the wire precision: the two runs
+        quantise differently scaled aggregates (float32 precision, always
+        on), so their fits differ by the wire quantisation noise (measured
+        1.1e-7 on this data).
+        """
         df1, df2, _ = _load_datasets()
         datasets = [
             [{"database": df1, "db_type": "csv"}],
@@ -810,7 +895,7 @@ class TestAffineTransform:
         model = pd.DataFrame(standardised["model"]).T
         for i, var in enumerate(EXPL_VARS):
             np.testing.assert_allclose(
-                model.loc[var, "Coef"], unstandardised_beta[i], atol=1e-10, err_msg=f"back-transform mismatch {var}"
+                model.loc[var, "Coef"], unstandardised_beta[i], atol=1e-6, err_msg=f"back-transform mismatch {var}"
             )
 
     @pytest.mark.parametrize("transform", ["scale_1e4", "offset_1e4"])
@@ -889,7 +974,13 @@ class TestOptimiser:
     """The central optimiser: log-likelihood, LR test and step-halving."""
 
     def test_log_likelihood_matches_direct_breslow(self, guards_off):
-        """The reported log-likelihood equals a direct Breslow fit (guards off)."""
+        """The reported log-likelihood equals a direct Breslow fit to 1e-5.
+
+        The reported log-likelihood is computed from the wire-quantised
+        aggregates (float32 precision, always on) while the direct fit uses
+        full precision; the difference is the wire quantisation noise
+        (measured 3.3e-7 on this data, bounded by events x 5e-7).
+        """
         df1, df2, _ = _load_datasets()
         result = _run_central(
             [
@@ -903,7 +994,7 @@ class TestOptimiser:
         beta = model["Coef"].to_numpy(dtype=float)
         direct = _breslow_log_likelihood(pd.concat([df1, df2]), EXPL_VARS, beta)
         assert (
-            abs(result["log_likelihood"] - direct) <= 1e-9
+            abs(result["log_likelihood"] - direct) <= 1e-5
         ), f"log-likelihood mismatch: reported={result['log_likelihood']}, direct={direct}"
 
     def test_likelihood_ratio_fields_consistent(self, guards_off):
@@ -1008,7 +1099,13 @@ class TestSurvivalCurves:
         assert all(b >= a - 1e-12 for a, b in zip(values, values[1:]))
 
     def test_baseline_hazard_matches_direct_breslow(self, guards_off):
-        """H0 equals a direct Breslow computation at the same centre (guards off)."""
+        """H0 equals a direct Breslow computation at the same centre, to 1e-6.
+
+        H0 is accumulated from the wire-quantised risk-set sums (float32
+        precision, always on) while the direct computation uses full
+        precision; the difference is the wire quantisation noise (measured
+        3.0e-8 on this data).
+        """
         from importlib import import_module
 
         coxph_logic = import_module("v6-cox-ph.coxph_logic")
@@ -1062,7 +1159,7 @@ class TestSurvivalCurves:
 
         reported = result["baseline_cumulative_hazard"]
         for t in reported:
-            assert abs(reported[t] - direct[t]) <= 1e-9, f"H0 mismatch at t={t}"
+            assert abs(reported[t] - direct[t]) <= 1e-6, f"H0 mismatch at t={t}"
 
     def test_covariate_profiles(self, guards_off):
         """Each profile's curve is S0(t) ** exp(beta . (x - centre)/scale)."""
@@ -1113,21 +1210,22 @@ class TestSurvivalCurves:
             )
 
     def test_curve_steps_respect_k(self, monkeypatch):
-        """With default guards every curve time is backed by risk sets >= k."""
+        """With default guards every curve time is backed by risk sets >= k.
+
+        The scenario uses 200-row nodes, admitted under the standard
+        level's admission bound (150 rows).
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         k = 5
-        df1, df2, _ = _load_datasets()
-        datasets = [
-            [{"database": df1, "db_type": "csv"}],
-            [{"database": df2, "db_type": "csv"}],
-        ]
-        result = _run_central(datasets, [1, 2])
+        expl_vars = ["x1", "x2"]
+        datasets = [[{"database": df, "db_type": "csv"}] for df in _simulate_survival_data(20261005)]
+        result = _run_central(datasets, [1, 2, 3], expl_vars=expl_vars)
         assert result["converged"] is True
 
         # At beta = 0 the per-node agg1 equals the node's risk-set size; the
         # guards guarantee every non-zero value is >= k.
-        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2])
+        per_node_agg1 = _per_node_agg1_at_beta_zero(datasets, [1, 2, 3], expl_vars=expl_vars)
         grid = sorted(
             (float(t) for t in result["baseline_cumulative_hazard"]),
         )
@@ -1139,29 +1237,101 @@ class TestSurvivalCurves:
                         f"(time {grid[i] if i < len(grid) else '?'})"
                     )
 
+    def test_curve_time_keys_coarsened(self, monkeypatch, guards_off):
+        """COXPH_CURVE_TIME_SIG_FIGS coarsens the reported curve time keys.
+
+        An empty value reports the exact event times; 2 significant figures
+        merge nearby times into one key, and a merged key carries the value
+        at the largest original time.
+        """
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "")
+        exact = _run_central(datasets, [1, 2])
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "2")
+        coarse = _run_central(datasets, [1, 2])
+
+        assert exact["curve_time_sig_figs"] is None
+        assert coarse["curve_time_sig_figs"] == 2
+
+        # Expected coarsening of the exact run: ascending times, so the
+        # later (larger) time overwrites the earlier one on a key collision.
+        key_to_time = {}
+        for t in sorted(exact["baseline_cumulative_hazard"], key=float):
+            key = str(float(coxph_logic.round_sig(float(t), 2)))
+            key_to_time[key] = t
+        expected = {key: exact["baseline_cumulative_hazard"][t] for key, t in key_to_time.items()}
+        assert coarse["baseline_cumulative_hazard"] == expected
+        # Merging actually happened on this data (2 figures on 1-decimal times)
+        assert len(expected) < len(exact["baseline_cumulative_hazard"])
+        # The survival curves share the coarsened keys and values
+        for profile, curve in coarse["survival_curves"].items():
+            expected_curve = {key: exact["survival_curves"][profile][t] for key, t in key_to_time.items()}
+            assert curve == expected_curve
+
+    def test_curve_time_sig_figs_default_is_six(self, monkeypatch, guards_off):
+        """The curve time keys are coarsened to 6 significant figures by default.
+
+        The test data's event times carry one decimal, so 6 significant
+        figures leave the keys exact; an empty value reports them exactly
+        too, and the two runs agree.
+        """
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        monkeypatch.delenv("COXPH_CURVE_TIME_SIG_FIGS", raising=False)
+        result = _run_central(datasets, [1, 2])
+        assert result["curve_time_sig_figs"] == 6
+
+        monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "")
+        exact = _run_central(datasets, [1, 2])
+        assert exact["curve_time_sig_figs"] is None
+        assert result["baseline_cumulative_hazard"] == exact["baseline_cumulative_hazard"]
+        assert result["survival_curves"] == exact["survival_curves"]
+
 
 @pytest.mark.unit
 class TestPrivacyGuardsSummary:
     """The result carries an aggregate summary of the active guards."""
 
     def test_default_guards_summary(self, monkeypatch):
-        """Default guards: active, k=5, no binning, warning appended."""
+        """Default guards: active, k=5, no binning, warning appended.
+
+        The scenario uses 200-row nodes, admitted under the standard
+        level's admission bound (150 rows).
+        """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        df1, df2, _ = _load_datasets()
+        datasets = _simulate_survival_data(20261005)
         result = _run_central(
-            [
-                [{"database": df1, "db_type": "csv"}],
-                [{"database": df2, "db_type": "csv"}],
-            ],
-            [1, 2],
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
         )
         summary = result["privacy_guards"]
-        assert set(summary.keys()) == {"active", "max_min_risk_set_change", "time_binning"}
+        assert set(summary.keys()) == {
+            "active",
+            "max_min_risk_set_change",
+            "time_binning",
+            "max_min_time_event_count",
+            "max_min_risk_set_size",
+            "max_held_event_fraction",
+        }
         assert summary["active"] is True
         assert summary["max_min_risk_set_change"] == 5
         assert summary["time_binning"] is False
+        assert summary["max_min_time_event_count"] == 2
+        assert summary["max_min_risk_set_size"] == 50
+        held = summary["max_held_event_fraction"]
+        assert 0.0 <= held <= 1.0
         assert any("guards were active" in w for w in result["warnings"])
+        assert any("minimum risk-set size R=50" in w for w in result["warnings"])
 
     def test_guards_off_summary(self, guards_off):
         """Guards disabled: inactive, no warning."""
@@ -1174,9 +1344,21 @@ class TestPrivacyGuardsSummary:
             [1, 2],
         )
         summary = result["privacy_guards"]
+        assert set(summary.keys()) == {
+            "active",
+            "max_min_risk_set_change",
+            "time_binning",
+            "max_min_time_event_count",
+            "max_min_risk_set_size",
+            "max_held_event_fraction",
+        }
         assert summary["active"] is False
         assert summary["max_min_risk_set_change"] == 1
         assert summary["time_binning"] is False
+        assert summary["max_min_time_event_count"] == 1
+        assert summary["max_min_risk_set_size"] is None
+        # Guards off (k=1): nothing can be held, so the fraction is 0.
+        assert summary["max_held_event_fraction"] == 0.0
         assert not any("guards were active" in w for w in result["warnings"])
 
     def test_binning_summary(self, monkeypatch):
@@ -1192,9 +1374,24 @@ class TestPrivacyGuardsSummary:
             [1, 2],
         )
         summary = result["privacy_guards"]
+        assert set(summary.keys()) == {
+            "active",
+            "max_min_risk_set_change",
+            "time_binning",
+            "max_min_time_event_count",
+            "max_min_risk_set_size",
+            "max_held_event_fraction",
+        }
         assert summary["active"] is True
         assert summary["time_binning"] is True
         assert summary["max_min_risk_set_change"] == 1
+        assert summary["max_min_time_event_count"] == 2
+        # The floor is configured (standard level) but k=1 disables it; the
+        # summary reports the configuration, the warning does not name it.
+        assert summary["max_min_risk_set_size"] == 50
+        # k=1 disables the risk-set guards: nothing can be held.
+        assert summary["max_held_event_fraction"] == 0.0
+        assert not any("minimum risk-set size" in w for w in result["warnings"])
 
 
 @pytest.mark.unit
@@ -1208,29 +1405,10 @@ class TestGuardBiasRegression:
     study to re-derive it (do not loosen it without re-running the study).
     """
 
-    BETA_TRUE = np.array([0.5, -0.3])
     BOUND = 0.05
 
     def _simulate(self, seed: int, n_rows: int = 200) -> list:
-        rng = np.random.default_rng(seed)
-        datasets = []
-        for _ in range(3):
-            X = rng.normal(size=(n_rows, 2))
-            eta = X @ self.BETA_TRUE
-            hazard = 0.02 * np.exp(eta)
-            event_time = rng.exponential(1.0 / hazard)
-            censor_time = rng.uniform(0.0, 60.0)
-            datasets.append(
-                pd.DataFrame(
-                    {
-                        "time": np.minimum(event_time, censor_time),
-                        "event": (event_time <= censor_time).astype(int),
-                        "x1": X[:, 0],
-                        "x2": X[:, 1],
-                    }
-                )
-            )
-        return datasets
+        return _simulate_survival_data(seed, n_rows=n_rows)
 
     def _run(self, datasets):
         client = MockAlgorithmClient(
@@ -1257,6 +1435,7 @@ class TestGuardBiasRegression:
         datasets = self._simulate(20261005)
         covs = ["x1", "x2"]
 
+        # The bound covers the jump guard's bias (the study varied k only).
         monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
         unguarded = self._run(datasets)
@@ -1274,3 +1453,484 @@ class TestGuardBiasRegression:
             assert (
                 deviation <= self.BOUND
             ), f"Guard bias for {var} is {deviation:.4f}, above the regression bound {self.BOUND}"
+
+    def test_standard_bundle_converges(self, monkeypatch):
+        """The full standard bundle converges end-to-end on the study dataset."""
+        monkeypatch.delenv("COXPH_PRIVACY_LEVEL", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        monkeypatch.delenv("COXPH_AGGREGATE_SIG_FIGS", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+        datasets = self._simulate(20261005)
+        result = self._run(datasets)
+        assert result["converged"] is True
+
+
+def _run_central_with_kwargs(datasets, client_org_ids, **kwargs):
+    """Run ``central`` through the mock client with overridden input kwargs.
+
+    ``client_org_ids`` are the organisations the mock collaboration holds
+    data for; ``organization_ids`` in ``kwargs`` is what the task requests.
+    """
+    client = MockAlgorithmClient(
+        datasets=datasets,
+        module="v6-cox-ph",
+        organization_ids=client_org_ids,
+    )
+    input_kwargs = {
+        "time_col": "time",
+        "outcome_col": "event",
+        "expl_vars": EXPL_VARS,
+    }
+    input_kwargs.update(kwargs)
+    if "organization_ids" not in input_kwargs:
+        input_kwargs["organization_ids"] = client_org_ids
+    task = client.task.create(
+        input_={"method": "central", "kwargs": input_kwargs},
+        organizations=[client_org_ids[0]],
+    )
+    results = client.wait_for_results(task_id=task["id"])
+    return results[0]
+
+
+@pytest.mark.unit
+class TestCentralInputValidation:
+    """central rejects semantically invalid input and oversized requests."""
+
+    def _datasets(self):
+        df1, df2, _ = _load_datasets()
+        return [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+
+    def test_duplicate_expl_vars_rejected(self):
+        """Duplicate explanatory variables are rejected end-to-end."""
+        with pytest.raises(UserInputError, match="duplicate variables"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=["age", "treatment", "age"])
+
+    def test_time_col_equal_outcome_col_rejected(self):
+        """time_col == outcome_col is rejected end-to-end."""
+        with pytest.raises(UserInputError, match="different columns"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], outcome_col="time")
+
+    def test_expl_var_naming_time_col_rejected(self):
+        """An explanatory variable naming the time column is rejected."""
+        with pytest.raises(UserInputError, match="time or outcome column"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=["time", "age"])
+
+    def test_expl_var_naming_outcome_col_rejected(self):
+        """An explanatory variable naming the outcome column is rejected."""
+        with pytest.raises(UserInputError, match="time or outcome column"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=["age", "event"])
+
+    def test_unknown_organization_id_rejected(self):
+        """Organisation IDs absent from the collaboration are rejected."""
+        with pytest.raises(UserInputError, match="Unknown organisation IDs"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], organization_ids=[1, 999])
+
+    def test_too_many_expl_vars_rejected(self):
+        """More explanatory variables than COXPH_MAX_COVARIATES is rejected."""
+        expl_vars = ["age", "treatment"] + [f"extra_{i}" for i in range(19)]
+        assert len(expl_vars) == 21
+        with pytest.raises(UserInputError, match="Too many explanatory variables"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=expl_vars)
+
+    def test_event_time_grid_cap_rejected(self, monkeypatch, guards_off):
+        """A pooled event-time grid beyond COXPH_MAX_GRID_POINTS is rejected.
+
+        The error message names the configured cap and the remedies, never
+        the actual grid size (that is data).
+        """
+        monkeypatch.setenv("COXPH_MAX_GRID_POINTS", "5")
+        datasets = self._datasets()
+
+        # The pooled grid central would build, for the message assertion.
+        client = MockAlgorithmClient(
+            datasets=datasets,
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        grid = set()
+        for r in client.wait_for_results(task_id=task["id"]):
+            grid.update(pd.DataFrame.from_dict(r["times"])["time"].tolist())
+        assert len(grid) > 5
+
+        with pytest.raises(UserInputError, match="COXPH_MAX_GRID_POINTS") as excinfo:
+            _run_central_with_kwargs(datasets, [1, 2])
+        assert str(len(grid)) not in str(excinfo.value)
+
+
+@pytest.mark.unit
+class TestReleasedAggregatePrecision:
+    """The partials apply the configured precision to what they release."""
+
+    def _client_and_grid(self):
+        df1, df2, _ = _load_datasets()
+        client = MockAlgorithmClient(
+            datasets=[
+                [{"database": df1, "db_type": "csv"}],
+                [{"database": df2, "db_type": "csv"}],
+            ],
+            module="v6-cox-ph",
+            organization_ids=[1, 2],
+        )
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": EXPL_VARS},
+            },
+            organizations=[1, 2],
+        )
+        grid = sorted(
+            {
+                t
+                for r in client.wait_for_results(task_id=task["id"])
+                for t in pd.DataFrame.from_dict(r["times"])["time"].tolist()
+            }
+        )
+        return client, grid
+
+    def test_perform_iteration_rounds_released_aggregates(self, monkeypatch, guards_off):
+        """COXPH_AGGREGATE_SIG_FIGS rounds agg1/agg2/agg3 to that many figures."""
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+        client, grid = self._client_and_grid()
+        iter_kwargs = {
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": EXPL_VARS,
+            "beta": [0.3, -0.2],
+            "centre": [0.1, -0.1],
+            "scale": [1.0, 2.0],
+            "unique_time_events": grid,
+        }
+
+        def dispatch():
+            task = client.task.create(
+                input_={"method": "perform_iteration", "kwargs": iter_kwargs},
+                organizations=[1, 2],
+            )
+            results = client.wait_for_results(task_id=task["id"])
+            return {r["organization_id"]: r for r in results}
+
+        # An empty COXPH_AGGREGATE_SIG_FIGS disables the privacy rounding,
+        # but the wire quantisation (float32 precision, always on) still
+        # applies: every released value is a 7-significant-figure number.
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
+        raw = dispatch()
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "3")
+        rounded = dispatch()
+
+        assert set(raw) == set(rounded) == {1, 2}
+        for org_id in raw:
+            for agg in ("agg1", "agg2", "agg3"):
+                raw_arr = np.asarray(raw[org_id][agg], dtype=float)
+                rounded_arr = np.asarray(rounded[org_id][agg], dtype=float)
+                # The wire quantisation: released values are fixed points of
+                # rounding to 7 significant figures.
+                np.testing.assert_array_equal(raw_arr, coxph_logic.round_sig(raw_arr, 7))
+                # The privacy rounding: released values equal their own
+                # 3-significant-figure rounding, up to the 1-ulp wobble of
+                # the multiply-round-divide round_sig — the wire quantisation
+                # to 7 figures applied on top reaches the value through a
+                # different division and can shift it by one ulp.
+                np.testing.assert_allclose(rounded_arr, coxph_logic.round_sig(rounded_arr, 3), rtol=1e-15, atol=0.0)
+                np.testing.assert_array_equal(rounded_arr, coxph_logic.round_sig(rounded_arr, 7))
+
+    def test_released_aggregates_carry_wire_precision_in_minimal(self, monkeypatch):
+        """The wire quantisation applies even when the privacy rounding is off.
+
+        Under the minimal level (aggregate rounding off) the released
+        aggregates are still quantised to float32 precision: every value
+        equals its own 7-significant-figure rounding.
+        """
+        coxph_logic = import_module("v6-cox-ph.coxph_logic")
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        monkeypatch.setenv("COXPH_AGGREGATE_SIG_FIGS", "")
+        client, grid = self._client_and_grid()
+        task = client.task.create(
+            input_={
+                "method": "perform_iteration",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": EXPL_VARS,
+                    "beta": [0.3, -0.2],
+                    "centre": [0.1, -0.1],
+                    "scale": [1.0, 2.0],
+                    "unique_time_events": grid,
+                },
+            },
+            organizations=[1, 2],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert results, "perform_iteration returned no results"
+        for r in results:
+            for agg in ("agg1", "agg2", "agg3"):
+                arr = np.asarray(r[agg], dtype=float)
+                np.testing.assert_array_equal(arr, coxph_logic.round_sig(arr, 7))
+
+    def test_small_time_counts_suppressed(self, monkeypatch):
+        """compute_summed_z merges per-time event counts below the minimum."""
+        monkeypatch.delenv("COXPH_PRIVACY_LEVEL", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        # The risk-set floor is switched off: this test isolates the
+        # small-count suppression, so the 60-row node only has to meet the
+        # reconstruction bound (10 x k=5 = 50 rows).
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_SIZE", "")
+        # 60 rows: an event at each of the 54 smallest distinct times (every
+        # per-time count is 1, below the standard-level minimum of 2) and a
+        # censored row at each of the 6 largest times, so the tail censoring
+        # of the shared preparation leaves the event rows untouched.
+        n_rows = 60
+        n_events = 54
+        df = pd.DataFrame(
+            {
+                "time": [float(t) for t in range(1, n_rows + 1)],
+                "event": [1] * n_events + [0] * (n_rows - n_events),
+                "x1": np.linspace(-1.0, 1.0, n_rows),
+            }
+        )
+        client = MockAlgorithmClient(
+            datasets=[[{"database": df, "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+        task = client.task.create(
+            input_={
+                "method": "compute_summed_z",
+                "kwargs": {"time_col": "time", "outcome_col": "event", "expl_vars": ["x1"]},
+            },
+            organizations=[1],
+        )
+        results = client.wait_for_results(task_id=task["id"])
+        assert len(results) == 1
+        times = pd.DataFrame.from_dict(results[0]["times"])
+
+        # No released per-time count is below the minimum, the event total is
+        # preserved, and every merged time is one of the original times.
+        assert (times["freq"] >= 2).all()
+        assert int(times["freq"].sum()) == int(df["event"].sum())
+        assert set(times["time"].tolist()) <= set(df["time"].tolist())
+        assert len(times) < n_events
+
+
+@pytest.mark.unit
+class TestAdmissionBound:
+    """Nodes below the admission bound are refused (fail closed).
+
+    The standard level admits a node only above max(factor * k, 3 x R) =
+    max(10 x 5, 3 x 50) = 150 rows: a smaller node would have (nearly)
+    its whole content inside the smallest released risk set, which the
+    floor alone cannot hide.
+    """
+
+    def test_small_nodes_refused(self, monkeypatch):
+        """50- and 100-row nodes under the default guards fail closed."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        for n_rows in (50, 100):
+            datasets = _simulate_survival_data(20261005, n_rows=n_rows)
+            with pytest.raises(PrivacyThresholdViolation):
+                _run_central(
+                    [[{"database": df, "db_type": "csv"}] for df in datasets],
+                    [1, 2, 3],
+                    expl_vars=["x1", "x2"],
+                )
+
+    def test_admitted_nodes_held_fraction_below_warn_threshold(self, monkeypatch):
+        """200-row nodes: the held-event fraction stays below the warn threshold."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        datasets = _simulate_survival_data(20261005)
+        result = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        held = result["privacy_guards"]["max_held_event_fraction"]
+        assert held == pytest.approx(0.05825242718446602)
+        assert held < 0.25
+        assert not any("held" in w.lower() for w in result["warnings"])
+
+
+@pytest.mark.unit
+class TestHeldEventFractionAbort:
+    """Central aborts when the held-event fraction exceeds the configured cap.
+
+    The construction: 185 rows censored at time 1 and 15 events at times
+    2..16 on a single 200-row node (above the admission bound). The tail
+    censoring (k=5) removes the four latest events, the small-count
+    suppression merges the remaining singletons into five grid points,
+    and every risk set is below the floor R=50, so the floor holds the
+    whole trajectory at the first release: 9 of the 11 remaining events
+    are scored against the held (unchanged) risk set.
+    """
+
+    @staticmethod
+    def _node():
+        return pd.DataFrame(
+            {
+                "time": [1.0] * 185 + [float(t) for t in range(2, 17)],
+                "event": [0] * 185 + [1] * 15,
+                "x1": np.linspace(-1.0, 1.0, 200),
+            }
+        )
+
+    def test_aborts_at_default_cap(self, monkeypatch):
+        """A held-event fraction above the cap raises UserInputError."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MAX_HELD_EVENT_FRACTION", raising=False)
+        with pytest.raises(UserInputError, match=r"exceeds the configured cap 0\.5 \(COXPH_MAX_HELD_EVENT_FRACTION\)"):
+            _run_central([[{"database": self._node(), "db_type": "csv"}]], [1], expl_vars=["x1"])
+
+    def test_cap_disabled_completes_and_reports(self, monkeypatch):
+        """With the abort disabled the run completes and reports the fraction."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.setenv("COXPH_MAX_HELD_EVENT_FRACTION", "")
+        result = _run_central([[{"database": self._node(), "db_type": "csv"}]], [1], expl_vars=["x1"])
+        assert result["privacy_guards"]["max_held_event_fraction"] == pytest.approx(9 / 11)
+        assert any("held" in w.lower() and "0.818" in w for w in result["warnings"])
+
+    def test_below_cap_reports_diagnostic(self, monkeypatch):
+        """A held fraction in (0.25, 0.5) warns but does not abort.
+
+        185 rows censored at time 1, 12 events at time 2 and one event at
+        each of times 3..12: the tail censoring keeps 18 events, the
+        suppression releases them at time 2 (12 events) and at times 4, 6
+        and 8 (2 each), and every risk set is below the floor, so the
+        release stays at the first grid point: 6 of the 18 events are
+        scored against the held risk set.
+        """
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MAX_HELD_EVENT_FRACTION", raising=False)
+        df = pd.DataFrame(
+            {
+                "time": [1.0] * 185 + [2.0] * 12 + [float(t) for t in range(3, 13)],
+                "event": [0] * 185 + [1] * 22,
+                "x1": np.linspace(-1.0, 1.0, 207),
+            }
+        )
+        result = _run_central([[{"database": df, "db_type": "csv"}]], [1], expl_vars=["x1"])
+        assert result["privacy_guards"]["max_held_event_fraction"] == pytest.approx(6 / 18)
+        assert any("held" in w.lower() and "0.333" in w for w in result["warnings"])
+
+
+@pytest.mark.unit
+class TestStrictPrivacyLevel:
+    """The strict bundle converges on 400-row nodes (the scaled tolerance)."""
+
+    def test_strict_converges_within_budget(self, monkeypatch):
+        """strict on 400-row nodes: converged within 20 iterations, coefficients within 0.1."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "strict")
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        monkeypatch.delenv("COXPH_AGGREGATE_SIG_FIGS", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+        monkeypatch.delenv("COXPH_RECONSTRUCTION_ROW_FACTOR", raising=False)
+        datasets = _simulate_survival_data(20261005, n_rows=400)
+        result = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        assert result["converged"] is True
+        assert result["n_iterations"] <= 20
+        # The strict bundle's 4-significant-figure aggregates cannot support
+        # the primary step tolerance: convergence comes from the secondary
+        # (stability) tolerance.
+        assert result["convergence_tolerance"] == pytest.approx(central_module.STABLE_STEP_TOLERANCE)
+        ref = _lifelines_reference(pd.concat(datasets), ["x1", "x2"])
+        model = pd.DataFrame(result["model"]).T
+        for var in ["x1", "x2"]:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
+                f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
+            )
+
+
+def _move_event_times_up(df, time_col, outcome_col, min_count):
+    """Move event rows' times up to their merged time (test-side reference).
+
+    An independent reimplementation of the suppression merge: per-time
+    event counts accumulate until they reach ``min_count``; the group is
+    emitted at its largest time and its event rows move there. A trailing
+    group below the minimum merges backward into the previous emitted
+    group; when nothing was emitted the whole grid is one group at the
+    last time. Censored rows keep their time.
+    """
+    counts = df[df[outcome_col] == 1][time_col].value_counts().sort_index()
+    times = counts.index.tolist()
+    move_to = {}
+    group_count = 0
+    group = []
+    emitted = None
+    for t, f in zip(times, counts.to_numpy().tolist()):
+        group.append(t)
+        group_count += int(f)
+        if group_count >= min_count:
+            for gt in group:
+                move_to[gt] = t
+            emitted = t
+            group = []
+            group_count = 0
+    for gt in group:
+        move_to[gt] = emitted if emitted is not None else times[-1]
+    moved = df.copy()
+    event_mask = moved[outcome_col] == 1
+    moved.loc[event_mask, time_col] = moved.loc[event_mask, time_col].map(move_to)
+    return moved
+
+
+@pytest.mark.unit
+class TestSuppressionConsistency:
+    """The suppression move equals a run on explicitly right-moved data.
+
+    Run A analyses the original data with the small-count suppression on
+    (standard level, k=1 so no risk-set guard interferes): perform_iteration
+    moves the event rows' times up to their merged time. Run B analyses
+    data the test moved explicitly the same way, with the suppression off
+    (COXPH_MIN_TIME_EVENT_COUNT=1). Both runs must agree on every result
+    field except the guards summary and the warnings, which describe the
+    active guards rather than the fit.
+    """
+
+    def test_move_matches_explicitly_moved_data(self, monkeypatch):
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_PRIVACY_LEVEL", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        datasets = _simulate_survival_data(20261005)
+        moved = [_move_event_times_up(df, "time", "event", 2) for df in datasets]
+
+        suppressed = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        monkeypatch.setenv("COXPH_MIN_TIME_EVENT_COUNT", "1")
+        explicit = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in moved],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+
+        assert set(suppressed) == set(explicit)
+        for key in suppressed:
+            if key in ("warnings", "privacy_guards"):
+                continue
+            assert suppressed[key] == explicit[key], f"result key {key!r} differs"

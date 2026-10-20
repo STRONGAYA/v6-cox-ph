@@ -13,12 +13,18 @@ asserts the covariance matrix, standard errors, Z-values (``Z = beta / SE``),
 p-values (``2 * Phi(-|Z|)``), confidence intervals, the overall Wald
 statistic and the AIC against hand-computed values. A regression test
 verifies ``Z == Coef / SE`` to catch the previous ``(exp(beta) - 1) / SE`` bug.
+``held_event_fraction`` asserts the held-risk-set diagnostic (guards off,
+the first grid point never held, released sets not held, empty cases).
 
 ``tests/unit/test_privacy_guards.py`` covers settings parsing, the
-sample-size threshold (rows and events, strict inequality), the parent-task
-guard (parent absent / present / lookup failure / bad token / mock client),
-iteration-input validation, time binning, tail censoring and the risk-set
-jump guard.
+sample-size threshold (rows and events, strict inequality), the admission
+bound (the reconstruction row bound and, while the floor is in effect, the
+``3 x R`` term), the parent-task guard (parent absent / present / lookup
+failure / bad token / mock client), iteration-input validation, time
+binning, tail censoring, the risk-set jump guard and size floor, the
+small-count suppression merge (``merged_time_map`` and
+``event_time_counts``), the event-time move in ``prepare_time_column``,
+and the held-fraction cap loader (``load_max_held_event_fraction``).
 
 Docker-free federated pipeline test
 ------------------------------------
@@ -42,8 +48,20 @@ organisations. With the risk-set guards disabled
 
 With default guards (``k = 5``) it asserts the privacy property on per-node
 ``agg1`` at ``beta = 0``: the values are non-increasing, every positive
-decrease is ``>= 5`` and the smallest non-zero value is ``>= 5``, while the
-coefficients stay within ``0.1`` of lifelines. A binning test
+decrease is ``>= 5``, the smallest non-zero value is ``>= 5`` and every
+released value is at least the floor ``R = 50`` except a release held at
+the always-released first grid point; the coefficients stay within ``0.1``
+of lifelines on 150-row nodes — exactly the standard level's admission
+bound (``max(10 x 5, 3 x 50) = 150`` rows). The same class refuses 50-
+and 100-row nodes with ``PrivacyThresholdViolation`` and pins the
+held-event fraction of 200-row nodes below the warn threshold. A
+heavy-early-censoring construction aborts at the default cap with the
+configured-cap message (and completes with the cap disabled, reporting
+9/11), a below-cap construction reports 6/18 with the warning, and the
+``strict`` bundle on 400-row nodes converges within the 20-round-trip
+budget via the secondary tolerance. The suppression move is exact: the
+pipeline result equals a run on explicitly right-moved data on every
+result field except the guards summary and the warnings. A binning test
 (``COXPH_TIME_BIN_WIDTH=10``) checks that all shared event times are
 multiples of 10 and the pipeline converges.
 
@@ -76,28 +94,49 @@ Guard bias study
 privacy guards perturb the coefficients: simulated Cox data (known true
 coefficients, three nodes), sizes {200, 1k, 10k} per node, k in {1, 5, 10},
 time binning off/on, 50 repetitions per configuration, parallelised per
-configuration. It reports the mean absolute deviation from the k = 1 fit on
-the same data, the deviation from the true coefficients and the 95 %
-confidence-interval coverage.
+configuration. It reports the mean and maximum absolute deviation from the
+k = 1 fit on the same data, the deviation from the true coefficients and
+the 95 % confidence-interval coverage. The study runs under the default
+(``standard``) preset, so the admission bound applies: nodes below
+``max(10 x k, 3 x 50) = 150`` rows are refused and fail the run — the
+study's sizes are all above the bound (``strict`` would require 300).
 
-Smoke-run results (2 repetitions, sizes 200 and 1000; the table below is
-provisional until the full 50-repetition run is executed with
-``python scripts/bias_study.py --reps 50``)::
+Smoke-run results (2 repetitions, sizes 200 and 1000, measured after the
+floor calibration; the table is provisional until the full 50-repetition
+run is executed with ``python scripts/bias_study.py --reps 50``)::
 
-    size   k  binning  mean|d vs k=1|  mean|d vs true|  95% CI coverage
-     200   1  off/on            0.000            ~0.07              1.00
-     200   5      off            0.011            0.07              1.00
-     200  10      off            0.025            0.07              1.00
-     200 5/10     on            ~0.04            0.06              1.00
-    1000   5      off            0.002           0.033              ~0.5*
-    1000  10      off            0.005           0.032              ~0.5*
-    1000 5/10     on             0.04           0.027              1.00
+    size   k  binning  mean|d vs k=1|  max|d vs k=1|  mean|d vs true|  95% CI coverage
+     200   1      off            0.000           0.000            0.071              1.00
+     200   1       on            0.000           0.000            0.061              1.00
+     200   5      off            0.108           0.194            0.091              0.50*
+     200   5       on            0.118           0.200            0.101              0.50*
+     200  10      off            0.118           0.196            0.099              0.50*
+     200  10       on            0.120           0.201            0.101              0.50*
+    1000   1      off            0.000           0.000            0.033              0.50*
+    1000   1       on            0.000           0.000            0.027              1.00
+    1000   5      off            0.005           0.009            0.029              0.50*
+    1000   5       on            0.039           0.046            0.024              1.00
+    1000  10      off            0.008           0.013            0.027              1.00
+    1000  10       on            0.039           0.046            0.024              1.00
 
   * coverage at 2 repetitions is noise; the full run gives the real rate.
 
+The bias grows with the share of the event timeline the guards hold: at
+200-row nodes the risk-set size floor (``R = 50``) holds the tail of the
+smaller nodes' trajectories, and on datasets where that share is large —
+the result's ``max_held_event_fraction`` reports it; a warning fires above
+0.25 and the run aborts above 0.5 — the coefficients attenuate by up to
+~0.2. At 1000-row nodes the floor holds only the extreme tail and the bias
+stays below ~0.3 SE. This is the trade-off the admission bound manages:
+nodes too small for the floor to leave the fit alone are refused (150 rows
+at ``standard``, 300 at ``strict``) instead of silently flattened.
+
 The fixed-seed unit regression ``TestGuardBiasRegression`` bounds the
-default-guards coefficient deviation at 0.05, derived from this study with
-headroom; re-derive the bound after the full run rather than loosening it.
+default-guards coefficient deviation at 0.05 on its fixed dataset, derived
+from this study with headroom; re-derive the bound after the full run
+rather than loosening it. The loose-bound pipeline test asserts
+coefficients within 0.1 of lifelines at the admission boundary (150-row
+nodes).
 
 Run the unit suite without Docker::
 

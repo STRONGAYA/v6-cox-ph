@@ -20,6 +20,8 @@ from coxph_logic import (  # noqa: E402
     compute_derivatives,
     compute_model_results,
     format_results_dataframe,
+    held_event_fraction,
+    survival_curves,
 )
 
 
@@ -250,6 +252,78 @@ class TestComputeModelResults:
 
 
 @pytest.mark.unit
+class TestSurvivalCurveTimeKeys:
+    """The curve time keys can be coarsened to significant figures."""
+
+    @pytest.fixture
+    def curve_inputs(self):
+        # 4 grid times; S0 = 10 throughout so H0 steps are d_j / 10.
+        freqs = np.array([1.0, 2.0, 3.0, 4.0])
+        s0 = np.array([10.0, 10.0, 10.0, 10.0])
+        grid = np.array([1.0, 2.0, 3.0, 4.0])
+        beta = np.zeros(2)
+        centre = np.zeros(2)
+        scale = np.ones(2)
+        return freqs, s0, grid, beta, centre, scale
+
+    def test_none_reports_exact_times(self, curve_inputs):
+        """curve_time_sig_figs=None (the default) reports exact grid times."""
+        freqs, s0, grid, beta, centre, scale = curve_inputs
+        h0, curves = survival_curves(freqs, s0, grid, beta, centre, scale, ["age", "treatment"], None)
+        assert list(h0.keys()) == ["1.0", "2.0", "3.0", "4.0"]
+        assert list(curves["0"].keys()) == ["1.0", "2.0", "3.0", "4.0"]
+
+    def test_sig_figs_round_the_keys(self, curve_inputs):
+        """The time keys are rounded; the hazard values are unchanged."""
+        freqs, s0, _, beta, centre, scale = curve_inputs
+        grid = np.array([1.23456789, 2.34567891, 3.45678912, 4.56789123])
+        h0, curves = survival_curves(
+            freqs, s0, grid, beta, centre, scale, ["age", "treatment"], None, curve_time_sig_figs=4
+        )
+        assert list(h0.keys()) == ["1.235", "2.346", "3.457", "4.568"]
+        assert list(curves["0"].keys()) == ["1.235", "2.346", "3.457", "4.568"]
+        # H0 steps are 0.1, 0.2, 0.3, 0.4 regardless of the key rounding
+        np.testing.assert_allclose(list(h0.values()), [0.1, 0.3, 0.6, 1.0])
+
+    def test_collisions_keep_the_largest_time_value(self):
+        """Times merged into one key keep the value at the largest time."""
+        freqs = np.array([1.0, 1.0, 1.0])
+        s0 = np.array([10.0, 10.0, 10.0])
+        # 1.11, 1.12 and 1.14 all round to 1.1 at 2 significant figures
+        grid = np.array([1.11, 1.12, 1.14])
+        h0, curves = survival_curves(
+            freqs, s0, grid, np.zeros(1), np.zeros(1), np.ones(1), ["age"], None, curve_time_sig_figs=2
+        )
+        assert list(h0.keys()) == ["1.1"]
+        # H0 at the largest original time (1.14) is 0.1 + 0.1 + 0.1 = 0.3
+        assert h0["1.1"] == pytest.approx(0.3)
+        assert curves["0"]["1.1"] == pytest.approx(np.exp(-0.3))
+
+    def test_profile_curves_use_the_same_keys(self):
+        """Profile curves share the coarsened keys and merge like the baseline."""
+        freqs = np.array([1.0, 1.0])
+        s0 = np.array([10.0, 10.0])
+        # both times round to 1.1 at 2 significant figures
+        grid = np.array([1.11, 1.14])
+        h0, curves = survival_curves(
+            freqs,
+            s0,
+            grid,
+            np.array([0.5]),
+            np.zeros(1),
+            np.ones(1),
+            ["age"],
+            [{"age": 2.0}],
+            curve_time_sig_figs=2,
+        )
+        assert set(curves.keys()) == {"0", "1"}
+        assert list(curves["1"].keys()) == ["1.1"]
+        # profile exponent exp(beta . (x - centre) / scale) = exp(0.5 * 2);
+        # H0 at the largest original time (1.14) is 0.2
+        assert curves["1"]["1.1"] == pytest.approx(np.exp(-0.2 * np.exp(1.0)))
+
+
+@pytest.mark.unit
 class TestFormatResultsDataframe:
     """Tests for the format_results_dataframe function."""
 
@@ -276,3 +350,35 @@ class TestFormatResultsDataframe:
         df = format_results_dataframe(results_data, ["age", "treatment"])
         assert df.loc["age", "Coef"] == 0.5
         assert df.loc["treatment", "Coef"] == -0.3
+
+
+@pytest.mark.unit
+class TestHeldEventFraction:
+    """Tests for held_event_fraction (the held-risk-set diagnostic)."""
+
+    def test_guards_off_is_zero(self):
+        """With the risk-set guards off (k <= 1) nothing can be held."""
+        assert held_event_fraction([10.0, 10.0, 10.0], [2, 3, 5], 1) == 0.0
+        assert held_event_fraction([10.0, 10.0, 10.0], [2, 3, 5], 0) == 0.0
+
+    def test_first_grid_point_never_held(self):
+        """The first release is always released: it never counts as held."""
+        # The release stays at the first grid point: every later grid point
+        # is held, so the held events are those of grid points 1 and 2.
+        assert held_event_fraction([10.0, 10.0, 10.0], [4, 3, 3], 5) == pytest.approx(6 / 10)
+
+    def test_released_sets_do_not_count_as_held(self):
+        """A release after the first is not held, even where it later repeats."""
+        # Grid point 1 is held at the first release (3 events); grid points
+        # 2 and 3 are released at 5 and held there — a released set equal to
+        # the first release is what counts, so only 3 of 10 events are held.
+        assert held_event_fraction([10.0, 10.0, 5.0, 5.0], [4, 3, 1, 2], 5) == pytest.approx(3 / 10)
+
+    def test_nothing_held_when_all_released(self):
+        assert held_event_fraction([10.0, 8.0, 5.0], [4, 3, 3], 5) == 0.0
+
+    def test_no_events_is_zero(self):
+        assert held_event_fraction([10.0, 10.0], [0, 0], 5) == 0.0
+
+    def test_single_grid_point_is_zero(self):
+        assert held_event_fraction([10.0], [7], 5) == 0.0

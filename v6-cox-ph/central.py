@@ -15,18 +15,42 @@ from scipy.linalg import solve
 from scipy.stats import chi2
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
-from vantage6.algorithm.tools.exceptions import AlgorithmError
+from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
 from vantage6_strongaya_general.miscellaneous import safe_log
 
 from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
 from .coxph_logic import partial_log_likelihood, pooled_standardisation
 from .coxph_logic import survival_curves as survival_curves_from_aggregates
-from .coxph_logic import format_results_dataframe
+from .coxph_logic import format_results_dataframe, held_event_fraction
 from .miscellaneous import IterationResult, SummedZResult, format_validation_error, validate_coxph_input
+from .privacy_guards import (
+    ENV_MAX_COVARIATES,
+    ENV_MAX_GRID_POINTS,
+    ENV_MAX_HELD_EVENT_FRACTION,
+    ENV_TIME_BIN_WIDTH,
+    WIRE_AGGREGATE_SIG_FIGS,
+    load_curve_time_sig_figs,
+    load_max_held_event_fraction,
+    load_resource_caps,
+)
 
 # Maximum Newton-Raphson iterations. Module-level so tests can monkeypatch
 # it to force non-convergence.
 MAX_ITERATIONS = 20
+
+# The held-event fraction diagnostic warns when more than this share of a
+# node's events was scored against a held (unchanged) risk set.
+HELD_FRACTION_WARN_THRESHOLD = 0.25
+
+# Convergence tolerances for the Newton-Raphson loop. The primary
+# tolerance is the exactness target: converged when max |step| <=
+# STEP_TOLERANCE. The secondary tolerance declares convergence when the
+# log-likelihood stops improving beyond the released-precision jitter
+# (ll_tolerance) for two consecutive accepted evaluations while the step
+# stays below STABLE_STEP_TOLERANCE — coarse aggregate rounding can stall
+# the step above the primary tolerance without the fit having moved.
+STEP_TOLERANCE = 1e-6
+STABLE_STEP_TOLERANCE = 1e-3
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -86,6 +110,25 @@ def central(
     expl_vars = validated.expl_vars
     organization_ids = validated.organization_ids
 
+    # Resource caps bound the problem size the algorithm accepts; they are
+    # configuration, read centrally. The message names the user-supplied
+    # count and the configured cap only.
+    caps = load_resource_caps()
+    if len(expl_vars) > caps.max_covariates:
+        raise UserInputError(
+            f"Too many explanatory variables: {len(expl_vars)} requested, the configured "
+            f"maximum ({ENV_MAX_COVARIATES}) is {caps.max_covariates}."
+        )
+
+    # The reported curve time keys are coarsened to this many significant
+    # figures (an empty COXPH_CURVE_TIME_SIG_FIGS reports exact times).
+    curve_time_sig_figs = load_curve_time_sig_figs()
+
+    # The held-event fraction abort cap (central side): above this share of
+    # a node's events scored against a held (unchanged) risk set the run
+    # aborts; an empty COXPH_MAX_HELD_EVENT_FRACTION disables the abort.
+    max_held_event_fraction_cap = load_max_held_event_fraction()
+
     # Collect all organisations unless specified
     ids: list
     if organization_ids is None:
@@ -93,6 +136,13 @@ def central(
         ids = [organisation.get("id") for organisation in organisations]
     else:
         ids = list(organization_ids)
+        known_ids = {organisation.get("id") for organisation in client.organization.list()}
+        unknown_ids = [org_id for org_id in ids if org_id not in known_ids]
+        if unknown_ids:
+            raise UserInputError(
+                f"Unknown organisation IDs {unknown_ids}; the collaboration has "
+                f"organisations {sorted(org_id for org_id in known_ids if org_id is not None)}."
+            )
 
     safe_log("info", f"Sending task to organisations {ids}")
 
@@ -127,6 +177,7 @@ def central(
     sum_squares = None
     time_event_dfs = []
     node_privacy_settings = []
+    node_info = {}
     for output in results:
         result = _parse_result(
             SummedZResult, output, {"expected_ids": ids, "expl_vars": expl_vars, "time_col": time_col}
@@ -138,8 +189,16 @@ def central(
             z_sum += pd.Series(result.sum)
             sum_squares += pd.Series(result.sum_squares)
         # Collect per-time event counts (NaN-consistent with z_sum)
-        time_event_dfs.append(pd.DataFrame.from_dict(result.times))
+        time_event_df = pd.DataFrame.from_dict(result.times)
+        time_event_dfs.append(time_event_df)
         node_privacy_settings.append(result.privacy_settings)
+        # Per-node event counts and settings, paired by organisation id for
+        # the held-fraction diagnostic (results are not in dispatch order).
+        node_info[result.organization_id] = (
+            time_event_df[time_col].to_numpy(dtype=float),
+            time_event_df["freq"].to_numpy(dtype=float),
+            result.privacy_settings,
+        )
 
     # Build aggregated_time_events from compute_summed_z results: it drops
     # NaN in time, outcome and expl_vars, so its event counts are consistent
@@ -148,6 +207,15 @@ def central(
     aggregated_time_events = aggregated_time_events.groupby(time_col, as_index=False).sum()
 
     unique_time_events = aggregated_time_events[time_col].tolist()
+
+    # The event-time grid is data-derived, so the message names the configured
+    # cap and the remedies, never the actual grid size.
+    if len(unique_time_events) > caps.max_grid_points:
+        raise UserInputError(
+            f"The pooled event-time grid exceeds the configured maximum of "
+            f"{caps.max_grid_points} points ({ENV_MAX_GRID_POINTS}). Enable time binning "
+            f"({ENV_TIME_BIN_WIDTH}) on the nodes or select fewer organisations."
+        )
 
     # Standardisation: the pooled covariate centre and spread over the event
     # cases, rounded to two significant figures so the nodes learn less. The
@@ -164,21 +232,46 @@ def central(
     # when any guard was active, because the estimates are then approximate.
     max_min_risk_set_change = max(int(s.get("min_risk_set_change") or 1) for s in node_privacy_settings)
     time_binning = any(s.get("time_bin_width") for s in node_privacy_settings)
-    guards_active = max_min_risk_set_change > 1 or time_binning
-    privacy_guards = {
+    max_min_time_event_count = max(int(s.get("min_time_event_count") or 1) for s in node_privacy_settings)
+    # The absolute risk-set floor is configuration too; it only takes effect
+    # on nodes whose jump guard is on (k > 1), which the warning names.
+    floors = [int(s["min_risk_set_size"]) for s in node_privacy_settings if s.get("min_risk_set_size") is not None]
+    max_min_risk_set_size = max(floors) if floors else None
+    guards_active = max_min_risk_set_change > 1 or time_binning or max_min_time_event_count > 1
+    privacy_guards: dict = {
         "active": guards_active,
         "max_min_risk_set_change": max_min_risk_set_change,
         "time_binning": time_binning,
+        "max_min_time_event_count": max_min_time_event_count,
+        "max_min_risk_set_size": max_min_risk_set_size,
     }
     guards_warning = None
     if guards_active:
+        floor_note = ""
+        if max_min_risk_set_size is not None and max_min_risk_set_change > 1:
+            floor_note = f", minimum risk-set size R={max_min_risk_set_size}"
         guards_warning = (
             "Privacy guards were active on one or more nodes "
             f"(maximum minimum risk-set change k={max_min_risk_set_change}, "
-            f"time binning {'on' if time_binning else 'off'}); "
+            f"time binning {'on' if time_binning else 'off'}, "
+            f"minimum per-time event count m={max_min_time_event_count}"
+            f"{floor_note}); "
             "the estimates are approximate."
         )
         safe_log("warn", guards_warning)
+
+    # The nodes round the aggregates they release to a configurable number
+    # of significant figures and then quantise them to float32 precision for
+    # the wire (always on), so the centrally computed log-likelihood carries
+    # a rounding jitter of order events * 10^(1 - N) per node, where N is
+    # the coarser of the configured rounding and the wire precision. Near
+    # the optimum the true per-step gain falls below that jitter, so a
+    # decrease smaller than the jitter floor is not a real decrease.
+    jitter = sum(
+        float(time_event_df["freq"].sum()) * 10.0 ** (1 - _released_sig_figs(settings))
+        for time_event_df, settings in zip(time_event_dfs, node_privacy_settings)
+    )
+    ll_tolerance = max(1e-12, jitter)
 
     # The gradient in the standardised space needs the event-case covariate
     # sums in that space as well.
@@ -196,6 +289,9 @@ def central(
     last_step: np.ndarray | None = None
     converged = False
     convergence_cause: str | None = None
+    convergence_tolerance = STEP_TOLERANCE
+    held_fraction_warning: str | None = None
+    stable_streak = 0
     epoch = 0
 
     for epoch in range(epochs):
@@ -233,6 +329,7 @@ def central(
         summed_agg1 = np.zeros(n_times)
         summed_agg2 = np.zeros((n_times, n_covs))
         summed_agg3 = np.zeros((n_times, n_covs, n_covs))
+        round1_agg1 = {}
 
         for output in results:
             iteration_result = _parse_result(
@@ -241,6 +338,43 @@ def central(
             summed_agg1 += np.asarray(iteration_result.agg1, dtype=float)
             summed_agg2 += np.asarray(iteration_result.agg2, dtype=float)
             summed_agg3 += np.asarray(iteration_result.agg3, dtype=float)
+            if epoch == 0:
+                round1_agg1[iteration_result.organization_id] = np.asarray(iteration_result.agg1, dtype=float)
+
+        if epoch == 0:
+            # Round 1 runs at beta = 0, where the released risk-set sizes
+            # are exact integers: a release still at the first released
+            # risk set is exactly agg1[i] == agg1[0], and (the true risk
+            # set strictly decreases at every event time) necessarily a
+            # held (stale) one. The share of each node's events scored
+            # against a held risk set diagnoses how much of the timeline
+            # the guards held back; the maximum across nodes is reported
+            # in the privacy guards summary.
+            max_held_event_fraction = _max_held_event_fraction(round1_agg1, node_info, unique_time_events)
+            privacy_guards["max_held_event_fraction"] = max_held_event_fraction
+            if max_held_event_fraction_cap is not None and max_held_event_fraction > max_held_event_fraction_cap:
+                # The fit is dominated by held risk sets; the estimates
+                # would not be trustworthy. The message names the configured
+                # cap and the measured fraction (the same statistic the
+                # result reports) and the remedies.
+                raise UserInputError(
+                    f"The held-event fraction {max_held_event_fraction:.3f} (maximum across nodes) "
+                    f"exceeds the configured cap {max_held_event_fraction_cap} "
+                    f"({ENV_MAX_HELD_EVENT_FRACTION}): the risk-set guards held back too much of "
+                    f"the event timeline and the fit is dominated by held risk sets. Use larger "
+                    f"nodes, lower the risk-set guards by policy (COXPH_MIN_RISK_SET_CHANGE, "
+                    f"COXPH_MIN_RISK_SET_SIZE), or run with the minimal privacy level "
+                    f"(COXPH_PRIVACY_LEVEL=minimal) for validation."
+                )
+            if max_held_event_fraction > HELD_FRACTION_WARN_THRESHOLD:
+                held_fraction_warning = (
+                    f"The risk-set guards held back a large share of the event timeline: "
+                    f"{max_held_event_fraction:.3f} of the events (maximum across nodes) were "
+                    f"scored against an unchanged (held) risk set, above the warn threshold "
+                    f"{HELD_FRACTION_WARN_THRESHOLD}; the estimates may be dominated by held "
+                    f"risk sets."
+                )
+                safe_log("warn", held_fraction_warning)
 
         # The log-likelihood at the current beta, from aggregates that are
         # already collected (no extra round-trip).
@@ -248,7 +382,7 @@ def central(
         if log_likelihood_null is None and not beta.any():
             log_likelihood_null = ll_here
 
-        if accepted is not None and ll_here < accepted["log_likelihood"] - 1e-12:
+        if accepted is not None and ll_here < accepted["log_likelihood"] - ll_tolerance:
             # The step away from the accepted beta decreased the likelihood:
             # halve it and retry from the accepted point. The accepted state
             # is reported if the budget runs out mid-halving.
@@ -267,7 +401,15 @@ def central(
         )
 
         # Accept this evaluation: the reported beta, Hessian and summed_agg1
-        # stay evaluated at the same beta.
+        # stay evaluated at the same beta. A log-likelihood gain within the
+        # released-precision jitter means the likelihood has stopped
+        # improving measurably; two consecutive such accepted evaluations
+        # arm the secondary convergence test below.
+        if accepted is not None:
+            if abs(ll_here - accepted["log_likelihood"]) <= ll_tolerance:
+                stable_streak += 1
+            else:
+                stable_streak = 0
         accepted = {
             "beta": beta,
             "secondary": secondary_derivative,
@@ -289,9 +431,19 @@ def central(
             safe_log("warn", convergence_cause)
             break
 
-        if delta <= 0.000001:
+        if delta <= STEP_TOLERANCE:
             safe_log("info", "Betas have settled! Finished iterating!")
             converged = True
+            break
+
+        if stable_streak >= 2 and delta <= STABLE_STEP_TOLERANCE:
+            # The log-likelihood has not improved beyond the
+            # released-precision jitter for two consecutive accepted
+            # evaluations while the step stays small: the fit has settled
+            # at the released precision.
+            safe_log("info", "Betas have settled at the released precision! Finished iterating!")
+            converged = True
+            convergence_tolerance = STABLE_STEP_TOLERANCE
             break
 
         if epoch == epochs - 1:
@@ -303,10 +455,7 @@ def central(
         beta = beta - step
 
     n_iterations = epoch + 1
-    if guards_warning is not None:
-        central_warnings = [guards_warning]
-    else:
-        central_warnings = []
+    central_warnings = [w for w in (guards_warning, held_fraction_warning) if w is not None]
     if accepted is None:
         raise AlgorithmError("The optimiser never accepted an evaluation; no model can be reported.")
     beta = accepted["beta"]
@@ -356,6 +505,7 @@ def central(
         scale,
         expl_vars,
         validated.covariate_profiles,
+        curve_time_sig_figs,
     )
 
     lr_statistic = 2 * (log_likelihood - log_likelihood_null)
@@ -367,6 +517,7 @@ def central(
         "warnings": model["warnings"] + central_warnings,
         "converged": converged,
         "n_iterations": n_iterations,
+        "convergence_tolerance": convergence_tolerance,
         "log_likelihood": log_likelihood,
         "log_likelihood_null": log_likelihood_null,
         "lr_statistic": lr_statistic,
@@ -376,6 +527,7 @@ def central(
         "algorithm_version": _algorithm_version(),
         "baseline_cumulative_hazard": baseline_cumulative_hazard,
         "survival_curves": survival_curves,
+        "curve_time_sig_figs": curve_time_sig_figs,
         "privacy_guards": privacy_guards,
     }
 
@@ -388,6 +540,43 @@ def _algorithm_version() -> str:
         return version("v6-cox-ph")
     except PackageNotFoundError:
         return "unknown"
+
+
+def _released_sig_figs(settings) -> int:
+    """The precision of the aggregates a node released.
+
+    The coarser of the node's configured aggregate rounding and the
+    always-on wire quantisation (float32 precision): the coarser rounding
+    dominates the jitter in the centrally computed log-likelihood.
+    """
+    configured = settings.get("aggregate_sig_figs")
+    if configured is None:
+        return WIRE_AGGREGATE_SIG_FIGS
+    return min(int(configured), WIRE_AGGREGATE_SIG_FIGS)
+
+
+def _max_held_event_fraction(round1_agg1: dict, node_info: dict, grid: list) -> float:
+    """The maximum across nodes of the held-event fraction.
+
+    ``round1_agg1`` holds each node's released risk-set sizes at
+    ``beta = 0`` (round 1) and ``node_info`` pairs each organisation with
+    its per-time event counts and privacy settings; both are keyed by
+    organisation id because the results are not in dispatch order. A node's
+    event counts are aligned with the pooled event-time grid (its own
+    times are a subset of it) and the fraction is computed by
+    ``held_event_fraction``. A node whose risk-set guards are off
+    (k <= 1) cannot hold anything and contributes 0.
+    """
+    grid_arr = np.asarray(grid, dtype=float)
+    fractions = []
+    for org_id, agg1 in round1_agg1.items():
+        node_times, node_freqs, settings = node_info[org_id]
+        indices = np.searchsorted(grid_arr, node_times)
+        freq = np.zeros(len(grid_arr))
+        np.add.at(freq, indices, node_freqs)
+        min_risk_set_change = int(settings.get("min_risk_set_change") or 1)
+        fractions.append(held_event_fraction(agg1, freq, min_risk_set_change))
+    return max(fractions) if fractions else 0.0
 
 
 def _parse_result(model_cls: type[_ModelT], output: object, context: dict) -> _ModelT:
