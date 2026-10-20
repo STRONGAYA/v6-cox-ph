@@ -34,6 +34,11 @@
           "name": "covariate_profiles",
           "type": "json",
           "description": "Optional covariate profiles for survival curves: a list of objects mapping explanatory variable names to values. Variables left out are taken at the pooled event-case mean (the baseline profile)."
+        },
+        {
+          "name": "variables_to_stratify",
+          "type": "json",
+          "description": "Optional STRONG AYA stratification: a mapping of variable names to lists of values or {'start', 'end'} ranges. The run analyses only the rows inside the requested subpopulation; the sample-size thresholds apply to the stratified rows."
         }
       ]
     },
@@ -61,6 +66,11 @@
           "name": "expl_vars",
           "type": "list",
           "description": "List of explanatory variable names."
+        },
+        {
+          "name": "variables_to_stratify",
+          "type": "json",
+          "description": "Optional STRONG AYA stratification: a mapping of variable names to lists of values or {'start', 'end'} ranges. The run analyses only the rows inside the requested subpopulation; the sample-size thresholds apply to the stratified rows."
         }
       ]
     },
@@ -108,6 +118,11 @@
           "name": "unique_time_events",
           "type": "list",
           "description": "Sorted list of unique event times shared by the central function."
+        },
+        {
+          "name": "variables_to_stratify",
+          "type": "json",
+          "description": "Optional STRONG AYA stratification: a mapping of variable names to lists of values or {'start', 'end'} ranges. The run analyses only the rows inside the requested subpopulation; the sample-size thresholds apply to the stratified rows."
         }
       ]
     }

@@ -102,8 +102,8 @@ from vantage6.algorithm.tools.exceptions import (
 )
 
 from .coxph_logic import round_sig
-from .miscellaneous import format_validation_error
-from vantage6_strongaya_general.miscellaneous import safe_log
+from .miscellaneous import format_validation_error, validate_stratification_spec
+from vantage6_strongaya_general.miscellaneous import apply_data_stratification, safe_log
 from vantage6_strongaya_general.privacy_measures import (
     apply_sample_size_threshold,
     mask_unnecessary_variables,
@@ -540,6 +540,7 @@ def prepare_node_data(
     expl_vars: Optional[list],
     *,
     need_outcome: bool,
+    variables_to_stratify: Optional[dict] = None,
 ) -> tuple[pd.DataFrame, PrivacySettings, bool]:
     """Run the shared node-side guard sequence once.
 
@@ -548,6 +549,8 @@ def prepare_node_data(
         ``ensure_spawned_by_central`` -> ``load_privacy_settings``
         -> RDF collect (STRONG AYA, only when the node carries an
         ``endpoint`` column) -> ``mask_unnecessary_variables`` (STRONG AYA)
+        -> ``validate_stratification_spec`` + ``apply_data_stratification``
+        (STRONG AYA, when ``variables_to_stratify`` is given)
         -> ``validate_expl_vars`` (when ``expl_vars`` are given)
         -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
         -> ``select_rows`` (hook) -> ``check_sample_size``
@@ -576,6 +579,12 @@ def prepare_node_data(
     need_outcome : bool
         Whether the sample-size threshold also counts events (rows and
         events must both exceed the threshold).
+    variables_to_stratify : dict | None
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). The rows outside the requested
+        subpopulation are removed here, after masking (the stratification
+        variables must survive it) and before every threshold, so they
+        count against the thresholds like any other removed rows.
 
     Returns
     -------
@@ -593,11 +602,30 @@ def prepare_node_data(
         variables_to_analyse.append(outcome_col)
     if expl_vars:
         variables_to_analyse.extend(expl_vars)
+    if variables_to_stratify is not None:
+        variables_to_analyse.extend(variables_to_stratify.keys())
     if "endpoint" in df.columns:
         from vantage6_strongaya_rdf import collect_sparql_data
 
         df = collect_sparql_data(variables_to_analyse, endpoint=df["endpoint"].iloc[0])
     df = mask_unnecessary_variables(df, variables_to_analyse)
+
+    if variables_to_stratify is not None:
+        # STRONG AYA: stratification selects the subpopulation this run
+        # analyses. The spec is re-validated here (defence in depth: it
+        # arrives over the wire from central) and the stratification
+        # variables must exist — the library filter would silently keep
+        # the whole frame for a missing variable, which would fit the
+        # model on the wrong rows. The filter runs before every
+        # threshold, so the rows it removes count against them.
+        try:
+            validate_stratification_spec(variables_to_stratify)
+        except ValueError as e:
+            raise UserInputError(f"Invalid variables_to_stratify: {e}") from None
+        missing = [name for name in variables_to_stratify if name not in df.columns]
+        if missing:
+            raise UserInputError(f"Stratification variables not found in data columns: {missing}.")
+        df = apply_data_stratification(df, variables_to_stratify)
 
     if expl_vars:
         validate_expl_vars(df, expl_vars, time_col, outcome_col)

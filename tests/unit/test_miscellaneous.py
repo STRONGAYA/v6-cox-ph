@@ -18,6 +18,7 @@ sys.path.insert(0, str(algorithm_path))
 from miscellaneous import (  # noqa: E402
     CoxPHInput,
     validate_coxph_input,
+    validate_stratification_spec,
 )
 
 
@@ -181,3 +182,86 @@ class TestValidateCoxphInput:
         message = str(excinfo.value)
         assert message.startswith("Invalid Cox-PH input:")
         assert "https://errors.pydantic.dev" not in message
+
+
+@pytest.mark.unit
+class TestStratificationSpec:
+    """Tests for the variables_to_stratify validation (STRONG AYA standard)."""
+
+    def test_valid_value_list(self):
+        spec = {"sex": ["F", "M"], "treatment": [1]}
+        assert validate_stratification_spec(spec) == spec
+
+    def test_valid_range_both_bounds(self):
+        spec = {"age": {"start": 40, "end": 60}}
+        assert validate_stratification_spec(spec) == spec
+
+    def test_valid_range_single_bound(self):
+        assert validate_stratification_spec({"age": {"start": 40}}) == {"age": {"start": 40}}
+        assert validate_stratification_spec({"age": {"end": 60}}) == {"age": {"end": 60}}
+        assert validate_stratification_spec({"age": {"start": None, "end": 60}}) == {"age": {"start": None, "end": 60}}
+
+    @pytest.mark.parametrize("spec", [{}, "not-a-dict", [], {"sex": "F"}, {"sex": 1}])
+    def test_non_mapping_rejected(self, spec):
+        with pytest.raises(ValueError):
+            validate_stratification_spec(spec)
+
+    @pytest.mark.parametrize("name", ["age at diagnosis", "age`", "age>=40", "1age", "", "age;drop"])
+    def test_non_identifier_name_rejected(self, name):
+        with pytest.raises(ValueError, match="identifier-shaped"):
+            validate_stratification_spec({name: [1]})
+
+    @pytest.mark.parametrize("selection", [[], ["F", None], ["F", True], ["F", ["nested"]], ["F", {"start": 1}]])
+    def test_invalid_value_list_rejected(self, selection):
+        with pytest.raises(ValueError):
+            validate_stratification_spec({"sex": selection})
+
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            {"start": 60, "end": 40},
+            {"start": "40"},
+            {"start": True},
+            {"lower": 40},
+            {"start": 40, "end": 60, "step": 5},
+            {},
+        ],
+    )
+    def test_invalid_range_rejected(self, selection):
+        with pytest.raises(ValueError):
+            validate_stratification_spec({"age": selection})
+
+    def test_input_model_accepts_valid_stratification(self):
+        validated = validate_coxph_input(
+            time_col="time",
+            outcome_col="event",
+            expl_vars=["age", "treatment"],
+            variables_to_stratify={"sex": ["F"], "age": {"start": 40, "end": 60}},
+        )
+        assert validated.variables_to_stratify == {"sex": ["F"], "age": {"start": 40, "end": 60}}
+
+    def test_input_model_defaults_to_none(self):
+        validated = validate_coxph_input(time_col="time", outcome_col="event", expl_vars=["age"])
+        assert validated.variables_to_stratify is None
+
+    def test_input_model_rejects_invalid_stratification(self):
+        with pytest.raises(UserInputError):
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event",
+                expl_vars=["age"],
+                variables_to_stratify={"age": {"start": 60, "end": 40}},
+            )
+
+    def test_wrapped_error_does_not_echo_values(self):
+        """The formatted validation error never echoes the offending values."""
+        with pytest.raises(UserInputError) as excinfo:
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event",
+                expl_vars=["age"],
+                variables_to_stratify={"age": {"start": 61, "end": 40}},
+            )
+        message = str(excinfo.value)
+        assert "61" not in message
+        assert "40" not in message

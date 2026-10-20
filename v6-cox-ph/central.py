@@ -63,6 +63,7 @@ def central(
     expl_vars: list,
     organization_ids: Optional[list] = None,
     covariate_profiles: Optional[list] = None,
+    variables_to_stratify: Optional[dict] = None,
 ) -> dict:
     """
     Central function for the federated Cox Proportional Hazards algorithm.
@@ -90,6 +91,12 @@ def central(
         Organisations that do not meet the sample-size threshold fail the
         whole run with ``PrivacyThresholdViolation`` — select them explicitly
         here rather than relying on automatic exclusion.
+    variables_to_stratify : dict, optional
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). The run analyses only the rows inside the
+        requested subpopulation; the sample-size thresholds on the nodes
+        apply to the stratified rows, so a stratification that isolates a
+        handful of records fails closed like any other below-threshold run.
 
     Returns
     -------
@@ -103,12 +110,14 @@ def central(
         expl_vars=expl_vars,
         organization_ids=organization_ids,
         covariate_profiles=covariate_profiles,
+        variables_to_stratify=variables_to_stratify,
     )
 
     time_col = validated.time_col
     outcome_col = validated.outcome_col
     expl_vars = validated.expl_vars
     organization_ids = validated.organization_ids
+    variables_to_stratify = validated.variables_to_stratify
 
     # Resource caps bound the problem size the algorithm accepts; they are
     # configuration, read centrally. The message names the user-supplied
@@ -157,6 +166,7 @@ def central(
             "time_col": time_col,
             "outcome_col": outcome_col,
             "expl_vars": expl_vars,
+            "variables_to_stratify": variables_to_stratify,
         },
     }
 
@@ -309,6 +319,7 @@ def central(
                 "centre": centre.tolist(),
                 "scale": scale.tolist(),
                 "unique_time_events": unique_time_events,
+                "variables_to_stratify": variables_to_stratify,
             },
         }
 
@@ -525,6 +536,7 @@ def central(
         "n_events": int(aggregated_time_events["freq"].sum()),
         "covariance": np.asarray(model["covariance"]).tolist(),
         "algorithm_version": _algorithm_version(),
+        "variables_to_stratify": variables_to_stratify,
         "baseline_cumulative_hazard": baseline_cumulative_hazard,
         "survival_curves": survival_curves,
         "curve_time_sig_figs": curve_time_sig_figs,

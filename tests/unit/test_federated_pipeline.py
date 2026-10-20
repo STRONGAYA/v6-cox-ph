@@ -50,7 +50,7 @@ def _load_datasets():
     return df1, df2, df3
 
 
-def _run_central(datasets, organization_ids, expl_vars=None):
+def _run_central(datasets, organization_ids, expl_vars=None, variables_to_stratify=None):
     """Run ``central`` through the mock client and return the result dict."""
     client = MockAlgorithmClient(
         datasets=datasets,
@@ -65,6 +65,7 @@ def _run_central(datasets, organization_ids, expl_vars=None):
                 "outcome_col": "event",
                 "expl_vars": EXPL_VARS if expl_vars is None else expl_vars,
                 "organization_ids": organization_ids,
+                "variables_to_stratify": variables_to_stratify,
             },
         },
         organizations=[organization_ids[0]],
@@ -205,6 +206,42 @@ class TestFederatedPipelineVsLifelines:
         assert (
             abs(standard_result["aic"] - ref["aic"]) <= 0.1
         ), f"AIC mismatch: fed={standard_result['aic']}, ref={ref['aic']}"
+
+
+@pytest.mark.unit
+class TestStratifiedPipeline:
+    """A stratified run fits the model on the stratified rows only."""
+
+    def test_stratified_matches_lifelines_on_filtered_rows(self, guards_off):
+        """The stratified federated fit matches lifelines on the filtered rows."""
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        spec = {"sex": ["F"]}
+        result = _run_central(datasets, [1, 2], variables_to_stratify=spec)
+        assert result["converged"] is True
+        assert result["variables_to_stratify"] == spec
+        pooled = pd.concat([df1, df2])
+        filtered = pooled[pooled["sex"] == "F"]
+        ref = _lifelines_reference(filtered, EXPL_VARS)
+        model = pd.DataFrame(result["model"]).T
+        for var in EXPL_VARS:
+            assert (
+                abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 2e-3
+            ), f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, ref={ref['coef'][var]}"
+
+    def test_stratified_run_including_small_stratum_fails(self, guards_off):
+        """A stratum at/below the threshold on any node fails the whole run."""
+        df1, df2, df3 = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+            [{"database": df3, "db_type": "csv"}],
+        ]
+        with pytest.raises(PrivacyThresholdViolation):
+            _run_central(datasets, [1, 2, 3], variables_to_stratify={"sex": ["M"]})
 
 
 @pytest.mark.unit

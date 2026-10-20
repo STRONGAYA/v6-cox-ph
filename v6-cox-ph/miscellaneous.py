@@ -7,6 +7,7 @@ This module contains the Pydantic models for the wire contract: user input
 ``IterationResult``), which the partials build and central validates.
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -37,6 +38,54 @@ def format_validation_error(exc: ValidationError) -> str:
     return "; ".join(parts)
 
 
+# Stratification variable names must be identifier-shaped:
+# ``apply_data_stratification`` interpolates them into a dataframe query, so
+# anything beyond this pattern is rejected before the query is built.
+STRATIFICATION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_stratification_spec(spec: object) -> Dict[str, Any]:
+    """Validate a ``variables_to_stratify`` mapping (STRONG AYA data standard).
+
+    A mapping of stratification variable names to either a non-empty list of
+    values to keep or a ``{"start": ..., "end": ...}`` range (at least one
+    bound, numeric when present, start <= end). The messages echo the
+    user-supplied variable names only, never data values.
+
+    Raises
+    ------
+    ValueError
+        On any structural problem.
+    """
+    if not isinstance(spec, dict) or len(spec) == 0:
+        raise ValueError("variables_to_stratify must be a non-empty mapping of variable names to values or ranges")
+    for name, selection in spec.items():
+        if not isinstance(name, str) or not STRATIFICATION_NAME_PATTERN.match(name):
+            raise ValueError(f"stratification variable names must be identifier-shaped, got '{name}'")
+        if isinstance(selection, dict):
+            unknown_keys = sorted(set(selection) - {"start", "end"})
+            if unknown_keys:
+                raise ValueError(f"range for '{name}' may only have 'start'/'end' keys, got {unknown_keys}")
+            if "start" not in selection and "end" not in selection:
+                raise ValueError(f"range for '{name}' must define at least one of 'start'/'end'")
+            for bound in ("start", "end"):
+                value = selection.get(bound)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                    raise ValueError(f"range bound '{bound}' for '{name}' must be numeric")
+            start, end = selection.get("start"), selection.get("end")
+            if start is not None and end is not None and start > end:
+                raise ValueError(f"range for '{name}' has start above end")
+        elif isinstance(selection, list):
+            if len(selection) == 0:
+                raise ValueError(f"value list for '{name}' must not be empty")
+            for value in selection:
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                    raise ValueError(f"values for '{name}' must be strings or numbers")
+        else:
+            raise ValueError(f"stratification for '{name}' must be a list of values or a range mapping")
+    return spec
+
+
 class CoxPHInput(BaseModel):
     """
     Pydantic model for validating Cox-PH algorithm input parameters.
@@ -58,6 +107,15 @@ class CoxPHInput(BaseModel):
             "Optional covariate profiles for survival curves. Each entry maps "
             "explanatory variable names to values; variables left out are taken "
             "at the pooled event-case mean (the baseline profile)."
+        ),
+    )
+    variables_to_stratify: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional STRONG AYA stratification: a mapping of variable names to "
+            "lists of values or {'start', 'end'} ranges. The run analyses only "
+            "the rows inside the requested subpopulation; the sample-size "
+            "thresholds apply to the stratified rows."
         ),
     )
 
@@ -92,6 +150,14 @@ class CoxPHInput(BaseModel):
             if not isinstance(org_id, int) or org_id < 0:
                 raise ValueError(f"Invalid organisation ID: {org_id}. " "Must be a non-negative integer.")
         return list(set(v))
+
+    @field_validator("variables_to_stratify")
+    @classmethod
+    def validate_variables_to_stratify(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Validate the stratification mapping (values or ranges)."""
+        if v is None:
+            return None
+        return validate_stratification_spec(v)
 
     @model_validator(mode="after")
     def validate_column_semantics(self) -> "CoxPHInput":
@@ -135,6 +201,7 @@ def validate_coxph_input(
     expl_vars: List[str],
     organization_ids: Optional[List[int]] = None,
     covariate_profiles: Optional[List[Dict[str, float]]] = None,
+    variables_to_stratify: Optional[Dict[str, Any]] = None,
 ) -> CoxPHInput:
     """
     Validate Cox-PH algorithm input parameters.
@@ -151,6 +218,8 @@ def validate_coxph_input(
         List of organisation IDs to include.
     covariate_profiles : Optional[List[Dict[str, float]]]
         Optional covariate profiles for survival curves.
+    variables_to_stratify : Optional[Dict[str, Any]]
+        Optional STRONG AYA stratification mapping (values or ranges).
 
     Returns
     -------
@@ -169,6 +238,7 @@ def validate_coxph_input(
             expl_vars=expl_vars,
             organization_ids=organization_ids,
             covariate_profiles=covariate_profiles,
+            variables_to_stratify=variables_to_stratify,
         )
     except ValidationError as e:
         # The formatted message never echoes the offending input: pydantic's

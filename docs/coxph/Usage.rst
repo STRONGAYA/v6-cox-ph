@@ -17,6 +17,16 @@ The input arguments for the central function consist of:
   survival curves. Each entry maps explanatory variable names to values;
   variables left out are taken at the pooled event-case mean. An entry
   naming an unknown variable raises ``UserInputError``.
+- ``variables_to_stratify`` (object, optional): STRONG AYA stratification.
+  A mapping of variable names to lists of values to keep (``{"sex":
+  ["F"]}``) or ``{'start', 'end'}`` ranges (``{"age": {"start": 40, "end":
+  60}}``). The run analyses only the rows inside the requested
+  subpopulation; the sample-size thresholds apply to the stratified rows,
+  so a stratification that isolates a handful of records fails closed with
+  ``PrivacyThresholdViolation``. Variable names must be identifier-shaped,
+  and a variable that is not a column of the node's data raises
+  ``UserInputError``. The applied mapping is echoed in the result under
+  ``variables_to_stratify``.
 
 Input rules
 ------------

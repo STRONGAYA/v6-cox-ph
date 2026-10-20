@@ -1,5 +1,31 @@
 # Changelog
 
+## 3.0.0
+
+BREAKING wire change: ``central``, ``compute_summed_z`` and
+``perform_iteration`` take a new optional ``variables_to_stratify``
+argument (STRONG AYA stratification), recorded in ``algorithm_store.json``,
+and the central result echoes the applied mapping.
+
+- STRONG AYA stratification (subpopulation selection): the mapping of
+  variable names to value lists or ``{'start', 'end'}`` ranges selects the
+  rows the run analyses. The filter runs inside the shared
+  ``prepare_node_data`` hook, after ``mask_unnecessary_variables`` and
+  before every threshold, so the rows it removes count against the
+  sample-size checks like any other removed rows: a stratification that
+  isolates a handful of records fails closed with
+  ``PrivacyThresholdViolation`` like any below-threshold run.
+- The mapping is validated with Pydantic at ``central`` entry
+  (``CoxPHInput.variables_to_stratify``) and re-validated on the node
+  (defence in depth). Stratification variable names must be
+  identifier-shaped, because ``apply_data_stratification`` interpolates
+  them into a dataframe query. A stratification variable that is not a
+  column of the node's data raises ``UserInputError`` instead of the
+  library filter's silent no-op.
+- The model itself is unchanged: a stratified run fits the same Cox-PH
+  model on the stratified rows, and the result echoes the applied mapping
+  under ``variables_to_stratify``.
+
 ## 2.1.0
 
 Non-breaking internal change; the wire contract (``algorithm_store.json``

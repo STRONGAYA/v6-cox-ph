@@ -7,6 +7,8 @@ encryption if that is enabled). From there, they are sent to the partial task
 or directly to the user (if they requested partial results).
 """
 
+from typing import Optional
+
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
@@ -39,6 +41,7 @@ def compute_summed_z(
     time_col: str,
     outcome_col: str,
     expl_vars: list,
+    variables_to_stratify: Optional[dict] = None,
 ) -> dict:
     """
     Compute the sum of the specified explanatory variables for the outcome events.
@@ -55,6 +58,10 @@ def compute_summed_z(
         The name of the column containing the outcome data.
     expl_vars : list
         A list of explanatory variables to be used in the computation.
+    variables_to_stratify : dict, optional
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). Only the rows inside the requested
+        subpopulation are analysed; the thresholds apply to them.
 
     Returns
     -------
@@ -64,7 +71,9 @@ def compute_summed_z(
     try:
         safe_log("info", "Computing summed Z statistics")
 
-        df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
+        df, settings, threshold_met = prepare_node_data(
+            client, df, time_col, outcome_col, expl_vars, need_outcome=True, variables_to_stratify=variables_to_stratify
+        )
 
         if not threshold_met:
             raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
@@ -129,6 +138,7 @@ def perform_iteration(
     centre: list,
     scale: list,
     unique_time_events: list,
+    variables_to_stratify: Optional[dict] = None,
 ) -> dict:
     """
     Perform an iteration of the algorithm, computing the necessary aggregates.
@@ -162,6 +172,10 @@ def perform_iteration(
         The pooled covariate standard deviations over the event cases.
     unique_time_events : list
         A list of unique time events.
+    variables_to_stratify : dict, optional
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). Must match the mapping the run started
+        with: every partial analyses the same rows.
 
     Returns
     -------
@@ -171,7 +185,9 @@ def perform_iteration(
     try:
         safe_log("info", "Computing aggregates for the derivation of the partial likelihood")
 
-        df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
+        df, settings, threshold_met = prepare_node_data(
+            client, df, time_col, outcome_col, expl_vars, need_outcome=True, variables_to_stratify=variables_to_stratify
+        )
 
         # A node that passed compute_summed_z passes this check as well (the same
         # rows are analysed); the threshold here is defence in depth.

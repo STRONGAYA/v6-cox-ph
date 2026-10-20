@@ -8,11 +8,15 @@ The partial functions run on each data station and share only aggregated
 quantities with the central aggregator. Several guards protect against the
 main leakage channels of the federated design. All guards are implemented in
 ``v6-cox-ph/privacy_guards.py`` and applied in the same order in every
-partial: parent-task check, settings load, explanatory-variable validation
-(``compute_summed_z`` and ``perform_iteration``), NaN row dropping,
-sample-size threshold, iteration-input validation (``perform_iteration``
-only), time-column preparation (binning, tail censoring), and the risk-set
-guards (``perform_iteration`` only). On top of these mandatory guards,
+partial: parent-task check, settings load, RDF collection (STRONG AYA, when
+the node carries an ``endpoint`` column), masking of unanalysed variables
+(STRONG AYA), stratification (STRONG AYA, when requested — see below),
+explanatory-variable validation (``compute_summed_z`` and
+``perform_iteration``), NaN row dropping, sample-size threshold, the
+STRONG AYA sample-size threshold, iteration-input validation
+(``perform_iteration`` only), time-column preparation (binning, tail
+censoring), and the risk-set guards (``perform_iteration`` only). On top of
+these mandatory guards,
 the node's privacy level adds the reconstruction row bound, small-count
 suppression of the shared event counts, an absolute floor on the size of a
 released risk set and rounding of the released aggregates (see
@@ -62,6 +66,37 @@ rows. At the presets that is 150 rows at ``standard`` (``max(10 x 5,
 3 x 50)``) and 300 rows at ``strict`` (``max(20 x 5, 3 x 100)``);
 ``minimal`` has no floor and is unchanged. Nodes below the bound are
 refused the same fail-closed way as below-threshold nodes.
+
+Stratification
+~~~~~~~~~~~~~~
+
+``variables_to_stratify`` (STRONG AYA) selects the subpopulation the run
+analyses: a mapping of variable names to lists of values to keep or
+``{'start', 'end'}`` ranges. The filter runs inside the shared
+``prepare_node_data`` hook, after masking (the stratification variables
+must survive it) and before every threshold, so the rows it removes count
+against the thresholds like any other removed rows. A stratification that
+isolates a handful of records therefore fails closed with
+``PrivacyThresholdViolation`` on the same terms as a below-threshold node:
+the sample-size threshold, the event threshold and the admission bound all
+apply to the stratified rows. The same holds for the STRONG AYA
+sample-size threshold on top.
+
+Two properties are pinned at validation time. Stratification variable
+names must be identifier-shaped, because ``apply_data_stratification``
+interpolates them into a dataframe query; anything else is rejected with
+``UserInputError`` at ``central`` entry and re-validated on the node. And a
+stratification variable that is not a column of the node's data raises
+``UserInputError`` — the library filter would otherwise silently keep the
+whole frame, fitting the model on the wrong rows.
+
+The model itself is unchanged: a stratified run fits the same Cox-PH model
+on the stratified rows, and the released aggregates are the same shapes as
+an unstratified run's. What changes is the row set they describe — so the
+reconstruction exposure of the risk-set guards (see the sections below)
+applies within the subpopulation, and a stratification that leaves a node
+just above the threshold releases aggregates over a small group, guarded
+by the same risk-set floor and jump guard as any small risk set.
 
 Time binning
 ~~~~~~~~~~~~

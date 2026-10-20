@@ -496,6 +496,15 @@ block 3 above, not here.
   native ``check_sample_size`` — only when the native threshold passed; a
   node below the native threshold raises ``PrivacyThresholdViolation``
   from the caller and the STRONG AYA threshold must not double-raise.
+- Stratification (``variables_to_stratify``, STRONG AYA data standard) is
+  supported: ``apply_data_stratification`` runs after masking and before
+  every threshold, so the rows the filter removes count against them. The
+  spec is validated with Pydantic at ``central`` entry
+  (``CoxPHInput.variables_to_stratify``) and re-validated on the node;
+  stratification variable names must be identifier-shaped (they are
+  interpolated into a dataframe query), and a missing stratification
+  variable raises ``UserInputError`` instead of the library filter's
+  silent no-op.
 - The STRONG AYA guards are in addition to the vanilla guards, never
   instead of them; ``perform_iteration`` runs them too, through the same
   shared ``prepare_node_data``.

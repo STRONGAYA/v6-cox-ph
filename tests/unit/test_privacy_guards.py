@@ -610,6 +610,8 @@ class TestPrepareNodeData:
             "ensure_spawned_by_central",
             "load_privacy_settings",
             "mask_unnecessary_variables",
+            "validate_stratification_spec",
+            "apply_data_stratification",
             "validate_expl_vars",
             "drop_incomplete_rows",
             "validate_survival_columns",
@@ -665,6 +667,34 @@ class TestPrepareNodeData:
         ]
         assert threshold_met is True
 
+    def test_guard_order_with_stratification(self, client, node_df, default_env, monkeypatch):
+        """Stratification runs after masking and before validation/thresholds."""
+        calls = self._record_guard_calls(monkeypatch)
+        df, settings, threshold_met = prepare_node_data(
+            client,
+            node_df,
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            variables_to_stratify={"age": {"start": 0, "end": 100}},
+        )
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "mask_unnecessary_variables",
+            "validate_stratification_spec",
+            "apply_data_stratification",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "validate_survival_columns",
+            "select_rows",
+            "check_sample_size",
+            "apply_sample_size_threshold",
+        ]
+        assert threshold_met is True
+        assert len(df) == 200
+
     def test_hook_runs_before_threshold(self, client, node_df, default_env, monkeypatch):
         """Rows removed by the select_rows hook count against the threshold."""
         monkeypatch.setattr(
@@ -711,6 +741,148 @@ class TestPrepareNodeData:
         df.loc[12, "age"] = np.nan  # row 12 is an event row
         _, _, threshold_met = prepare_node_data(client, df, "time", "event", ["age", "treatment"], need_outcome=True)
         assert threshold_met is False
+
+
+@pytest.mark.unit
+class TestStratification:
+    """STRONG AYA stratification at the prepare_node_data hook.
+
+    The filter selects the subpopulation the run analyses; it runs before
+    every threshold, so the rows it removes count against them (a
+    stratification that isolates a handful of records fails closed like any
+    below-threshold run).
+    """
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def minimal_env(self, monkeypatch):
+        # Minimal level: only the mandatory guards (no reconstruction row
+        # bound, no risk-set floor), so the sample-size threshold is the
+        # binding guard in these tests.
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+
+    def _df(self, n_stratum, n_other=190):
+        """n_stratum rows in arm "a" (all events), n_other rows in arm "b"."""
+        n = n_stratum + n_other
+        return pd.DataFrame(
+            {
+                "time": [float(i) for i in range(1, n + 1)],
+                "event": [1] * n_stratum + ([0, 1] * n_other)[:n_other],
+                "age": [50.0] * n,
+                "treatment": ([0, 1] * n)[:n],
+                "arm": ["a"] * n_stratum + ["b"] * n_other,
+            }
+        )
+
+    def test_filter_selects_subpopulation(self, client, minimal_env):
+        out, _, threshold_met = prepare_node_data(
+            client,
+            self._df(60),
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            variables_to_stratify={"arm": ["a"]},
+        )
+        assert threshold_met is True
+        assert len(out) == 60
+        assert (out["arm"] == "a").all()
+
+    def test_range_filter_selects_subpopulation(self, client, minimal_env):
+        n = 200
+        df = pd.DataFrame(
+            {
+                "time": [float(i) for i in range(1, n + 1)],
+                "event": [1] * 100 + [0] * 100,
+                "age": [30.0 + i for i in range(n)],
+                "treatment": [0, 1] * 100,
+            }
+        )
+        out, _, threshold_met = prepare_node_data(
+            client,
+            df,
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            variables_to_stratify={"age": {"start": 40, "end": 60}},
+        )
+        assert threshold_met is True
+        assert len(out) == 21
+        assert out["age"].between(40, 60).all()
+
+    def test_stratified_rows_count_against_threshold(self, client, minimal_env):
+        """Rows the filter removes do not count: k-1/k refuse, k+1 passes."""
+        for n_stratum, expected in ((9, False), (10, False), (11, True)):
+            _, _, threshold_met = prepare_node_data(
+                client,
+                self._df(n_stratum),
+                "time",
+                "event",
+                ["age", "treatment"],
+                need_outcome=True,
+                variables_to_stratify={"arm": ["a"]},
+            )
+            assert threshold_met is expected, f"filtered rows {n_stratum}: expected {expected}"
+
+    def test_stratified_events_count_against_threshold(self, client, minimal_env):
+        """A stratum with enough rows but too few events is refused."""
+        df = self._df(30)
+        df.loc[df["arm"] == "a", "event"] = [1] * 5 + [0] * 25
+        _, _, threshold_met = prepare_node_data(
+            client,
+            df,
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            variables_to_stratify={"arm": ["a"]},
+        )
+        assert threshold_met is False
+
+    def test_missing_stratification_variable_raises(self, client, minimal_env):
+        with pytest.raises(UserInputError, match="not found in data columns"):
+            prepare_node_data(
+                client,
+                self._df(60),
+                "time",
+                "event",
+                ["age", "treatment"],
+                need_outcome=True,
+                variables_to_stratify={"nonexistent": [1]},
+            )
+
+    def test_invalid_spec_raises_user_input_error(self, client, minimal_env):
+        with pytest.raises(UserInputError, match="Invalid variables_to_stratify"):
+            prepare_node_data(
+                client,
+                self._df(60),
+                "time",
+                "event",
+                ["age", "treatment"],
+                need_outcome=True,
+                variables_to_stratify={"arm": []},
+            )
+
+    def test_no_stratification_keeps_all_rows(self, client, minimal_env):
+        out, _, threshold_met = prepare_node_data(
+            client, self._df(60), "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is True
+        assert len(out) == 250
 
 
 @pytest.mark.unit

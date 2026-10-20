@@ -51,6 +51,13 @@ def test_methods():
                 "expl_vars": None,
                 "organization_ids": None,
             },
+            "stratification": {
+                "time_col": None,
+                "outcome_col": None,
+                "expl_vars": None,
+                "organization_ids": None,
+                "variables_to_stratify": None,
+            },
         },
     }
 
@@ -78,6 +85,33 @@ def test_configurations():
             "outcome_col": "event",
             "expl_vars": ["age", "treatment"],
             "organisation_subset": [1],
+        },
+        "standard_dataset_stratified": {
+            "database_label": "coxph_test_data_1",
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": ["age", "treatment"],
+            "organisation_subset": [2, 3],
+            "variables_to_stratify": {"sex": ["F"]},
+        },
+        "narrow_stratification": {
+            "database_label": "coxph_test_data_1",
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": ["age", "treatment"],
+            "organisation_subset": [1, 2, 3],
+            "variables_to_stratify": {"age": {"start": 31, "end": 34}},
+            "expected_failure": True,
+            "failure_reason": (
+                "The stratification isolates at most two rows per node, below "
+                "the sample-size threshold; the run fails closed instead of "
+                "fitting the tiny subpopulation."
+            ),
+            "expected_error_type": [
+                CollectResultsError,
+                PrivacyThresholdViolation,
+                AlgorithmError,
+            ],
         },
         "standard_dataset_below_threshold": {
             "database_label": "coxph_test_data_3",
@@ -234,6 +268,63 @@ class TestCoxPHAlgorithmIntegration:
             name=f"Test {method} org selection — {config_name}",
             image=algorithm_image_name,
             description=(f"Integration test for {method} with organisation " f"selection using {config_name}."),
+            input_={"method": method, "kwargs": kwargs},
+            databases=[{"label": config["database_label"]}],
+        )
+
+        if config.get("expected_failure", False):
+            with pytest.raises(Exception) as exc_info:
+                extract_coxph_result(client, task)
+            verify_error_type(exc_info, config)
+        else:
+            result = extract_coxph_result(client, task)
+            determine_model_acceptance(result, config["database_label"], kwargs)
+
+    @pytest.mark.parametrize("method", ["central"])
+    @pytest.mark.parametrize(
+        "config_name",
+        [
+            "standard_dataset_stratified",
+            "narrow_stratification",
+        ],
+    )
+    def test_algorithm_stratification(
+        self,
+        authentication,
+        algorithm_image_name,
+        test_configurations,
+        test_methods,
+        method,
+        config_name,
+    ):
+        """
+        Test STRONG AYA stratification (subpopulation selection).
+
+        A stratified run analyses only the rows inside the requested
+        subpopulation; the empirical check compares against a centralised
+        fit on the same filtered rows. A stratification that isolates a
+        handful of records fails closed.
+        """
+        client = authentication
+        config = test_configurations[config_name]
+        method_config = test_methods[method]
+
+        if "stratification" not in method_config:
+            pytest.skip(f"Stratification not supported for {method}")
+
+        kwargs = method_config["stratification"].copy()
+        kwargs["time_col"] = config["time_col"]
+        kwargs["outcome_col"] = config["outcome_col"]
+        kwargs["expl_vars"] = config["expl_vars"]
+        kwargs["organization_ids"] = config["organisation_subset"]
+        kwargs["variables_to_stratify"] = config["variables_to_stratify"]
+
+        task = client.task.create(
+            collaboration=1,
+            organizations=[1],
+            name=f"Test {method} stratification — {config_name}",
+            image=algorithm_image_name,
+            description=(f"Integration test for {method} with stratification " f"using {config_name}."),
             input_={"method": method, "kwargs": kwargs},
             databases=[{"label": config["database_label"]}],
         )
@@ -501,6 +592,29 @@ def verify_error_type(exc_info, config: dict) -> None:
     print(f"Expected failure occurred for {config}: {exc_info.value}")
 
 
+def _apply_stratification_filter(df: pd.DataFrame, variables_to_stratify: Dict[str, Any]) -> pd.DataFrame:
+    """Apply a variables_to_stratify spec to a dataframe (pandas equivalent).
+
+    Mirrors what the nodes do with ``apply_data_stratification``: every
+    variable's value list or start/end range selects rows; the conditions
+    compose with AND.
+    """
+    out = df
+    for variable, selection in variables_to_stratify.items():
+        if isinstance(selection, dict):
+            start = selection.get("start")
+            end = selection.get("end")
+            mask = pd.Series(True, index=out.index)
+            if start is not None:
+                mask &= out[variable] >= start
+            if end is not None:
+                mask &= out[variable] <= end
+            out = out[mask]
+        else:
+            out = out[out[variable].isin(selection)]
+    return out
+
+
 def determine_model_acceptance(
     federated_result: Dict[str, Any],
     database_label: str,
@@ -561,6 +675,12 @@ def determine_model_acceptance(
     assert dataset_file.exists(), f"Test dataset not found: {dataset_file}"
 
     df = pd.read_csv(dataset_file)
+
+    # A stratified run analyses only the rows inside the requested
+    # subpopulation; the reference is built on the same filtered rows.
+    variables_to_stratify = kwargs.get("variables_to_stratify")
+    if variables_to_stratify:
+        df = _apply_stratification_filter(df, variables_to_stratify)
 
     time_col = kwargs["time_col"]
     outcome_col = kwargs["outcome_col"]
