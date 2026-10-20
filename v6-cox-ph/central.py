@@ -42,6 +42,16 @@ MAX_ITERATIONS = 20
 # node's events was scored against a held (unchanged) risk set.
 HELD_FRACTION_WARN_THRESHOLD = 0.25
 
+# Convergence tolerances for the Newton-Raphson loop. The primary
+# tolerance is the exactness target: converged when max |step| <=
+# STEP_TOLERANCE. The secondary tolerance declares convergence when the
+# log-likelihood stops improving beyond the released-precision jitter
+# (ll_tolerance) for two consecutive accepted evaluations while the step
+# stays below STABLE_STEP_TOLERANCE — coarse aggregate rounding can stall
+# the step above the primary tolerance without the fit having moved.
+STEP_TOLERANCE = 1e-6
+STABLE_STEP_TOLERANCE = 1e-3
+
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
@@ -279,7 +289,9 @@ def central(
     last_step: np.ndarray | None = None
     converged = False
     convergence_cause: str | None = None
+    convergence_tolerance = STEP_TOLERANCE
     held_fraction_warning: str | None = None
+    stable_streak = 0
     epoch = 0
 
     for epoch in range(epochs):
@@ -389,7 +401,15 @@ def central(
         )
 
         # Accept this evaluation: the reported beta, Hessian and summed_agg1
-        # stay evaluated at the same beta.
+        # stay evaluated at the same beta. A log-likelihood gain within the
+        # released-precision jitter means the likelihood has stopped
+        # improving measurably; two consecutive such accepted evaluations
+        # arm the secondary convergence test below.
+        if accepted is not None:
+            if abs(ll_here - accepted["log_likelihood"]) <= ll_tolerance:
+                stable_streak += 1
+            else:
+                stable_streak = 0
         accepted = {
             "beta": beta,
             "secondary": secondary_derivative,
@@ -411,9 +431,19 @@ def central(
             warn(convergence_cause)
             break
 
-        if delta <= 0.000001:
+        if delta <= STEP_TOLERANCE:
             info("Betas have settled! Finished iterating!")
             converged = True
+            break
+
+        if stable_streak >= 2 and delta <= STABLE_STEP_TOLERANCE:
+            # The log-likelihood has not improved beyond the
+            # released-precision jitter for two consecutive accepted
+            # evaluations while the step stays small: the fit has settled
+            # at the released precision.
+            info("Betas have settled at the released precision! Finished iterating!")
+            converged = True
+            convergence_tolerance = STABLE_STEP_TOLERANCE
             break
 
         if epoch == epochs - 1:
@@ -487,6 +517,7 @@ def central(
         "warnings": model["warnings"] + central_warnings,
         "converged": converged,
         "n_iterations": n_iterations,
+        "convergence_tolerance": convergence_tolerance,
         "log_likelihood": log_likelihood,
         "log_likelihood_null": log_likelihood_null,
         "lr_statistic": lr_statistic,
