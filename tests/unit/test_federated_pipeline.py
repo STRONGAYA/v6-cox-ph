@@ -642,17 +642,16 @@ class TestDefaultGuardsPrivacyProperty:
     def test_coefficients_within_loose_bound(self, monkeypatch):
         """With default guards, coefficients stay within 0.1 of lifelines.
 
-        The scenario uses 200-row nodes (the bias-study size): there the
-        default floor R=50 holds only the tail of each node's risk-set
-        trajectory, so the guards approximate the fit. Nodes at the
-        reconstruction bound (50 rows) are a different regime — the floor
-        holds nearly the whole trajectory and the estimates are approximate
-        by design; that regime is covered by the privacy-property test
-        above, not by a closeness bound.
+        The scenario uses 150-row nodes — exactly the standard level's
+        admission bound (max(10 x k=5, 3 x R=50) = 150 rows), so this is
+        the smallest node size the default guards admit. There the default
+        floor R=50 holds only the tail of each node's risk-set
+        trajectory, so the guards approximate the fit. Smaller nodes are
+        refused by the admission bound (TestAdmissionBound below).
         """
         monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
         monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
-        datasets = _simulate_survival_data(20261005)
+        datasets = _simulate_survival_data(20261005, n_rows=150)
         result = _run_central(
             [[{"database": df, "db_type": "csv"}] for df in datasets],
             [1, 2, 3],
@@ -1725,3 +1724,213 @@ class TestReleasedAggregatePrecision:
         assert int(times["freq"].sum()) == int(df["event"].sum())
         assert set(times["time"].tolist()) <= set(df["time"].tolist())
         assert len(times) < n_events
+
+
+@pytest.mark.unit
+class TestAdmissionBound:
+    """Nodes below the admission bound are refused (fail closed).
+
+    The standard level admits a node only above max(factor * k, 3 x R) =
+    max(10 x 5, 3 x 50) = 150 rows: a smaller node would have (nearly)
+    its whole content inside the smallest released risk set, which the
+    floor alone cannot hide.
+    """
+
+    def test_small_nodes_refused(self, monkeypatch):
+        """50- and 100-row nodes under the default guards fail closed."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        for n_rows in (50, 100):
+            datasets = _simulate_survival_data(20261005, n_rows=n_rows)
+            with pytest.raises(PrivacyThresholdViolation):
+                _run_central(
+                    [[{"database": df, "db_type": "csv"}] for df in datasets],
+                    [1, 2, 3],
+                    expl_vars=["x1", "x2"],
+                )
+
+    def test_admitted_nodes_held_fraction_below_warn_threshold(self, monkeypatch):
+        """200-row nodes: the held-event fraction stays below the warn threshold."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        datasets = _simulate_survival_data(20261005)
+        result = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        held = result["privacy_guards"]["max_held_event_fraction"]
+        assert held == pytest.approx(0.05825242718446602)
+        assert held < 0.25
+        assert not any("held" in w.lower() for w in result["warnings"])
+
+
+@pytest.mark.unit
+class TestHeldEventFractionAbort:
+    """Central aborts when the held-event fraction exceeds the configured cap.
+
+    The construction: 185 rows censored at time 1 and 15 events at times
+    2..16 on a single 200-row node (above the admission bound). The tail
+    censoring (k=5) removes the four latest events, the small-count
+    suppression merges the remaining singletons into five grid points,
+    and every risk set is below the floor R=50, so the floor holds the
+    whole trajectory at the first release: 9 of the 11 remaining events
+    are scored against the held (unchanged) risk set.
+    """
+
+    @staticmethod
+    def _node():
+        return pd.DataFrame(
+            {
+                "time": [1.0] * 185 + [float(t) for t in range(2, 17)],
+                "event": [0] * 185 + [1] * 15,
+                "x1": np.linspace(-1.0, 1.0, 200),
+            }
+        )
+
+    def test_aborts_at_default_cap(self, monkeypatch):
+        """A held-event fraction above the cap raises UserInputError."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MAX_HELD_EVENT_FRACTION", raising=False)
+        with pytest.raises(UserInputError, match=r"exceeds the configured cap 0\.5 \(COXPH_MAX_HELD_EVENT_FRACTION\)"):
+            _run_central([[{"database": self._node(), "db_type": "csv"}]], [1], expl_vars=["x1"])
+
+    def test_cap_disabled_completes_and_reports(self, monkeypatch):
+        """With the abort disabled the run completes and reports the fraction."""
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.setenv("COXPH_MAX_HELD_EVENT_FRACTION", "")
+        result = _run_central([[{"database": self._node(), "db_type": "csv"}]], [1], expl_vars=["x1"])
+        assert result["privacy_guards"]["max_held_event_fraction"] == pytest.approx(9 / 11)
+        assert any("held" in w.lower() and "0.818" in w for w in result["warnings"])
+
+    def test_below_cap_reports_diagnostic(self, monkeypatch):
+        """A held fraction in (0.25, 0.5) warns but does not abort.
+
+        185 rows censored at time 1, 12 events at time 2 and one event at
+        each of times 3..12: the tail censoring keeps 18 events, the
+        suppression releases them at time 2 (12 events) and at times 4, 6
+        and 8 (2 each), and every risk set is below the floor, so the
+        release stays at the first grid point: 6 of the 18 events are
+        scored against the held risk set.
+        """
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MAX_HELD_EVENT_FRACTION", raising=False)
+        df = pd.DataFrame(
+            {
+                "time": [1.0] * 185 + [2.0] * 12 + [float(t) for t in range(3, 13)],
+                "event": [0] * 185 + [1] * 22,
+                "x1": np.linspace(-1.0, 1.0, 207),
+            }
+        )
+        result = _run_central([[{"database": df, "db_type": "csv"}]], [1], expl_vars=["x1"])
+        assert result["privacy_guards"]["max_held_event_fraction"] == pytest.approx(6 / 18)
+        assert any("held" in w.lower() and "0.333" in w for w in result["warnings"])
+
+
+@pytest.mark.unit
+class TestStrictPrivacyLevel:
+    """The strict bundle converges on 400-row nodes (the scaled tolerance)."""
+
+    def test_strict_converges_within_budget(self, monkeypatch):
+        """strict on 400-row nodes: converged within 20 iterations, coefficients within 0.1."""
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "strict")
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        monkeypatch.delenv("COXPH_AGGREGATE_SIG_FIGS", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+        monkeypatch.delenv("COXPH_RECONSTRUCTION_ROW_FACTOR", raising=False)
+        datasets = _simulate_survival_data(20261005, n_rows=400)
+        result = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        assert result["converged"] is True
+        assert result["n_iterations"] <= 20
+        # The strict bundle's 4-significant-figure aggregates cannot support
+        # the primary step tolerance: convergence comes from the secondary
+        # (stability) tolerance.
+        assert result["convergence_tolerance"] == pytest.approx(central_module.STABLE_STEP_TOLERANCE)
+        ref = _lifelines_reference(pd.concat(datasets), ["x1", "x2"])
+        model = pd.DataFrame(result["model"]).T
+        for var in ["x1", "x2"]:
+            assert abs(model.loc[var, "Coef"] - ref["coef"][var]) <= 0.1, (
+                f"coef {var}: fed={model.loc[var, 'Coef']}, " f"ref={ref['coef'][var]}"
+            )
+
+
+def _move_event_times_up(df, time_col, outcome_col, min_count):
+    """Move event rows' times up to their merged time (test-side reference).
+
+    An independent reimplementation of the suppression merge: per-time
+    event counts accumulate until they reach ``min_count``; the group is
+    emitted at its largest time and its event rows move there. A trailing
+    group below the minimum merges backward into the previous emitted
+    group; when nothing was emitted the whole grid is one group at the
+    last time. Censored rows keep their time.
+    """
+    counts = df[df[outcome_col] == 1][time_col].value_counts().sort_index()
+    times = counts.index.tolist()
+    move_to = {}
+    group_count = 0
+    group = []
+    emitted = None
+    for t, f in zip(times, counts.to_numpy().tolist()):
+        group.append(t)
+        group_count += int(f)
+        if group_count >= min_count:
+            for gt in group:
+                move_to[gt] = t
+            emitted = t
+            group = []
+            group_count = 0
+    for gt in group:
+        move_to[gt] = emitted if emitted is not None else times[-1]
+    moved = df.copy()
+    event_mask = moved[outcome_col] == 1
+    moved.loc[event_mask, time_col] = moved.loc[event_mask, time_col].map(move_to)
+    return moved
+
+
+@pytest.mark.unit
+class TestSuppressionConsistency:
+    """The suppression move equals a run on explicitly right-moved data.
+
+    Run A analyses the original data with the small-count suppression on
+    (standard level, k=1 so no risk-set guard interferes): perform_iteration
+    moves the event rows' times up to their merged time. Run B analyses
+    data the test moved explicitly the same way, with the suppression off
+    (COXPH_MIN_TIME_EVENT_COUNT=1). Both runs must agree on every result
+    field except the guards summary and the warnings, which describe the
+    active guards rather than the fit.
+    """
+
+    def test_move_matches_explicitly_moved_data(self, monkeypatch):
+        monkeypatch.setenv("COXPH_MIN_RISK_SET_CHANGE", "1")
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_PRIVACY_LEVEL", raising=False)
+        monkeypatch.delenv("COXPH_MIN_TIME_EVENT_COUNT", raising=False)
+        datasets = _simulate_survival_data(20261005)
+        moved = [_move_event_times_up(df, "time", "event", 2) for df in datasets]
+
+        suppressed = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in datasets],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+        monkeypatch.setenv("COXPH_MIN_TIME_EVENT_COUNT", "1")
+        explicit = _run_central(
+            [[{"database": df, "db_type": "csv"}] for df in moved],
+            [1, 2, 3],
+            expl_vars=["x1", "x2"],
+        )
+
+        assert set(suppressed) == set(explicit)
+        for key in suppressed:
+            if key in ("warnings", "privacy_guards"):
+                continue
+            assert suppressed[key] == explicit[key], f"result key {key!r} differs"

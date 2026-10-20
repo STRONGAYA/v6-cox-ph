@@ -32,10 +32,13 @@ bin_times = privacy_guards.bin_times
 check_sample_size = privacy_guards.check_sample_size
 drop_incomplete_rows = privacy_guards.drop_incomplete_rows
 ensure_spawned_by_central = privacy_guards.ensure_spawned_by_central
+event_time_counts = privacy_guards.event_time_counts
 guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
 load_curve_time_sig_figs = privacy_guards.load_curve_time_sig_figs
+load_max_held_event_fraction = privacy_guards.load_max_held_event_fraction
 load_privacy_settings = privacy_guards.load_privacy_settings
 load_resource_caps = privacy_guards.load_resource_caps
+merged_time_map = privacy_guards.merged_time_map
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
 quantise_wire_aggregates = privacy_guards.quantise_wire_aggregates
@@ -275,6 +278,37 @@ class TestLoadCurveTimeSigFigs:
         monkeypatch.setenv("COXPH_CURVE_TIME_SIG_FIGS", "fine")
         with pytest.raises(UserInputError, match="COXPH_CURVE_TIME_SIG_FIGS"):
             load_curve_time_sig_figs()
+
+
+@pytest.mark.unit
+class TestLoadMaxHeldEventFraction:
+    """Tests for load_max_held_event_fraction (the central abort cap)."""
+
+    @pytest.fixture
+    def clean_env(self, monkeypatch):
+        monkeypatch.delenv("COXPH_MAX_HELD_EVENT_FRACTION", raising=False)
+
+    def test_default(self, clean_env):
+        """The abort cap defaults to 0.5."""
+        assert load_max_held_event_fraction() == 0.5
+
+    def test_empty_string_disables_the_abort(self, clean_env, monkeypatch):
+        """An empty COXPH_MAX_HELD_EVENT_FRACTION disables the abort."""
+        monkeypatch.setenv("COXPH_MAX_HELD_EVENT_FRACTION", "")
+        assert load_max_held_event_fraction() is None
+
+    def test_custom_value(self, clean_env, monkeypatch):
+        monkeypatch.setenv("COXPH_MAX_HELD_EVENT_FRACTION", "0.75")
+        assert load_max_held_event_fraction() == 0.75
+        monkeypatch.setenv("COXPH_MAX_HELD_EVENT_FRACTION", "1")
+        assert load_max_held_event_fraction() == 1.0
+
+    def test_invalid_values_raise(self, clean_env, monkeypatch):
+        """Values outside (0, 1] raise UserInputError naming the variable."""
+        for raw in ("0", "1.5", "-0.2", "abc", "nan", "inf"):
+            monkeypatch.setenv("COXPH_MAX_HELD_EVENT_FRACTION", raw)
+            with pytest.raises(UserInputError, match="COXPH_MAX_HELD_EVENT_FRACTION"):
+                load_max_held_event_fraction()
 
 
 @pytest.mark.unit
@@ -842,6 +876,82 @@ class TestSuppressSmallTimeCounts:
 
 
 @pytest.mark.unit
+class TestMergedTimeMap:
+    """Tests for merged_time_map (the suppression merge, exact values)."""
+
+    def test_min_count_one_is_identity(self):
+        times = np.array([1.0, 2.0, 3.0])
+        mapped = merged_time_map(times, np.array([1, 5, 2]), 1)
+        np.testing.assert_array_equal(mapped, times)
+        assert mapped.dtype == np.float64
+
+    def test_none_min_count_is_identity(self):
+        times = np.array([1.0, 2.0, 3.0])
+        np.testing.assert_array_equal(merged_time_map(times, np.array([1, 5, 2]), None), times)
+
+    def test_empty_input(self):
+        mapped = merged_time_map(np.array([]), np.array([]), 2)
+        assert mapped.shape == (0,)
+        assert mapped.dtype == np.float64
+
+    def test_groups_emit_at_largest_time(self):
+        """Counts accumulate until they reach the minimum; the group maps to its largest time."""
+        times = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        freqs = np.array([1, 1, 3, 1, 1])
+        np.testing.assert_array_equal(merged_time_map(times, freqs, 2), [2.0, 2.0, 3.0, 5.0, 5.0])
+
+    def test_trailing_group_merges_backward(self):
+        """A trailing group below the minimum maps to the previous emitted time."""
+        times = np.array([1.0, 2.0])
+        freqs = np.array([3, 1])
+        np.testing.assert_array_equal(merged_time_map(times, freqs, 2), [1.0, 1.0])
+
+    def test_whole_grid_one_group_at_last_time(self):
+        """Nothing reaches the minimum: the whole grid merges to the last time."""
+        times = np.array([1.0, 2.0, 3.0])
+        freqs = np.array([1, 1, 1])
+        np.testing.assert_array_equal(merged_time_map(times, freqs, 5), [3.0, 3.0, 3.0])
+
+    def test_single_time_unchanged(self):
+        np.testing.assert_array_equal(merged_time_map(np.array([7.0]), np.array([1]), 5), [7.0])
+
+    def test_every_value_is_an_input_time(self):
+        """The map is non-decreasing and every value is one of the input times."""
+        rng = np.random.default_rng(0)
+        times = np.unique(np.sort(rng.uniform(0, 100, size=50)))
+        freqs = rng.integers(1, 4, size=len(times))
+        for min_count in (1, 2, 3, 5):
+            mapped = merged_time_map(times, freqs, min_count)
+            assert mapped.shape == times.shape
+            assert set(mapped.tolist()) <= set(times.tolist())
+            assert np.all(np.diff(mapped) >= 0)
+
+
+@pytest.mark.unit
+class TestEventTimeCounts:
+    """Tests for event_time_counts (the per-time event counts frame)."""
+
+    def test_counts_per_time_sorted(self):
+        df = pd.DataFrame({"time": [3.0, 1.0, 3.0, 2.0, 3.0, 1.0], "event": [1, 1, 0, 1, 1, 0], "x1": [0.0] * 6})
+        counts = event_time_counts(df, "time", "event")
+        assert counts.columns.tolist() == ["time", "freq"]
+        assert counts["time"].tolist() == [1.0, 2.0, 3.0]
+        assert counts["freq"].tolist() == [1, 1, 2]
+
+    def test_only_event_rows_counted(self):
+        df = pd.DataFrame({"time": [1.0, 1.0, 2.0], "event": [0, 0, 1]})
+        counts = event_time_counts(df, "time", "event")
+        assert counts["time"].tolist() == [2.0]
+        assert counts["freq"].tolist() == [1]
+
+    def test_no_events_empty_frame_with_columns(self):
+        df = pd.DataFrame({"time": [1.0, 2.0], "event": [0, 0]})
+        counts = event_time_counts(df, "time", "event")
+        assert counts.columns.tolist() == ["time", "freq"]
+        assert len(counts) == 0
+
+
+@pytest.mark.unit
 class TestPrepareTimeColumn:
     """Tests for prepare_time_column."""
 
@@ -907,6 +1017,93 @@ class TestPrepareTimeColumn:
         for i in range(6, 10):
             assert out.loc[i, "time"] == 6.0
         assert "event" not in out.columns
+
+
+@pytest.mark.unit
+class TestPrepareTimeColumnMove:
+    """Tests for the event-time move in prepare_time_column (move_event_times)."""
+
+    @pytest.fixture
+    def settings(self):
+        # k=5 (tail censoring on), small-count suppression at the standard
+        # level's minimum of 2.
+        return PrivacySettings(sample_size_threshold=10, time_bin_width=None, min_risk_set_change=5)
+
+    def test_events_move_to_merged_time(self, settings):
+        """Event rows move up to their merged time; censored rows keep theirs."""
+        df = pd.DataFrame(
+            {
+                "time": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                "event": [1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+            }
+        )
+        out = prepare_time_column(df, "time", settings, "event", move_event_times=True)
+        # Tail censoring (k=5): t_cut = 6.0, rows past it clamped and censored.
+        # The three singleton events merge: the group reaches the minimum of 2
+        # at time 2, and the trailing singleton at time 3 merges backward into
+        # it, so all three events move to time 2.
+        assert out["time"].tolist() == [2.0, 2.0, 2.0, 4.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0]
+        assert out["event"].tolist() == [1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
+
+    def test_no_move_when_suppression_off(self, settings):
+        """min_time_event_count <= 1 disables the move (tail censoring still runs)."""
+        df = pd.DataFrame({"time": [float(t) for t in range(1, 11)], "event": [1, 1, 1] + [0] * 7})
+        settings_off = PrivacySettings(
+            sample_size_threshold=10, time_bin_width=None, min_risk_set_change=5, min_time_event_count=1
+        )
+        out = prepare_time_column(df, "time", settings_off, "event", move_event_times=True)
+        assert out["time"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0]
+
+    def test_no_move_without_outcome_col(self, settings):
+        """Without an outcome column there is nothing to move."""
+        df = pd.DataFrame({"time": [float(t) for t in range(1, 11)], "other": [1] * 10})
+        out = prepare_time_column(df, "time", settings, outcome_col=None, move_event_times=True)
+        assert out["time"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0]
+
+    def test_default_is_no_move(self, settings):
+        """move_event_times defaults to False (compute_summed_z's payload)."""
+        df = pd.DataFrame({"time": [float(t) for t in range(1, 11)], "event": [1, 1, 1] + [0] * 7})
+        out = prepare_time_column(df, "time", settings, "event")
+        assert out["time"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 6.0, 6.0, 6.0]
+
+    def test_merged_times_never_exceed_tail_cutoff(self, settings):
+        """The tail censoring runs first: a merged time never exceeds t_cut."""
+        # Events at 5 and 6 (count 1 each) merge to 6; t_cut = 5th largest = 6.
+        df = pd.DataFrame(
+            {
+                "time": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                "event": [0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+            }
+        )
+        out = prepare_time_column(df, "time", settings, "event", move_event_times=True)
+        events = out[out["event"] == 1]
+        assert events["time"].tolist() == [6.0, 6.0]
+        assert events["time"].max() <= 6.0  # t_cut
+
+    def test_integer_time_column_keeps_its_values(self, settings):
+        """An integer time column keeps integer-valued times after the move."""
+        df = pd.DataFrame({"time": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "event": [1, 1, 1, 0, 0, 0, 0, 0, 0, 0]})
+        out = prepare_time_column(df, "time", settings, "event", move_event_times=True)
+        assert out["time"].tolist() == [2, 2, 2, 4, 5, 6, 6, 6, 6, 6]
+        assert not out["time"].isna().any()
+
+    def test_move_preserves_rows_and_events(self, settings):
+        """The move changes times only: same rows, same events.
+
+        All events sit at or below the tail cut-off, so the tail censoring
+        leaves the outcome column alone and any change would come from the
+        move itself.
+        """
+        df = pd.DataFrame(
+            {
+                "time": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                "event": [1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+            }
+        )
+        out = prepare_time_column(df, "time", settings, "event", move_event_times=True)
+        assert len(out) == len(df)
+        assert out["event"].tolist() == df["event"].tolist()
+        assert int(out["event"].sum()) == int(df["event"].sum())
 
 
 @pytest.mark.unit

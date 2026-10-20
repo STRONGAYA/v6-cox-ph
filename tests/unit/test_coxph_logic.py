@@ -20,6 +20,7 @@ from coxph_logic import (  # noqa: E402
     compute_derivatives,
     compute_model_results,
     format_results_dataframe,
+    held_event_fraction,
     survival_curves,
 )
 
@@ -349,3 +350,35 @@ class TestFormatResultsDataframe:
         df = format_results_dataframe(results_data, ["age", "treatment"])
         assert df.loc["age", "Coef"] == 0.5
         assert df.loc["treatment", "Coef"] == -0.3
+
+
+@pytest.mark.unit
+class TestHeldEventFraction:
+    """Tests for held_event_fraction (the held-risk-set diagnostic)."""
+
+    def test_guards_off_is_zero(self):
+        """With the risk-set guards off (k <= 1) nothing can be held."""
+        assert held_event_fraction([10.0, 10.0, 10.0], [2, 3, 5], 1) == 0.0
+        assert held_event_fraction([10.0, 10.0, 10.0], [2, 3, 5], 0) == 0.0
+
+    def test_first_grid_point_never_held(self):
+        """The first release is always released: it never counts as held."""
+        # The release stays at the first grid point: every later grid point
+        # is held, so the held events are those of grid points 1 and 2.
+        assert held_event_fraction([10.0, 10.0, 10.0], [4, 3, 3], 5) == pytest.approx(6 / 10)
+
+    def test_released_sets_do_not_count_as_held(self):
+        """A release after the first is not held, even where it later repeats."""
+        # Grid point 1 is held at the first release (3 events); grid points
+        # 2 and 3 are released at 5 and held there — a released set equal to
+        # the first release is what counts, so only 3 of 10 events are held.
+        assert held_event_fraction([10.0, 10.0, 5.0, 5.0], [4, 3, 1, 2], 5) == pytest.approx(3 / 10)
+
+    def test_nothing_held_when_all_released(self):
+        assert held_event_fraction([10.0, 8.0, 5.0], [4, 3, 3], 5) == 0.0
+
+    def test_no_events_is_zero(self):
+        assert held_event_fraction([10.0, 10.0], [0, 0], 5) == 0.0
+
+    def test_single_grid_point_is_zero(self):
+        assert held_event_fraction([10.0], [7], 5) == 0.0
