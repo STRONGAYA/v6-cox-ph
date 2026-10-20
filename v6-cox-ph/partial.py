@@ -20,6 +20,7 @@ from vantage6.algorithm.tools.util import info
 
 from .miscellaneous import IterationResult, SummedZResult
 from .privacy_guards import (
+    event_time_counts,
     guarded_risk_set_aggregates,
     prepare_node_data,
     prepare_time_column,
@@ -79,10 +80,7 @@ def compute_summed_z(
         # Also return per-time event counts from the same NaN-dropped,
         # censored DataFrame so that central can build aggregated_time_events
         # that are consistent with z_sum and the risk sets.
-        times = events.groupby(time_col, as_index=False).count()
-        times = times.sort_values(by=time_col)[[time_col, outcome_col]]
-        times["freq"] = times[outcome_col]
-        times = times.drop(columns=outcome_col)
+        times = event_time_counts(df, time_col, outcome_col)
 
         # Small-cell suppression on the event-time grid: per-time counts below
         # the configured minimum are merged into the following time.
@@ -184,7 +182,10 @@ def perform_iteration(
             beta, centre, scale, unique_time_events, expl_vars, settings
         )
 
-        df = prepare_time_column(df, time_col, settings, outcome_col)
+        # Move the event rows' times up to their suppressed (merged) time so
+        # that the risk sets match the event grid central builds from the
+        # times payload; censored rows keep their time.
+        df = prepare_time_column(df, time_col, settings, outcome_col, move_event_times=True)
 
         X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
 

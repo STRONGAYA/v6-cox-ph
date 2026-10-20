@@ -42,7 +42,10 @@ via ``get_env_var``:
   requires ``rows >= factor * k``, so a node stays many times larger than the
   smallest released group.
 - ``COXPH_MIN_TIME_EVENT_COUNT`` (int >= 1) — per-time event counts below this
-  are merged into the following time before they are shared.
+  are merged into the following time before they are shared. In
+  ``perform_iteration`` the event rows' times are also moved up to their
+  merged time (censored rows keep their time), so the risk sets match the
+  shared grid; see ``prepare_time_column``.
 - ``COXPH_AGGREGATE_SIG_FIGS`` (int >= 1; an empty string disables rounding) —
   released risk-set aggregates are rounded to this many significant figures.
 - ``COXPH_MIN_RISK_SET_SIZE`` (int >= 1; an empty string disables the floor) —
@@ -987,6 +990,59 @@ def tail_cutoff(times: pd.Series, k: int) -> float | None:
     return float(np.sort(vals)[-k])
 
 
+def merged_time_map(times, freqs, min_count: int) -> np.ndarray:
+    """Map each event time to its merged time under small-cell suppression.
+
+    The single source of truth for the suppression merge, used both by
+    ``suppress_small_time_counts`` (which reduces this map to the unique
+    merged times and their summed counts) and by the event-time move in
+    ``prepare_time_column``: walking the ascending grid, a group accumulates
+    counts until it reaches ``min_count`` and is then emitted at its largest
+    time — every time of the group maps to that emitted time. A trailing
+    group that never reaches ``min_count`` merges backward into the previous
+    emitted group (its times map to that group's time); when nothing was
+    emitted, the whole grid is one group at the last time.
+
+    Parameters
+    ----------
+    times : array-like
+        Sorted unique event times (float, ascending).
+    freqs : array-like
+        Positive integer event counts, one per time.
+    min_count : int
+        The minimum released per-time count. ``min_count <= 1`` (or ``None``)
+        maps every time to itself.
+
+    Returns
+    -------
+    np.ndarray
+        The merged time per input time, float64, same length as ``times``;
+        every value is one of the input times.
+    """
+    times_arr = np.asarray(times, dtype=float)
+    mapped = times_arr.astype(np.float64)
+    if min_count is None or min_count <= 1 or times_arr.size == 0:
+        return mapped
+
+    group_count = 0
+    group_start = 0
+    emitted_time: Optional[float] = None
+    for i in range(times_arr.size):
+        group_count += int(freqs[i])
+        if group_count >= min_count:
+            # Times ascend, so times_arr[i] is the largest time of the group.
+            mapped[group_start : i + 1] = times_arr[i]
+            emitted_time = float(times_arr[i])
+            group_count = 0
+            group_start = i + 1
+    if group_count > 0:
+        # Trailing group below the minimum: merge it backward into the
+        # previous emitted group; when nothing was emitted the whole grid is
+        # one group at the last time.
+        mapped[group_start:] = emitted_time if emitted_time is not None else times_arr[-1]
+    return mapped
+
+
 def suppress_small_time_counts(times, freqs, min_count: int) -> tuple[np.ndarray, np.ndarray]:
     """Suppress small per-time event counts on the event-time grid.
 
@@ -1001,6 +1057,8 @@ def suppress_small_time_counts(times, freqs, min_count: int) -> tuple[np.ndarray
     ``min_count`` and at least one group was already emitted, it is merged
     backward into the previous emitted group (its count is added, the
     previous group's time is kept); a single-time grid is emitted unchanged.
+    The merge itself is defined by ``merged_time_map``; this function reduces
+    its output to the unique merged times with their summed counts.
 
     Parameters
     ----------
@@ -1023,28 +1081,42 @@ def suppress_small_time_counts(times, freqs, min_count: int) -> tuple[np.ndarray
     if min_count is None or min_count <= 1 or times_arr.size == 0:
         return times_arr.astype(np.float64), freqs_arr.astype(np.int64)
 
-    merged_times: list[float] = []
-    merged_counts: list[int] = []
-    group_count = 0
-    group_time = 0.0
-    for t, f in zip(times_arr, freqs_arr):
-        # Times ascend, so t is the largest time of the group so far.
-        group_time = float(t)
-        group_count += int(f)
-        if group_count >= min_count:
-            merged_times.append(group_time)
-            merged_counts.append(group_count)
-            group_count = 0
-    if group_count > 0:
-        if merged_times:
-            # Trailing group below the minimum: merge it backward into the
-            # previous emitted group.
-            merged_counts[-1] += group_count
-        else:
-            # Nothing was emitted yet: the whole grid is one group.
-            merged_times.append(group_time)
-            merged_counts.append(group_count)
-    return np.asarray(merged_times, dtype=np.float64), np.asarray(merged_counts, dtype=np.int64)
+    mapped = merged_time_map(times_arr, freqs_arr, min_count)
+    merged_times = np.unique(mapped)
+    merged_counts = np.zeros(merged_times.shape, dtype=np.int64)
+    np.add.at(merged_counts, np.searchsorted(merged_times, mapped), freqs_arr.astype(np.int64))
+    return merged_times, merged_counts
+
+
+def event_time_counts(df: pd.DataFrame, time_col: str, outcome_col: str) -> pd.DataFrame:
+    """Per-time event counts of a node's (prepared) DataFrame.
+
+    The event rows (``outcome == 1``) grouped by the time column and sorted
+    by time, as a DataFrame with columns ``[time_col, "freq"]`` — the same
+    shape as the ``times`` payload of ``compute_summed_z``. Both partials
+    derive the event grid from the same prepared frame, so the shared grid
+    and the risk sets describe the same rows.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The node's prepared data (binned and tail-censored times).
+    time_col : str
+        Name of the time column.
+    outcome_col : str
+        Name of the outcome column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``[time_col, "freq"]``, ascending by time; empty (with the
+        same columns) when the frame holds no events.
+    """
+    events = df[df[outcome_col] == 1]
+    counts = events.groupby(time_col, as_index=False).count()
+    counts = counts.sort_values(by=time_col)[[time_col, outcome_col]]
+    counts["freq"] = counts[outcome_col]
+    return counts.drop(columns=outcome_col)
 
 
 def prepare_time_column(
@@ -1052,6 +1124,8 @@ def prepare_time_column(
     time_col: str,
     settings: PrivacySettings,
     outcome_col: str | None = None,
+    *,
+    move_event_times: bool = False,
 ) -> pd.DataFrame:
     """Bin and tail-censor the time column of a node's DataFrame.
 
@@ -1059,6 +1133,17 @@ def prepare_time_column(
     configured grid, compute the tail cut-off from the (binned) times, clamp
     rows past the cut-off to ``t_cut`` and, when an outcome column is given,
     set their event to 0 (administrative censoring).
+
+    With ``move_event_times=True`` and an outcome column, the small-count
+    suppression is made consistent: the node's merged event times are
+    recomputed deterministically from its event counts (``merged_time_map``)
+    and the event rows' times are moved up to their merged time, while
+    censored rows keep their time. The analysed rows, the shared event grid
+    and the risk sets then describe the same event times, so the partial
+    likelihood matches the suppressed ``times`` payload shared by
+    ``compute_summed_z``. The move applies whenever ``min_time_event_count >
+    1``, whatever the risk-set guards; the tail censoring runs first, so a
+    merged time never exceeds ``t_cut``.
 
     The input is not modified; a copy is returned.
     """
@@ -1075,6 +1160,15 @@ def prepare_time_column(
             out.loc[clamp_mask, time_col] = t_cut
             if outcome_col is not None and outcome_col in out.columns:
                 out.loc[clamp_mask, outcome_col] = 0
+
+    if move_event_times and outcome_col is not None and settings.min_time_event_count > 1:
+        counts = event_time_counts(out, time_col, outcome_col)
+        if not counts.empty:
+            time_values = counts[time_col].to_numpy(dtype=float)
+            mapped = merged_time_map(time_values, counts["freq"].to_numpy(), settings.min_time_event_count)
+            move_to = dict(zip(time_values.tolist(), mapped.tolist()))
+            event_mask = out[outcome_col] == 1
+            out.loc[event_mask, time_col] = out.loc[event_mask, time_col].map(move_to)
 
     return out
 
