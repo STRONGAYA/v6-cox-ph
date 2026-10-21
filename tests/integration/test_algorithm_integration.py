@@ -677,10 +677,9 @@ def determine_model_acceptance(
     df = pd.read_csv(dataset_file)
 
     # A stratified run analyses only the rows inside the requested
-    # subpopulation; the reference is built on the same filtered rows.
+    # subpopulation; the reference is built on the same rows (filtered per
+    # node slice below, mirroring the network's order).
     variables_to_stratify = kwargs.get("variables_to_stratify")
-    if variables_to_stratify:
-        df = _apply_stratification_filter(df, variables_to_stratify)
 
     time_col = kwargs["time_col"]
     outcome_col = kwargs["outcome_col"]
@@ -721,6 +720,11 @@ def determine_model_acceptance(
     # slices (the org -> slice mapping varies per network creation).
     n_rows = len(df)
     slices = [df.iloc[i * n_rows // n_total_nodes : (i + 1) * n_rows // n_total_nodes] for i in range(n_total_nodes)]
+    # The demo network splits the raw CSV into node slices first, then each
+    # node stratifies its own slice; mirror that order so an org-subset
+    # stratified run's reference matches filter(slice_i) over the selected nodes.
+    if variables_to_stratify:
+        slices = [_apply_stratification_filter(s, variables_to_stratify) for s in slices]
     if len(selected_orgs) >= n_total_nodes:
         candidates = [pd.concat(slices, ignore_index=True)]
     else:
