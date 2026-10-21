@@ -20,6 +20,50 @@ function signatures and result keys) is unchanged.
   ``COXPH_TIME_BIN_WIDTH``, ``COXPH_MIN_RISK_SET_CHANGE``) are validated by
   a frozen model with declarative bounds; invalid settings raise
   ``UserInputError`` as before.
+- The risk-set aggregates that travel to central are quantised to float32
+  precision (about 7 significant figures) at serialisation — always on,
+  applied after the configurable aggregate rounding — which caps the size of
+  the JSON payloads. The log-likelihood decrease test that triggers
+  step-halving now uses a tolerance derived from the effective released
+  precision (the coarser of the configured rounding and the wire
+  quantisation), so rounding jitter cannot masquerade as a real decrease.
+- A new risk-set size floor, ``COXPH_MIN_RISK_SET_SIZE`` (preset-carried: off
+  under ``minimal``, 50 under ``standard``, 100 under ``strict``; an empty
+  string disables it): while fewer than this many individuals are at risk,
+  the partial holds the last released aggregates instead of releasing a
+  smaller set. Like the minimum-change guard it only takes effect when
+  ``COXPH_MIN_RISK_SET_CHANGE`` > 1, so ``k = 1`` disables both. The
+  ``privacy_guards`` result summary gains ``max_min_risk_set_size`` and the
+  warning names the configured floor when it is active.
+- The time keys of ``baseline_cumulative_hazard`` and ``survival_curves`` are
+  rounded to ``COXPH_CURVE_TIME_SIG_FIGS`` significant figures (default 6,
+  read centrally; an empty string reports the exact event times); times that
+  merge into one key keep the value at their largest original time. The
+  result gains a ``curve_time_sig_figs`` field reporting the setting in use.
+- The sample-size check also enforces an admission bound while the risk-set
+  size floor is in effect: a node must have at least
+  ``max(reconstruction_row_factor * k, 3 * min_risk_set_size)`` rows — 150
+  rows at ``standard``, 300 at ``strict``; ``minimal`` is unchanged. Nodes
+  below the bound are refused the same fail-closed way as below-threshold
+  nodes.
+- The result's ``privacy_guards`` summary gains ``max_held_event_fraction``:
+  the maximum across nodes of the share of a node's events scored against a
+  held (unchanged) risk set. A warning is appended above 0.25.
+- Central aborts a run whose held-event fraction exceeds
+  ``COXPH_MAX_HELD_EVENT_FRACTION`` (float in (0, 1], default 0.5, read
+  centrally; an empty string disables the abort) with a ``UserInputError``
+  naming the cap and the remedies.
+- Convergence is declared when the largest Newton step falls to ``1e-6``,
+  or when the log-likelihood gain stays at rounding level for two
+  consecutive accepted evaluations while the step stays below ``1e-3``
+  (the secondary tolerance lets the ``strict`` preset's coarse aggregates
+  converge). The result gains ``convergence_tolerance``, the tolerance that
+  fired.
+- The small-count time suppression is now consistent with the risk sets:
+  ``perform_iteration`` moves the event rows' times up to their merged time
+  (censored rows keep their time), so the analysed rows, the shared
+  event-time grid and the risk sets describe the same event times. The
+  ``times`` payload of ``compute_summed_z`` is unchanged.
 
 ## 2.0.0 (2026-10-05)
 

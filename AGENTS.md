@@ -111,11 +111,16 @@ user task → central → compute_summed_z
   defence in depth only.
 - The Newton–Raphson loop tests ``max|step| <= 1e-6`` *before* applying the
   step, so the reported ``beta``, the Hessian and ``summed_agg1`` are all
-  evaluated at the same ``beta`` — the last *accepted* evaluation. The
+  evaluated at the same ``beta`` — the last *accepted* evaluation. A
+  secondary tolerance also declares convergence when the log-likelihood gain
+  stays at rounding level for two consecutive accepted evaluations while the
+  step stays below ``1e-3`` (coarse aggregate rounding can stall the step
+  above the primary tolerance without the fit having moved). The
   log-likelihood is computed centrally each iteration from the aggregates
   already collected; when it decreases the Newton step is halved and the
   previous accepted state is kept (a decrease is only visible at the next
-  round-trip). Results include ``converged`` and ``n_iterations``, plus
+  round-trip). Results include ``converged``, ``n_iterations`` and
+  ``convergence_tolerance`` (the tolerance that fired), plus
   ``log_likelihood``, ``log_likelihood_null``, ``lr_statistic``,
   ``lr_p_value``, ``n_events``, ``covariance`` and ``algorithm_version``.
 - Results must be JSON-serialisable (they travel over the vantage6 wire).
@@ -222,7 +227,19 @@ deliberately runs glibc and unlocked to test the declared range.
 - Privacy settings are read from node ``algorithm_env`` via ``get_env_var``:
   ``SAMPLE_SIZE_THRESHOLD`` (default 10), ``COXPH_TIME_BIN_WIDTH`` (disabled
   by default), ``COXPH_MIN_RISK_SET_CHANGE`` (default 5, must be >= 1, and
-  ``SAMPLE_SIZE_THRESHOLD + 1 >= COXPH_MIN_RISK_SET_CHANGE``).
+  ``SAMPLE_SIZE_THRESHOLD + 1 >= COXPH_MIN_RISK_SET_CHANGE``). The hardening
+  knobs are selected by the ``COXPH_PRIVACY_LEVEL`` preset (``minimal`` /
+  ``standard`` / ``strict``) and can be overridden individually — an
+  explicitly set variable beats the preset:
+  ``COXPH_RECONSTRUCTION_ROW_FACTOR``, ``COXPH_MIN_TIME_EVENT_COUNT``,
+  ``COXPH_AGGREGATE_SIG_FIGS`` and ``COXPH_MIN_RISK_SET_SIZE`` (the last two
+  accept an empty string to switch the knob off). Central additionally reads
+  ``COXPH_MAX_COVARIATES`` (default 20), ``COXPH_MAX_GRID_POINTS`` (default
+  1000), ``COXPH_CURVE_TIME_SIG_FIGS`` (default 6; an empty string
+  reports the exact curve times) and ``COXPH_MAX_HELD_EVENT_FRACTION``
+  (default 0.5; central aborts a run whose held-event fraction exceeds it;
+  an empty string disables the abort). The full semantics live in
+  ``docs/coxph/Privacy.rst``.
 - The parent-task guard fails closed: if the task lookup fails or the token
   is missing (and the client is not a ``MockAlgorithmClient``), raise
   ``AlgorithmError``, never proceed.

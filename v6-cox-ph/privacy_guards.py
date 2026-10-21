@@ -21,22 +21,87 @@ via ``get_env_var``:
   coarsened to a regular grid ``floor(t / w) * w``.
 - ``COXPH_MIN_RISK_SET_CHANGE`` (int, default 5) — the minimum number of
   individuals by which consecutive shared risk-set aggregates must differ.
+- ``COXPH_PRIVACY_LEVEL`` (string, default ``"standard"``, case-insensitive)
+  — selects a preset bundle of hardening knobs. ``"minimal"`` leaves only the
+  mandatory guards; ``"standard"`` is the default; ``"strict"`` hardens
+  further. The presets are:
+
+  - ``"minimal"``: ``reconstruction_row_factor`` 1 (off),
+    ``min_time_event_count`` 1 (off), ``aggregate_sig_figs`` off (``None``),
+    ``min_risk_set_size`` off (``None``).
+  - ``"standard"``: ``reconstruction_row_factor`` 10,
+    ``min_time_event_count`` 2, ``aggregate_sig_figs`` 6,
+    ``min_risk_set_size`` 50 (the reconstruction bound ``factor * k``).
+  - ``"strict"``: ``reconstruction_row_factor`` 20, ``min_time_event_count``
+    5, ``aggregate_sig_figs`` 4, ``min_risk_set_size`` 100.
+
+  Each knob can also be set individually; an explicitly set, non-empty
+  variable beats the level preset:
+
+- ``COXPH_RECONSTRUCTION_ROW_FACTOR`` (int >= 1) — the sample-size check also
+  requires ``rows >= factor * k``, so a node stays many times larger than the
+  smallest released group.
+- ``COXPH_MIN_TIME_EVENT_COUNT`` (int >= 1) — per-time event counts below this
+  are merged into the following time before they are shared. In
+  ``perform_iteration`` the event rows' times are also moved up to their
+  merged time (censored rows keep their time), so the risk sets match the
+  shared grid; see ``prepare_time_column``.
+- ``COXPH_AGGREGATE_SIG_FIGS`` (int >= 1; an empty string disables rounding) —
+  released risk-set aggregates are rounded to this many significant figures.
+- ``COXPH_MIN_RISK_SET_SIZE`` (int >= 1; an empty string disables the floor) —
+  an absolute floor on the size of a released risk set: while fewer than this
+  many individuals are at risk, the partial holds the last released
+  aggregates instead of releasing a smaller set (the same hold pattern as the
+  minimum-change guard; the first grid point is always released). The floor
+  is part of the risk-set guard family: it only takes effect when
+  ``COXPH_MIN_RISK_SET_CHANGE`` > 1, so ``k = 1`` disables it together with
+  the jump guard. The sample-size check also requires ``rows >= 3 x R``
+  while the floor is in effect (see ``check_sample_size``): a node that
+  small would have (nearly) its whole content inside the smallest released
+  risk set, which the floor alone cannot hide.
+
+The released risk-set aggregates are additionally quantised to float32
+precision (about 7 significant figures) at serialisation — always on, applied
+after the privacy rounding above; see ``quantise_wire_aggregates``.
+
+The resource caps are loaded centrally (``load_resource_caps``):
+
+- ``COXPH_MAX_COVARIATES`` (int >= 1, default 20).
+- ``COXPH_MAX_GRID_POINTS`` (int >= 1, default 1000).
+
+The reported curve time keys are coarsened centrally as well
+(``load_curve_time_sig_figs``):
+
+- ``COXPH_CURVE_TIME_SIG_FIGS`` (int >= 1, default 6; an empty string
+  reports the exact event times) — the time keys of the baseline
+  cumulative hazard and the survival curves are rounded to this many
+  significant figures; times that merge into one key keep the value at
+  their largest original time.
+
+The held-event fraction abort cap is loaded centrally too
+(``load_max_held_event_fraction``):
+
+- ``COXPH_MAX_HELD_EVENT_FRACTION`` (float in (0, 1], default 0.5; an
+  empty string disables the abort) — above this share of a node's
+  events scored against a held (unchanged) risk set, central aborts the
+  run: the fit is dominated by held risk sets.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TypedDict
 
 import numpy as np
 import pandas as pd
 import jwt
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
     PrivacyViolation,
     UserInputError,
 )
 
+from .coxph_logic import round_sig
 from .miscellaneous import format_validation_error
 from vantage6.algorithm.tools.util import info, warn
 
@@ -44,10 +109,69 @@ from vantage6.algorithm.tools.util import info, warn
 ENV_SAMPLE_SIZE_THRESHOLD = "SAMPLE_SIZE_THRESHOLD"
 ENV_TIME_BIN_WIDTH = "COXPH_TIME_BIN_WIDTH"
 ENV_MIN_RISK_SET_CHANGE = "COXPH_MIN_RISK_SET_CHANGE"
+ENV_MIN_RISK_SET_SIZE = "COXPH_MIN_RISK_SET_SIZE"
+ENV_PRIVACY_LEVEL = "COXPH_PRIVACY_LEVEL"
+ENV_RECONSTRUCTION_ROW_FACTOR = "COXPH_RECONSTRUCTION_ROW_FACTOR"
+ENV_MIN_TIME_EVENT_COUNT = "COXPH_MIN_TIME_EVENT_COUNT"
+ENV_AGGREGATE_SIG_FIGS = "COXPH_AGGREGATE_SIG_FIGS"
+ENV_MAX_COVARIATES = "COXPH_MAX_COVARIATES"
+ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
+ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
+ENV_MAX_HELD_EVENT_FRACTION = "COXPH_MAX_HELD_EVENT_FRACTION"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
 DEFAULT_MIN_RISK_SET_CHANGE = 5
+DEFAULT_PRIVACY_LEVEL = "standard"
+DEFAULT_MAX_COVARIATES = 20
+DEFAULT_MAX_GRID_POINTS = 1000
+DEFAULT_CURVE_TIME_SIG_FIGS = 6
+DEFAULT_MAX_HELD_EVENT_FRACTION = 0.5
+
+# The sample-size check admits a node only when it has at least this many
+# times the risk-set size floor in rows (on top of the reconstruction bound
+# factor * k): a smaller node would have (nearly) its whole content inside
+# the smallest released risk set, which the floor alone cannot hide.
+FLOOR_ADMISSION_MULTIPLE = 3
+
+# The released aggregates travel to central as JSON numbers. Quantising them
+# to float32 precision (about 7 significant decimal digits) at serialisation
+# caps the payload size: a bare float32 cast would serialise to a longer
+# float64 repr, so the cut comes from decimal quantisation. Always on,
+# applied after the configurable privacy rounding (a coarser preset rounding
+# makes it a no-op).
+WIRE_AGGREGATE_SIG_FIGS = 7
+
+
+# Hardening bundles selected by COXPH_PRIVACY_LEVEL. "minimal" leaves only the
+# mandatory guards; "standard" is the default; "strict" hardens further.
+class _LevelPreset(TypedDict):
+    reconstruction_row_factor: int
+    min_time_event_count: int
+    aggregate_sig_figs: Optional[int]
+    min_risk_set_size: Optional[int]
+
+
+PRIVACY_LEVEL_PRESETS: dict[str, _LevelPreset] = {
+    "minimal": {
+        "reconstruction_row_factor": 1,
+        "min_time_event_count": 1,
+        "aggregate_sig_figs": None,
+        "min_risk_set_size": None,
+    },
+    "standard": {
+        "reconstruction_row_factor": 10,
+        "min_time_event_count": 2,
+        "aggregate_sig_figs": 6,
+        "min_risk_set_size": 50,
+    },
+    "strict": {
+        "reconstruction_row_factor": 20,
+        "min_time_event_count": 5,
+        "aggregate_sig_figs": 4,
+        "min_risk_set_size": 100,
+    },
+}
 
 
 class PrivacySettings(BaseModel):
@@ -59,6 +183,14 @@ class PrivacySettings(BaseModel):
     vantage6's ``get_env_var`` (which decodes base32-encoded
     ``algorithm_env``); ``pydantic-settings`` would read ``os.environ``
     directly and bypass that decoding, so it is not used.
+
+    ``privacy_level`` records which hardening bundle was selected. The
+    four knobs the level prescribes — ``reconstruction_row_factor``,
+    ``min_time_event_count``, ``aggregate_sig_figs`` and
+    ``min_risk_set_size`` — are resolved in ``load_privacy_settings``: an
+    explicitly set, non-empty environment variable beats the level
+    preset, and an empty ``COXPH_AGGREGATE_SIG_FIGS`` or
+    ``COXPH_MIN_RISK_SET_SIZE`` switches that knob off (``None``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -66,6 +198,19 @@ class PrivacySettings(BaseModel):
     sample_size_threshold: int = Field(gt=0)
     time_bin_width: Optional[float] = Field(default=None, gt=0)
     min_risk_set_change: int = Field(ge=1)
+    privacy_level: str = Field(default=DEFAULT_PRIVACY_LEVEL)
+    reconstruction_row_factor: int = Field(default=10, ge=1)
+    min_time_event_count: int = Field(default=2, ge=1)
+    aggregate_sig_figs: Optional[int] = Field(default=6, ge=1)
+    min_risk_set_size: Optional[int] = Field(default=None, ge=1)
+
+    @field_validator("privacy_level")
+    @classmethod
+    def _known_privacy_level(cls, v: str) -> str:
+        if v not in PRIVACY_LEVEL_PRESETS:
+            allowed = ", ".join(f"'{name}'" for name in PRIVACY_LEVEL_PRESETS)
+            raise ValueError(f"privacy_level must be one of {allowed}")
+        return v
 
     @model_validator(mode="after")
     def _threshold_covers_k(self) -> "PrivacySettings":
@@ -79,22 +224,79 @@ class PrivacySettings(BaseModel):
         return self
 
 
+class ResourceCaps(BaseModel):
+    """Centrally enforced resource caps, read from the environment.
+
+    Frozen Pydantic model; ``load_resource_caps`` supplies the defaults and
+    validates the values (configuration, not data).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    max_covariates: int = Field(ge=1)
+    max_grid_points: int = Field(ge=1)
+
+
+def _parse_positive_int(raw, name: str) -> int:
+    """Parse an ``int >= 1`` from an environment value, or raise UserInputError."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise UserInputError(f"{name} must be an integer >= 1, got {raw!r}") from None
+    if value < 1:
+        raise UserInputError(f"{name} must be an integer >= 1, got {raw!r}") from None
+    return value
+
+
+def _resolve_privacy_level(raw) -> str:
+    """Normalise COXPH_PRIVACY_LEVEL (case-insensitive) or raise UserInputError."""
+    level = str(raw).strip().lower()
+    if level not in PRIVACY_LEVEL_PRESETS:
+        allowed = ", ".join(f"'{name}'" for name in PRIVACY_LEVEL_PRESETS)
+        raise UserInputError(f"{ENV_PRIVACY_LEVEL} must be one of {allowed} (case-insensitive), got {raw!r}")
+    return level
+
+
+def _resolve_knob(raw, preset_value: int, name: str) -> int:
+    """Resolve a hardening knob: explicit env var (non-empty) beats the preset."""
+    if raw is None or str(raw).strip() == "":
+        return preset_value
+    return _parse_positive_int(raw, name)
+
+
+def _resolve_optional_knob(raw, preset_value: Optional[int], name: str) -> Optional[int]:
+    """Resolve an optional hardening knob; an empty env var switches it off."""
+    if raw is None:
+        return preset_value
+    if str(raw).strip() == "":
+        return None
+    return _parse_positive_int(raw, name)
+
+
 def load_privacy_settings() -> PrivacySettings:
     """Load privacy settings from node environment variables.
 
     Uses ``get_env_var`` so that base32-encoded ``algorithm_env`` values are
     decoded the same way as in the rest of vantage6.
 
+    The hardening knobs are resolved per knob: an explicitly set, non-empty
+    environment variable beats the ``COXPH_PRIVACY_LEVEL`` preset, and an
+    empty ``COXPH_AGGREGATE_SIG_FIGS`` or ``COXPH_MIN_RISK_SET_SIZE``
+    disables that knob.
+
     Returns
     -------
     PrivacySettings
         Validated settings. ``time_bin_width`` is ``None`` when binning is
-        disabled.
+        disabled; ``aggregate_sig_figs`` and ``min_risk_set_size`` are
+        ``None`` when the respective knob is disabled.
 
     Raises
     ------
     UserInputError
-        If a setting value is not a positive number.
+        If a setting value is not a positive number, the privacy level is
+        not one of the allowed values, or a hardening knob is not an
+        integer >= 1.
     """
     from vantage6.algorithm.tools.util import get_env_var
 
@@ -118,16 +320,139 @@ def load_privacy_settings() -> PrivacySettings:
                 f"{ENV_TIME_BIN_WIDTH} must be a positive float, got " f"{time_bin_width_raw!r}"
             ) from e
 
+    privacy_level = _resolve_privacy_level(get_env_var(ENV_PRIVACY_LEVEL, default=DEFAULT_PRIVACY_LEVEL))
+    preset = PRIVACY_LEVEL_PRESETS[privacy_level]
+    reconstruction_row_factor = _resolve_knob(
+        get_env_var(ENV_RECONSTRUCTION_ROW_FACTOR, default=None),
+        preset["reconstruction_row_factor"],
+        ENV_RECONSTRUCTION_ROW_FACTOR,
+    )
+    min_time_event_count = _resolve_knob(
+        get_env_var(ENV_MIN_TIME_EVENT_COUNT, default=None),
+        preset["min_time_event_count"],
+        ENV_MIN_TIME_EVENT_COUNT,
+    )
+    aggregate_sig_figs = _resolve_optional_knob(
+        get_env_var(ENV_AGGREGATE_SIG_FIGS, default=None),
+        preset["aggregate_sig_figs"],
+        ENV_AGGREGATE_SIG_FIGS,
+    )
+    min_risk_set_size = _resolve_optional_knob(
+        get_env_var(ENV_MIN_RISK_SET_SIZE, default=None),
+        preset["min_risk_set_size"],
+        ENV_MIN_RISK_SET_SIZE,
+    )
+
     try:
         return PrivacySettings(
             sample_size_threshold=sample_size_threshold,
             time_bin_width=time_bin_width,
             min_risk_set_change=min_risk_set_change,
+            privacy_level=privacy_level,
+            reconstruction_row_factor=reconstruction_row_factor,
+            min_time_event_count=min_time_event_count,
+            aggregate_sig_figs=aggregate_sig_figs,
+            min_risk_set_size=min_risk_set_size,
         )
     except ValidationError as e:
-        # The offending values are node configuration, not data; echoing them
-        # is what the current messages do and is safe.
-        raise UserInputError(f"Invalid privacy settings: {format_validation_error(e)}") from e
+        # The message is formatted without the offending input; the chained
+        # traceback would reach the container log the researcher reads, so
+        # the cause is suppressed.
+        raise UserInputError(f"Invalid privacy settings: {format_validation_error(e)}") from None
+
+
+def load_resource_caps() -> ResourceCaps:
+    """Load the resource caps from the environment (centrally enforced).
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. The caps bound the
+    problem size the algorithm accepts; they are configuration, not data.
+
+    Returns
+    -------
+    ResourceCaps
+        Validated caps (``max_covariates``, ``max_grid_points``).
+
+    Raises
+    ------
+    UserInputError
+        If a cap is not an integer >= 1.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    max_covariates = _parse_positive_int(
+        get_env_var(ENV_MAX_COVARIATES, default=str(DEFAULT_MAX_COVARIATES)),
+        ENV_MAX_COVARIATES,
+    )
+    max_grid_points = _parse_positive_int(
+        get_env_var(ENV_MAX_GRID_POINTS, default=str(DEFAULT_MAX_GRID_POINTS)),
+        ENV_MAX_GRID_POINTS,
+    )
+    try:
+        return ResourceCaps(max_covariates=max_covariates, max_grid_points=max_grid_points)
+    except ValidationError as e:
+        raise UserInputError(f"Invalid resource caps: {format_validation_error(e)}") from None
+
+
+def load_curve_time_sig_figs() -> Optional[int]:
+    """Load the curve time-key coarsening from the environment (centrally).
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. The baseline
+    cumulative hazard and the survival curves are reported with their time
+    keys rounded to this many significant figures; an empty
+    ``COXPH_CURVE_TIME_SIG_FIGS`` reports the exact event times.
+
+    Returns
+    -------
+    int | None
+        The number of significant figures, or ``None`` for exact times.
+
+    Raises
+    ------
+    UserInputError
+        If the value is not an integer >= 1.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    return _resolve_optional_knob(
+        get_env_var(ENV_CURVE_TIME_SIG_FIGS, default=None),
+        DEFAULT_CURVE_TIME_SIG_FIGS,
+        ENV_CURVE_TIME_SIG_FIGS,
+    )
+
+
+def load_max_held_event_fraction() -> Optional[float]:
+    """Load the central abort cap on the held-event fraction.
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. Above this share
+    of a node's events scored against a held (unchanged) risk set, central
+    aborts the run with ``UserInputError``: the fit is dominated by held
+    risk sets and the estimates are not trustworthy. An empty
+    ``COXPH_MAX_HELD_EVENT_FRACTION`` disables the abort.
+
+    Returns
+    -------
+    float | None
+        The cap, or ``None`` when the abort is disabled.
+
+    Raises
+    ------
+    UserInputError
+        If the value is not a float in (0, 1].
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    raw = get_env_var(ENV_MAX_HELD_EVENT_FRACTION, default=None)
+    if raw is None:
+        return DEFAULT_MAX_HELD_EVENT_FRACTION
+    if str(raw).strip() == "":
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise UserInputError(f"{ENV_MAX_HELD_EVENT_FRACTION} must be a float in (0, 1], got {raw!r}") from None
+    if not 0.0 < value <= 1.0:
+        raise UserInputError(f"{ENV_MAX_HELD_EVENT_FRACTION} must be a float in (0, 1], got {raw!r}")
+    return value
 
 
 def ensure_spawned_by_central(client) -> None:
@@ -279,6 +604,7 @@ def guarded_risk_set_aggregates(
     k: int,
     X: np.ndarray,
     beta: np.ndarray,
+    min_risk_set_size: Optional[int] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Vectorised risk-set aggregates with the minimum-change ("jump") guard.
 
@@ -291,6 +617,15 @@ def guarded_risk_set_aggregates(
     previous set is held (``h`` stays), otherwise ``h = j+1``. This matches
     the previous mask implementation exactly (see the reference copy in
     ``tests/unit/reference_risk_sets.py``).
+
+    The absolute floor ``min_risk_set_size`` extends the same walk: while
+    fewer than that many individuals are at risk at grid point ``j``, the
+    last released aggregates are held instead of releasing a smaller risk
+    set (no truncation — the tail is reported at the last released set,
+    which makes the estimates approximate there). The floor belongs to the
+    risk-set guard family: ``k <= 1`` disables it together with the jump
+    guard, and the first grid point is always released whatever its
+    risk-set size.
 
     Complexity: O(N·p²) compute and O(N·p + T·p²) memory, instead of T×N
     boolean masks.
@@ -307,6 +642,9 @@ def guarded_risk_set_aggregates(
         The (standardised) covariate matrix, shape (N, p).
     beta : np.ndarray
         The coefficient vector, shape (p,).
+    min_risk_set_size : int | None
+        The absolute floor on the size of a released risk set; ``None``
+        disables the floor. Only effective when ``k > 1``.
 
     Returns
     -------
@@ -352,7 +690,11 @@ def guarded_risk_set_aggregates(
                 s2_bucket[:, c2, c1] = s2_bucket[:, c1, c2]
     s2 = np.cumsum(s2_bucket[::-1], axis=0)[::-1]
 
-    # Effective grid index from the counts alone (the jump guard).
+    # Effective grid index from the counts alone (the jump guard, extended
+    # by the absolute risk-set floor). The floor is part of the same guard
+    # family, so k <= 1 disables it together with the jump guard; the first
+    # grid point is always released, whatever its risk-set size.
+    floor = min_risk_set_size if (k is not None and k > 1) else None
     if k is None or k <= 1:
         effective = np.arange(n_times)
     else:
@@ -361,7 +703,9 @@ def guarded_risk_set_aggregates(
         held = 0
         for j in range(1, n_times):
             removed = count_r[held] - count_r[j]
-            if not (0 < removed < k):
+            jump_holds = 0 < removed < k
+            floor_holds = floor is not None and count_r[j] < floor
+            if not jump_holds and not floor_holds:
                 held = j
             effective[j] = held
 
@@ -369,6 +713,67 @@ def guarded_risk_set_aggregates(
     agg2 = s1[effective]
     agg3 = s2[effective]
     return agg1, agg2, agg3
+
+
+def round_released_aggregates(agg1, agg2, agg3, sig_figs):
+    """Round the released risk-set aggregates to ``sig_figs`` significant figures.
+
+    The risk-set sums S0/S1/S2 leave the node at full float precision;
+    rounding them to a configurable number of significant figures (from the
+    privacy-level bundle, overridable through ``COXPH_AGGREGATE_SIG_FIGS``,
+    an empty value disables the rounding) limits how precisely the
+    aggregates pin down small groups. ``sig_figs=None`` returns the arrays
+    unchanged. Shapes and dtypes are preserved.
+
+    Parameters
+    ----------
+    agg1, agg2, agg3 : np.ndarray
+        The released aggregates: ``agg1`` (T,), ``agg2`` (T, p) and ``agg3``
+        (T, p, p).
+    sig_figs : int | None
+        Number of significant figures, or ``None`` to disable rounding.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        The rounded ``agg1``, ``agg2`` and ``agg3``.
+    """
+    if sig_figs is None:
+        return agg1, agg2, agg3
+    return (
+        round_sig(agg1, sig_figs),
+        round_sig(agg2, sig_figs),
+        round_sig(agg3, sig_figs),
+    )
+
+
+def quantise_wire_aggregates(agg1, agg2, agg3):
+    """Quantise the released risk-set aggregates to float32 precision.
+
+    The aggregates travel to central as JSON numbers; quantising them to
+    about 7 significant decimal figures (float32 precision) at serialisation
+    caps the payload size. The quantisation is always on and applies after
+    the configurable privacy rounding (``round_released_aggregates``): where
+    that rounding is coarser (the standard and strict presets) this is a
+    no-op, and where it is off (the minimal preset) this is the only
+    precision limit on the wire. Shapes and dtypes are preserved.
+
+    Parameters
+    ----------
+    agg1, agg2, agg3 : np.ndarray
+        The released aggregates: ``agg1`` (T,), ``agg2`` (T, p) and ``agg3``
+        (T, p, p).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        The quantised ``agg1``, ``agg2`` and ``agg3``.
+    """
+    return (
+        round_sig(agg1, WIRE_AGGREGATE_SIG_FIGS),
+        round_sig(agg2, WIRE_AGGREGATE_SIG_FIGS),
+        round_sig(agg3, WIRE_AGGREGATE_SIG_FIGS),
+    )
 
 
 def validate_survival_columns(df: pd.DataFrame, time_col: str, outcome_col: Optional[str]) -> None:
@@ -418,6 +823,18 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     container log is returned to the researcher with the run, and a
     below-threshold count is exactly what the threshold protects.
 
+    The sample-size threshold bounds *participation*, not reconstruction: a
+    node whose entire content enters one released risk set can be
+    reconstructed from the aggregates. A second, reconstruction bound
+    therefore also applies — the node must have at least
+    ``reconstruction_row_factor * k`` rows, which keeps the node many times
+    larger than the smallest released group. When the risk-set size floor is
+    in effect, the admission bound additionally requires
+    ``FLOOR_ADMISSION_MULTIPLE * min_risk_set_size`` rows: a node that small
+    would have (nearly) its whole content inside the smallest released risk
+    set, and the floor would hold nearly the whole risk-set trajectory at
+    the first grid point.
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -431,12 +848,36 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     Returns
     -------
     bool
-        ``True`` when rows > threshold and (when checked) events > threshold.
+        ``True`` when rows > threshold, rows >= the admission bound
+        (``max(factor * k, FLOOR_ADMISSION_MULTIPLE * R)`` with the floor
+        term only while the floor is in effect) and (when checked) events >
+        threshold.
     """
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
         warn(f"Sample size threshold not met: row count does not exceed {threshold}.")
+        return False
+
+    # The admission bound covers both reconstruction routes; the warning
+    # names the configured bound only, never the actual count.
+    reconstruction_bound = settings.reconstruction_row_factor * settings.min_risk_set_change
+    floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
+    admission_bound = reconstruction_bound
+    if floor is not None:
+        admission_bound = max(admission_bound, FLOOR_ADMISSION_MULTIPLE * floor)
+    if n_rows < admission_bound:
+        if floor is not None:
+            warn(
+                f"Sample size threshold not met: row count does not meet the admission bound "
+                f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change}, "
+                f"{FLOOR_ADMISSION_MULTIPLE} x R={floor}: at least {admission_bound} rows)."
+            )
+        else:
+            warn(
+                f"Sample size threshold not met: row count does not meet the reconstruction bound "
+                f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change})."
+            )
         return False
 
     if outcome_col is not None:
@@ -501,7 +942,9 @@ def validate_iteration_input(
             context={"expl_vars": expl_vars, "settings": settings},
         )
     except ValidationError as e:
-        raise UserInputError(format_validation_error(e)) from e
+        # Formatted without the offending input, and without the chained
+        # traceback that would reach the container log.
+        raise UserInputError(format_validation_error(e)) from None
 
     beta_arr = np.asarray(beta, dtype=float)
     centre_arr = np.asarray(centre, dtype=float)
@@ -541,10 +984,139 @@ def tail_cutoff(times: pd.Series, k: int) -> float | None:
         return None
     vals = pd.to_numeric(times, errors="coerce").dropna().to_numpy()
     if len(vals) < k:
-        raise PrivacyViolation(
-            f"Tail censoring requires at least {k} valid times but only " f"{len(vals)} are available."
-        )
+        # The message names the configured k only; the actual number of valid
+        # times is a count and must not reach the container log.
+        raise PrivacyViolation(f"Tail censoring requires at least {k} valid times; fewer are available.")
     return float(np.sort(vals)[-k])
+
+
+def merged_time_map(times, freqs, min_count: int) -> np.ndarray:
+    """Map each event time to its merged time under small-cell suppression.
+
+    The single source of truth for the suppression merge, used both by
+    ``suppress_small_time_counts`` (which reduces this map to the unique
+    merged times and their summed counts) and by the event-time move in
+    ``prepare_time_column``: walking the ascending grid, a group accumulates
+    counts until it reaches ``min_count`` and is then emitted at its largest
+    time — every time of the group maps to that emitted time. A trailing
+    group that never reaches ``min_count`` merges backward into the previous
+    emitted group (its times map to that group's time); when nothing was
+    emitted, the whole grid is one group at the last time.
+
+    Parameters
+    ----------
+    times : array-like
+        Sorted unique event times (float, ascending).
+    freqs : array-like
+        Positive integer event counts, one per time.
+    min_count : int
+        The minimum released per-time count. ``min_count <= 1`` (or ``None``)
+        maps every time to itself.
+
+    Returns
+    -------
+    np.ndarray
+        The merged time per input time, float64, same length as ``times``;
+        every value is one of the input times.
+    """
+    times_arr = np.asarray(times, dtype=float)
+    mapped = times_arr.astype(np.float64)
+    if min_count is None or min_count <= 1 or times_arr.size == 0:
+        return mapped
+
+    group_count = 0
+    group_start = 0
+    emitted_time: Optional[float] = None
+    for i in range(times_arr.size):
+        group_count += int(freqs[i])
+        if group_count >= min_count:
+            # Times ascend, so times_arr[i] is the largest time of the group.
+            mapped[group_start : i + 1] = times_arr[i]
+            emitted_time = float(times_arr[i])
+            group_count = 0
+            group_start = i + 1
+    if group_count > 0:
+        # Trailing group below the minimum: merge it backward into the
+        # previous emitted group; when nothing was emitted the whole grid is
+        # one group at the last time.
+        mapped[group_start:] = emitted_time if emitted_time is not None else times_arr[-1]
+    return mapped
+
+
+def suppress_small_time_counts(times, freqs, min_count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Suppress small per-time event counts on the event-time grid.
+
+    Small-cell suppression on the shared event-time grid: a per-time event
+    count of 1 identifies a singleton. Times whose count is below
+    ``min_count`` are merged into the *following* time — a group's total
+    count is accumulated until it reaches ``min_count``, and the group is
+    then emitted at its largest time with the summed count. Merged cells tie
+    those events at the group's largest time (the same kind of small
+    perturbation as time binning) and the event total is preserved, so
+    ``n_events`` is unchanged. If the trailing group never reaches
+    ``min_count`` and at least one group was already emitted, it is merged
+    backward into the previous emitted group (its count is added, the
+    previous group's time is kept); a single-time grid is emitted unchanged.
+    The merge itself is defined by ``merged_time_map``; this function reduces
+    its output to the unique merged times with their summed counts.
+
+    Parameters
+    ----------
+    times : array-like
+        Sorted unique event times (float, ascending).
+    freqs : array-like
+        Positive integer event counts, one per time.
+    min_count : int
+        The minimum released per-time count. ``min_count <= 1`` returns the
+        inputs unchanged.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        ``(merged_times, merged_counts)`` as float64 / int64 arrays,
+        ascending, with the counts summing to the input total.
+    """
+    times_arr = np.asarray(times, dtype=float)
+    freqs_arr = np.asarray(freqs)
+    if min_count is None or min_count <= 1 or times_arr.size == 0:
+        return times_arr.astype(np.float64), freqs_arr.astype(np.int64)
+
+    mapped = merged_time_map(times_arr, freqs_arr, min_count)
+    merged_times = np.unique(mapped)
+    merged_counts = np.zeros(merged_times.shape, dtype=np.int64)
+    np.add.at(merged_counts, np.searchsorted(merged_times, mapped), freqs_arr.astype(np.int64))
+    return merged_times, merged_counts
+
+
+def event_time_counts(df: pd.DataFrame, time_col: str, outcome_col: str) -> pd.DataFrame:
+    """Per-time event counts of a node's (prepared) DataFrame.
+
+    The event rows (``outcome == 1``) grouped by the time column and sorted
+    by time, as a DataFrame with columns ``[time_col, "freq"]`` — the same
+    shape as the ``times`` payload of ``compute_summed_z``. Both partials
+    derive the event grid from the same prepared frame, so the shared grid
+    and the risk sets describe the same rows.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The node's prepared data (binned and tail-censored times).
+    time_col : str
+        Name of the time column.
+    outcome_col : str
+        Name of the outcome column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``[time_col, "freq"]``, ascending by time; empty (with the
+        same columns) when the frame holds no events.
+    """
+    events = df[df[outcome_col] == 1]
+    counts = events.groupby(time_col, as_index=False).count()
+    counts = counts.sort_values(by=time_col)[[time_col, outcome_col]]
+    counts["freq"] = counts[outcome_col]
+    return counts.drop(columns=outcome_col)
 
 
 def prepare_time_column(
@@ -552,6 +1124,8 @@ def prepare_time_column(
     time_col: str,
     settings: PrivacySettings,
     outcome_col: str | None = None,
+    *,
+    move_event_times: bool = False,
 ) -> pd.DataFrame:
     """Bin and tail-censor the time column of a node's DataFrame.
 
@@ -559,6 +1133,17 @@ def prepare_time_column(
     configured grid, compute the tail cut-off from the (binned) times, clamp
     rows past the cut-off to ``t_cut`` and, when an outcome column is given,
     set their event to 0 (administrative censoring).
+
+    With ``move_event_times=True`` and an outcome column, the small-count
+    suppression is made consistent: the node's merged event times are
+    recomputed deterministically from its event counts (``merged_time_map``)
+    and the event rows' times are moved up to their merged time, while
+    censored rows keep their time. The analysed rows, the shared event grid
+    and the risk sets then describe the same event times, so the partial
+    likelihood matches the suppressed ``times`` payload shared by
+    ``compute_summed_z``. The move applies whenever ``min_time_event_count >
+    1``, whatever the risk-set guards; the tail censoring runs first, so a
+    merged time never exceeds ``t_cut``.
 
     The input is not modified; a copy is returned.
     """
@@ -575,6 +1160,15 @@ def prepare_time_column(
             out.loc[clamp_mask, time_col] = t_cut
             if outcome_col is not None and outcome_col in out.columns:
                 out.loc[clamp_mask, outcome_col] = 0
+
+    if move_event_times and outcome_col is not None and settings.min_time_event_count > 1:
+        counts = event_time_counts(out, time_col, outcome_col)
+        if not counts.empty:
+            time_values = counts[time_col].to_numpy(dtype=float)
+            mapped = merged_time_map(time_values, counts["freq"].to_numpy(), settings.min_time_event_count)
+            move_to = dict(zip(time_values.tolist(), mapped.tolist()))
+            event_mask = out[outcome_col] == 1
+            out.loc[event_mask, time_col] = out.loc[event_mask, time_col].map(move_to)
 
     return out
 
