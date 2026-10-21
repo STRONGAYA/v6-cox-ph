@@ -411,6 +411,7 @@ class TestValidateRisksetAggregates:
         central._validate_riskset_aggregates(1, [5.0, 3.0, 0.0, 0.0])
 
 
+@pytest.mark.unit
 class TestProvenance:
     """The result records the sender provenance and the input arguments."""
 
@@ -433,6 +434,7 @@ class TestProvenance:
         assert provenance["submitted_by_organisation"] is None
 
 
+@pytest.mark.unit
 class TestSubTaskValidation:
     """The result parser catches malformed sub-task results.
 
