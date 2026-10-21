@@ -12,7 +12,11 @@ The input arguments for the central function consist of:
   used in the computation.
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
-  organisations are used.
+  organisations are used. In a STRONG AYA collaboration, select the **data**
+  organisations explicitly: the collaboration also contains the data-less
+  aggregator organisation, whose node serves no database — a run that
+  includes it fails closed (the error names the organisations that did not
+  return a result).
 - ``covariate_profiles`` (list of objects, optional): covariate profiles for
   survival curves. Each entry maps explanatory variable names to values;
   variables left out are taken at the pooled event-case mean. An entry
