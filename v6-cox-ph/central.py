@@ -238,6 +238,11 @@ def central(
             iteration_result = _parse_result(
                 IterationResult, output, {"expected_ids": ids, "n_times": n_times, "n_covs": n_covs}
             )
+            # Structural sanity bounds on the released risk-set sizes: a
+            # broken or grossly tampering node is rejected here (every
+            # round — the check is O(T), and round-1-only would miss
+            # later tampering).
+            _validate_riskset_aggregates(iteration_result.organization_id, iteration_result.agg1)
             summed_agg1 += np.asarray(iteration_result.agg1, dtype=float)
             summed_agg2 += np.asarray(iteration_result.agg2, dtype=float)
             summed_agg3 += np.asarray(iteration_result.agg3, dtype=float)
@@ -388,6 +393,39 @@ def _algorithm_version() -> str:
         return version("v6-cox-ph")
     except PackageNotFoundError:
         return "unknown"
+
+
+def _validate_riskset_aggregates(organization_id: int, agg1) -> None:
+    """Structural sanity bounds on a node's released risk-set sizes.
+
+    Defence in depth against a broken or grossly tampering node —
+    explicitly **not** a poisoning defence: a careful adversary can stay
+    inside the bounds. The released risk-set sizes must be finite and
+    non-negative, non-increasing along the grid (risk sets only shrink,
+    with holds; rounding and float32 quantisation are monotonic, so
+    legitimate releases always satisfy this), and the first released
+    size must be positive (the node passed the event threshold, so its
+    rows are at risk at the first pooled grid point). A node legitimately
+    releases 0 at pooled grid points beyond its own data (the tail of the
+    pooled grid empties).
+
+    Raises
+    ------
+    AlgorithmError
+        Naming the organisation, on a structurally impossible sequence.
+    """
+    sizes = np.asarray(agg1, dtype=float)
+    if sizes.size == 0 or not np.all(np.isfinite(sizes)) or np.any(sizes < 0):
+        raise AlgorithmError(
+            f"Organisation {organization_id}: released risk-set sizes must be non-negative and finite."
+        )
+    if sizes[0] <= 0:
+        raise AlgorithmError(f"Organisation {organization_id}: the first released risk-set size must be positive.")
+    if np.any(np.diff(sizes) > 0):
+        raise AlgorithmError(
+            f"Organisation {organization_id}: released risk-set sizes increase along the "
+            f"grid, which no real risk-set sequence does."
+        )
 
 
 def _parse_result(model_cls: type[_ModelT], output: object, context: dict) -> _ModelT:

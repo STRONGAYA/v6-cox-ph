@@ -14,6 +14,20 @@ sample-size threshold, iteration-input validation (``perform_iteration``
 only), time-column preparation (binning, tail censoring), and the risk-set
 jump guard (``perform_iteration`` only).
 
+Integrity / poisoning (accepted residual)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The algorithm defends **confidentiality**, not **integrity**, against a
+malicious participant: vantage6 has no secure aggregation, so a
+colluding or compromised node can return well-formed but false
+aggregates and bias the fit, undetectably in general. As defence in
+depth against a *broken or grossly tampering* node, central rejects
+structurally impossible risk-set sequences (non-negative, non-increasing
+along the grid, positive first release) — explicitly not a poisoning
+defence; a careful adversary can stay inside the bounds. Detection of a
+careful malicious node requires secure or robust aggregation, which is
+out of scope for the vanilla algorithm.
+
 Parent-task guard
 ~~~~~~~~~~~~~~~~~
 

@@ -284,6 +284,48 @@ class TestSingularHessian:
 
 
 @pytest.mark.unit
+@pytest.mark.unit
+class TestValidateRisksetAggregates:
+    """Structural sanity bounds on a node's released risk-set sizes."""
+
+    def test_increasing_sizes_rejected(self):
+        from importlib import import_module
+
+        from vantage6.algorithm.tools.exceptions import AlgorithmError
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(AlgorithmError, match="Organisation 2"):
+            central._validate_riskset_aggregates(2, [5.0, 3.0, 4.0])
+
+    def test_negative_rejected(self):
+        from importlib import import_module
+
+        from vantage6.algorithm.tools.exceptions import AlgorithmError
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(AlgorithmError, match="Organisation 3"):
+            central._validate_riskset_aggregates(3, [5.0, -1.0, 0.0])
+
+    def test_zero_first_rejected(self):
+        from importlib import import_module
+
+        from vantage6.algorithm.tools.exceptions import AlgorithmError
+
+        central = import_module("v6-cox-ph.central")
+        with pytest.raises(AlgorithmError, match="Organisation 3"):
+            central._validate_riskset_aggregates(3, [0.0, 0.0, 0.0])
+
+    def test_valid_sequences_pass(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+
+        # held releases and a shrinking tail, including the legitimate
+        # zeros at pooled grid points beyond the node's own data
+        central._validate_riskset_aggregates(1, [5.0, 5.0, 3.0, 1.0])
+        central._validate_riskset_aggregates(1, [5.0, 3.0, 0.0, 0.0])
+
+
 class TestSubTaskValidation:
     """The result parser catches malformed sub-task results.
 
