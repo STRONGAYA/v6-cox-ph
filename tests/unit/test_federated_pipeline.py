@@ -435,6 +435,39 @@ class TestProvenance:
 
 
 @pytest.mark.unit
+class TestRequireAllOrganisationsAnswered:
+    """The fail-closed aggregation error names the missing organisations."""
+
+    def test_names_the_missing_organisation_ids(self):
+        from importlib import import_module
+
+        from vantage6.algorithm.tools.exceptions import AlgorithmError
+
+        central = import_module("v6-cox-ph.central")
+        results = [{"organization_id": 1}, {"organization_id": 2}]
+        with pytest.raises(AlgorithmError, match="no result from organisation ids"):
+            central._require_all_organisations_answered(results, [1, 2, 3])
+
+    def test_missing_ids_are_listed(self):
+        from importlib import import_module
+
+        from vantage6.algorithm.tools.exceptions import AlgorithmError
+
+        central = import_module("v6-cox-ph.central")
+        results = [{"organization_id": 1}, {"organization_id": 3}]
+        with pytest.raises(AlgorithmError) as excinfo:
+            central._require_all_organisations_answered(results, [1, 2, 3])
+        assert "[2]" in str(excinfo.value)
+
+    def test_passes_when_all_answered(self):
+        from importlib import import_module
+
+        central = import_module("v6-cox-ph.central")
+
+        central._require_all_organisations_answered([{"organization_id": 1}, {"organization_id": 2}], [1, 2])
+
+
+@pytest.mark.unit
 class TestSubTaskValidation:
     """The result parser catches malformed sub-task results.
 
