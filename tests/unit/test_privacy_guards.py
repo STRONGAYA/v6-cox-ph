@@ -900,6 +900,11 @@ class TestRdfCollectBounded:
             organization_ids=[1],
         )
 
+    @pytest.fixture
+    def tmp_folder(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TEMPORARY_FOLDER", str(tmp_path))
+        return tmp_path
+
     def _df_with_endpoint(self):
         return pd.DataFrame(
             {
@@ -918,7 +923,7 @@ class TestRdfCollectBounded:
         fake.collect_sparql_data = collect
         monkeypatch.setitem(sys.modules, "vantage6_strongaya_rdf", fake)
 
-    def test_timeout_raises_algorithm_error(self, client, monkeypatch):
+    def test_timeout_raises_algorithm_error(self, client, tmp_folder, monkeypatch):
         import time
 
         def slow_collect(variables, endpoint):
@@ -930,7 +935,7 @@ class TestRdfCollectBounded:
         with pytest.raises(AlgorithmError, match="did not finish within the configured timeout"):
             prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
 
-    def test_normal_path_uses_the_collected_frame(self, client, monkeypatch):
+    def test_normal_path_uses_the_collected_frame(self, client, tmp_folder, monkeypatch):
         collected = pd.DataFrame(
             {
                 "time": [1.0, 2.0, 3.0, 4.0],
@@ -942,7 +947,7 @@ class TestRdfCollectBounded:
         out, _, _ = prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
         assert len(out) == 4
 
-    def test_library_error_is_sanitised(self, client, monkeypatch):
+    def test_library_error_is_sanitised(self, client, tmp_folder, monkeypatch):
         """The library's chained error text (endpoint internals) is not echoed."""
         from vantage6.algorithm.tools.exceptions import AlgorithmError as V6AlgorithmError
 
@@ -973,6 +978,105 @@ class TestRdfCollectBounded:
             monkeypatch.setenv("COXPH_RDF_COLLECT_TIMEOUT", raw)
             with pytest.raises(UserInputError, match="COXPH_RDF_COLLECT_TIMEOUT"):
                 load_rdf_collect_timeout()
+
+
+@pytest.mark.unit
+class TestRdfQueryOnceCache:
+    """The endpoint is queried once per run; later partials read the cache.
+
+    Correctness/performance fix (row-set consistency + endpoint load),
+    with the SA-11 cache-surface mitigations: the cache is validated
+    before use, masked per partial after reading, run-scoped, and
+    fail-closed when invalid.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def tmp_folder(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TEMPORARY_FOLDER", str(tmp_path))
+        return tmp_path
+
+    def _df_with_endpoint(self):
+        return pd.DataFrame(
+            {
+                "endpoint": ["http://localhost:9999/sparql"] * 3,
+                "time": [1.0, 2.0, 3.0],
+                "event": [1, 0, 1],
+                "age": [50.0, 51.0, 52.0],
+            }
+        )
+
+    def _fake_rdf_module(self, monkeypatch, collect):
+        import sys
+        import types
+
+        fake = types.ModuleType("vantage6_strongaya_rdf")
+        fake.collect_sparql_data = collect
+        monkeypatch.setitem(sys.modules, "vantage6_strongaya_rdf", fake)
+
+    def test_query_once_across_partials(self, client, tmp_folder, monkeypatch):
+        calls = []
+
+        def counting_collect(variables, endpoint):
+            calls.append(endpoint)
+            return pd.DataFrame(
+                {
+                    "time": [1.0, 2.0, 3.0, 4.0],
+                    "event": [1, 0, 1, 0],
+                    "age": [50.0, 51.0, 52.0, 53.0],
+                }
+            )
+
+        self._fake_rdf_module(monkeypatch, counting_collect)
+        # compute_summed_z then perform_iteration: two partials, one query
+        out1, _, _ = prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+        out2, _, _ = prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+        assert len(calls) == 1
+        assert len(out1) == 4
+        assert len(out2) == 4
+        assert (tmp_folder / privacy_guards.RDF_CACHE_FILENAME).exists()
+
+    def test_cache_missing_variable_fails_closed(self, client, tmp_folder, monkeypatch):
+        cache = tmp_folder / privacy_guards.RDF_CACHE_FILENAME
+        pd.DataFrame({"time": [1.0], "event": [1]}).to_csv(cache, index=False)
+        self._fake_rdf_module(monkeypatch, lambda variables, endpoint: pd.DataFrame())
+        with pytest.raises(AlgorithmError, match="missing variables"):
+            prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+
+    def test_corrupt_cache_fails_closed(self, client, tmp_folder, monkeypatch):
+        cache = tmp_folder / privacy_guards.RDF_CACHE_FILENAME
+        cache.write_bytes(b"")
+        self._fake_rdf_module(monkeypatch, lambda variables, endpoint: pd.DataFrame())
+        with pytest.raises(AlgorithmError, match="could not be read"):
+            prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+
+    def test_csv_path_never_caches(self, client, tmp_folder, monkeypatch):
+        calls = []
+
+        def counting_collect(variables, endpoint):
+            calls.append(endpoint)
+            return pd.DataFrame()
+
+        self._fake_rdf_module(monkeypatch, counting_collect)
+        df = pd.DataFrame({"time": [1.0, 2.0], "event": [1, 0], "age": [50.0, 51.0]})
+        prepare_node_data(client, df, "time", "event", ["age"], need_outcome=True)
+        assert calls == []
+        assert not (tmp_folder / privacy_guards.RDF_CACHE_FILENAME).exists()
+
+    def test_missing_temporary_folder_fails_closed(self, client, monkeypatch):
+        monkeypatch.delenv("TEMPORARY_FOLDER", raising=False)
+        self._fake_rdf_module(monkeypatch, lambda variables, endpoint: pd.DataFrame())
+        with pytest.raises(UserInputError, match="TEMPORARY_FOLDER"):
+            prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
 
 
 @pytest.mark.unit

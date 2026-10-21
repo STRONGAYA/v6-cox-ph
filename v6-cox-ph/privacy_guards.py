@@ -89,7 +89,9 @@ The held-event fraction abort cap is loaded centrally too
 
 from __future__ import annotations
 
+import os
 import threading
+from pathlib import Path
 from typing import Optional, TypedDict
 
 import numpy as np
@@ -124,6 +126,15 @@ ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
 ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
 ENV_MAX_HELD_EVENT_FRACTION = "COXPH_MAX_HELD_EVENT_FRACTION"
 ENV_RDF_COLLECT_TIMEOUT = "COXPH_RDF_COLLECT_TIMEOUT"
+
+# The run-local cache file for the collected RDF frame (STRONG AYA
+# query-once convention): the first partial writes it into the run's
+# temporary volume, later partials read it. CSV, not parquet: the
+# reference STRONG AYA algorithms carry no parquet engine, and adding one
+# (pyarrow, ~100 MB installed) to the image for a path that is dormant on
+# CSV deployments is not proportionate; a small run-local table needs no
+# binary format.
+RDF_CACHE_FILENAME = "collected_rdf_data.csv"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
@@ -501,6 +512,70 @@ def collect_rdf_data_bounded(df: pd.DataFrame, variables_to_analyse: list) -> pd
     return outcome["df"]
 
 
+def _rdf_cache_path() -> Path:
+    """The run-local cache path for the collected RDF frame."""
+    from vantage6.algorithm.tools.util import get_env_var
+
+    folder = get_env_var("TEMPORARY_FOLDER", default=None)
+    if folder is None or str(folder).strip() == "":
+        raise UserInputError(
+            "TEMPORARY_FOLDER is not set; the RDF data path needs the run's temporary volume."
+        )
+    return Path(folder) / RDF_CACHE_FILENAME
+
+
+def collect_or_load_rdf(variables_to_analyse: list, df: pd.DataFrame) -> pd.DataFrame:
+    """Collect RDF data once per run; later partials read the cache.
+
+    STRONG AYA query-once convention (strong-aya-algorithm §2): the first
+    partial queries the endpoint and caches the collected frame in the
+    run's temporary volume; later partials read the cache, so the endpoint
+    is queried exactly once per run and every partial sees the same
+    snapshot (the two-queries-per-run row-set-consistency hazard is
+    closed). Central dispatches ``compute_summed_z`` first and waits for
+    it before dispatching the iterations, so there are no concurrent
+    writers, and the cache is deliberately not deleted after a read —
+    every Newton iteration reads it; vantage6 removes the per-run volume.
+
+    A present but invalid or unreadable cache fails closed rather than
+    silently re-querying a changed endpoint. The cache is written
+    atomically (a ``*.tmp`` sibling, ``os.replace``) so a crashed write
+    never leaves a half-file. The CSV path (no ``endpoint`` column)
+    never touches the cache.
+
+    This is a correctness/performance fix (row-set consistency + endpoint
+    load), not a privacy mitigation; the cache is a plaintext-at-rest
+    surface of the SA-11 class, mitigated by the validation before use,
+    the per-partial masking after reading, and the run-scoped volume.
+    """
+    cache_path = _rdf_cache_path()
+    if cache_path.exists():
+        try:
+            cached = pd.read_csv(cache_path)
+        except Exception:
+            raise AlgorithmError("Cached RDF data could not be read; refusing to proceed.") from None
+        if not isinstance(cached, pd.DataFrame) or cached.empty:
+            raise AlgorithmError("Cached RDF data is not a usable table; refusing to proceed.")
+        missing = [name for name in variables_to_analyse if name not in cached.columns]
+        if missing:
+            raise AlgorithmError(f"Cached RDF data is missing variables {missing}; refusing to proceed.")
+        return cached
+    collected = collect_rdf_data_bounded(df, variables_to_analyse)
+    tmp_path = cache_path.with_suffix(".tmp")
+    try:
+        collected.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, cache_path)
+    except Exception:
+        # A failed write must not leave a half-file behind; the cache is
+        # absent (not corrupt), so the next partial re-queries.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        safe_log("warn", "Could not write the RDF data cache; later partials will re-query.")
+    return collected
+
+
 def load_max_held_event_fraction() -> Optional[float]:
     """Load the central abort cap on the held-event fraction.
 
@@ -682,9 +757,12 @@ def prepare_node_data(
     if variables_to_stratify is not None:
         variables_to_analyse.extend(variables_to_stratify.keys())
     if "endpoint" in df.columns:
-        # STRONG AYA: the collect is bounded (COXPH_RDF_COLLECT_TIMEOUT) so
-        # a hanging endpoint fails the run instead of blocking the partial.
-        df = collect_rdf_data_bounded(df, variables_to_analyse)
+        # STRONG AYA: query the endpoint once per run — the first partial
+        # collects and caches the frame in the run's temporary volume,
+        # later partials read the cache (collect_or_load_rdf). The collect
+        # itself is bounded (COXPH_RDF_COLLECT_TIMEOUT) so a hanging
+        # endpoint fails the run instead of blocking the partial.
+        df = collect_or_load_rdf(variables_to_analyse, df)
     df = mask_unnecessary_variables(df, variables_to_analyse)
 
     if variables_to_stratify is not None:
