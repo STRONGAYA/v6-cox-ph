@@ -24,6 +24,33 @@ Configuration below); two central-side resource caps bound the size of the
 run (see Resource caps below), and the reported curve time keys are
 coarsened centrally (see Curve time-key coarsening below).
 
+Deployment arrangement (STRONG AYA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This phase of the algorithm is built for the STRONG AYA deployment
+model: an **encrypted collaboration** with an **independent aggregator**
+— the researcher creates the main task and assigns ``central`` to the
+node of an aggregator organisation that holds no data. Two properties
+make that arrangement hold:
+
+- The data nodes' **initiator policies** decide who may send tasks to
+  them. The independent aggregator is a convention, not a vantage6
+  guarantee: nothing ties ``central`` to the aggregator's node, and the
+  parent-task guard only refuses *direct partial invocation*. A data
+  node therefore restricts ``allowed_organizations`` to the aggregator
+  organisation (or admits no users it does not trust). Without that
+  policy, a researcher whose organisation holds a node can run
+  ``central`` there and read every partial result — the partial results
+  are then encrypted for the researcher's organisation. With the policy,
+  the bypass is refused at task creation and the study still runs.
+- The **aggregator is a trust assumption**: its node holds the kwargs,
+  every partial result and the final result in plaintext (the node writes
+  the output before encrypting it, and the per-run task folders persist
+  and are mounted into every algorithm container). The partials return
+  only what ``central`` uses, and every released aggregate is
+  thresholded and guarded, so the aggregator's exposure is to
+  above-threshold aggregates — not to row-level data.
+
 Parent-task guard
 ~~~~~~~~~~~~~~~~~
 
