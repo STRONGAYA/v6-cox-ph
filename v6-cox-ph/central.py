@@ -659,7 +659,8 @@ def _require_all_organisations_answered(results, ids: list) -> None:
     ``PrivacyThresholdViolation``) is simply absent from the list.
     Aggregating the survivors would silently compute a model over a subset
     of the collaboration — the run must fail instead. The message
-    names the counts, never the data.
+    names the counts and the organisation ids that did not answer
+    (ids are not data), never any data.
 
     Raises
     ------
@@ -668,7 +669,10 @@ def _require_all_organisations_answered(results, ids: list) -> None:
     """
     valid = [r for r in results if isinstance(r, dict)]
     if len(valid) != len(ids):
+        answered = {r.get("organization_id") for r in valid}
+        missing = sorted(org_id for org_id in ids if org_id not in answered)
         raise AlgorithmError(
-            f"Only {len(valid)} of {len(ids)} organisations returned a result; "
+            f"Only {len(valid)} of {len(ids)} organisations returned a result "
+            f"(no result from organisation ids {missing}); "
             f"refusing to aggregate a subset. The run fails closed."
         )
