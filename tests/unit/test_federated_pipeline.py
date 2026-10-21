@@ -411,6 +411,28 @@ class TestValidateRisksetAggregates:
         central._validate_riskset_aggregates(1, [5.0, 3.0, 0.0, 0.0])
 
 
+class TestProvenance:
+    """The result records the sender provenance and the input arguments."""
+
+    def test_provenance_block_echoes_the_input_arguments(self, guards_off):
+        df1, df2, _ = _load_datasets()
+        datasets = [
+            [{"database": df1, "db_type": "csv"}],
+            [{"database": df2, "db_type": "csv"}],
+        ]
+        result = _run_central(datasets, [1, 2], variables_to_stratify={"sex": ["F"]})
+        provenance = result["provenance"]
+        assert provenance["input_arguments"]["time_col"] == "time"
+        assert provenance["input_arguments"]["outcome_col"] == "event"
+        assert provenance["input_arguments"]["expl_vars"] == EXPL_VARS
+        assert provenance["input_arguments"]["organization_ids"] == [1, 2]
+        assert provenance["input_arguments"]["variables_to_stratify"] == {"sex": ["F"]}
+        # The mock client carries no container token, so the sender lookup
+        # is skipped (best-effort) and the sender stays unset.
+        assert provenance["submitted_by_user"] is None
+        assert provenance["submitted_by_organisation"] is None
+
+
 class TestRequireAllOrganisationsAnswered:
     """The fail-closed aggregation error names the missing organisations."""
 

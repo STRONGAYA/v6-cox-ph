@@ -65,6 +65,17 @@ defence; a careful adversary can stay inside the bounds. Detection of a
 careful malicious node requires secure or robust aggregation, which is
 out of scope for the vanilla algorithm.
 
+Researcher accountability (STRONG AYA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In this deployment researchers are **vetted and accountable**, not
+adversarial: task submissions must conform to the DAA (data access
+agreement) appendices, the aggregator reviews the queries it decrypts,
+and every result records the **provenance of the sender and the input
+arguments** (who submitted the run and with which arguments), so a
+released result can always be matched against its request. Stratified
+analyses run under this semi-honest, audited posture.
+
 Parent-task guard
 ~~~~~~~~~~~~~~~~~
 

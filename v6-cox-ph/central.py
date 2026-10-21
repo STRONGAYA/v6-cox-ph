@@ -8,6 +8,7 @@ encryption if that is enabled).
 
 from typing import Optional, TypeVar
 
+import jwt
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ValidationError
@@ -542,6 +543,20 @@ def central(
         "covariance": np.asarray(model["covariance"]).tolist(),
         "algorithm_version": _algorithm_version(),
         "variables_to_stratify": variables_to_stratify,
+        # STRONG AYA trace: the provenance of the sender and the input
+        # arguments travel with the result, so a query review at the
+        # aggregator can match the released result against the request.
+        "provenance": {
+            **_task_provenance(client),
+            "input_arguments": {
+                "time_col": time_col,
+                "outcome_col": outcome_col,
+                "expl_vars": expl_vars,
+                "organization_ids": organization_ids,
+                "covariate_profiles": validated.covariate_profiles,
+                "variables_to_stratify": variables_to_stratify,
+            },
+        },
         "baseline_cumulative_hazard": baseline_cumulative_hazard,
         "survival_curves": survival_curves,
         "curve_time_sig_figs": curve_time_sig_figs,
@@ -592,6 +607,47 @@ def _validate_riskset_aggregates(organization_id: int, agg1) -> None:
             f"Organisation {organization_id}: released risk-set sizes increase along the "
             f"grid, which no real risk-set sequence does."
         )
+
+
+def _task_provenance(client) -> dict:
+    """Provenance of the sender, recorded by the STRONG AYA layer.
+
+    The result carries who submitted the run — the task's initiating
+    user and organisation, read from the task this container runs — and
+    when, so a query review at the aggregator (the party that decrypts
+    the kwargs) can match the released result against the request. The
+    lookup is best-effort: a failed lookup warns and leaves the sender
+    unset rather than failing the analysis. The sender ids and the
+    timestamp are task metadata, not node data.
+
+    ``verify_signature=False`` is intentional — the node already verified
+    the token; the provenance lookup only reads ``sub`` (same as the
+    parent-task guard).
+    """
+    provenance = {
+        "submitted_by_user": None,
+        "submitted_by_organisation": None,
+        "submitted_at": None,
+    }
+    token = getattr(client, "_access_token", None)
+    if token is None:
+        return provenance
+    try:
+        # nosec B101 - intentional: the node verified the token; only sub is read
+        task_id = jwt.decode(
+            token, options={"verify_signature": False, "verify_exp": False, "verify_sub": False}
+        )["sub"]["task_id"]
+        task = client.task.get(task_id)
+    except Exception as e:
+        safe_log("warn", f"Could not record task provenance: {type(e).__name__}")
+        return provenance
+    if isinstance(task, dict):
+        init_user = task.get("init_user") or {}
+        init_org = task.get("init_org") or {}
+        provenance["submitted_by_user"] = init_user.get("id")
+        provenance["submitted_by_organisation"] = init_org.get("id")
+        provenance["submitted_at"] = task.get("created_at")
+    return provenance
 
 
 def _released_sig_figs(settings) -> int:
