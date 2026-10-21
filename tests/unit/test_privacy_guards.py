@@ -37,6 +37,7 @@ guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
 load_curve_time_sig_figs = privacy_guards.load_curve_time_sig_figs
 load_max_held_event_fraction = privacy_guards.load_max_held_event_fraction
 load_privacy_settings = privacy_guards.load_privacy_settings
+load_rdf_collect_timeout = privacy_guards.load_rdf_collect_timeout
 load_resource_caps = privacy_guards.load_resource_caps
 merged_time_map = privacy_guards.merged_time_map
 prepare_node_data = privacy_guards.prepare_node_data
@@ -883,6 +884,95 @@ class TestStratification:
         )
         assert threshold_met is True
         assert len(out) == 250
+
+
+@pytest.mark.unit
+class TestRdfCollectBounded:
+    """The RDF collect step is bounded by COXPH_RDF_COLLECT_TIMEOUT."""
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    def _df_with_endpoint(self):
+        return pd.DataFrame(
+            {
+                "endpoint": ["http://localhost:9999/sparql"] * 3,
+                "time": [1.0, 2.0, 3.0],
+                "event": [1, 0, 1],
+                "age": [50.0, 51.0, 52.0],
+            }
+        )
+
+    def _fake_rdf_module(self, monkeypatch, collect):
+        import sys
+        import types
+
+        fake = types.ModuleType("vantage6_strongaya_rdf")
+        fake.collect_sparql_data = collect
+        monkeypatch.setitem(sys.modules, "vantage6_strongaya_rdf", fake)
+
+    def test_timeout_raises_algorithm_error(self, client, monkeypatch):
+        import time
+
+        def slow_collect(variables, endpoint):
+            time.sleep(5.0)
+            return pd.DataFrame()
+
+        self._fake_rdf_module(monkeypatch, slow_collect)
+        monkeypatch.setenv("COXPH_RDF_COLLECT_TIMEOUT", "0.2")
+        with pytest.raises(AlgorithmError, match="did not finish within the configured timeout"):
+            prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+
+    def test_normal_path_uses_the_collected_frame(self, client, monkeypatch):
+        collected = pd.DataFrame(
+            {
+                "time": [1.0, 2.0, 3.0, 4.0],
+                "event": [1, 0, 1, 0],
+                "age": [50.0, 51.0, 52.0, 53.0],
+            }
+        )
+        self._fake_rdf_module(monkeypatch, lambda variables, endpoint: collected.copy())
+        out, _, _ = prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+        assert len(out) == 4
+
+    def test_library_error_is_sanitised(self, client, monkeypatch):
+        """The library's chained error text (endpoint internals) is not echoed."""
+        from vantage6.algorithm.tools.exceptions import AlgorithmError as V6AlgorithmError
+
+        def failing_collect(variables, endpoint):
+            raise V6AlgorithmError(
+                "error",
+                "Error processing time: HTTPConnectionPool(host='localhost', "
+                "port=9999): connection refused for /sparql",
+            )
+
+        self._fake_rdf_module(monkeypatch, failing_collect)
+        with pytest.raises(AlgorithmError, match="RDF data collection failed"):
+            prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+        try:
+            prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
+        except AlgorithmError as e:
+            message = str(e)
+            assert "localhost" not in message
+            assert "9999" not in message
+            assert "/sparql" not in message
+
+    def test_loader_default_and_invalid(self, monkeypatch):
+        monkeypatch.delenv("COXPH_RDF_COLLECT_TIMEOUT", raising=False)
+        assert load_rdf_collect_timeout() == 60.0
+        monkeypatch.setenv("COXPH_RDF_COLLECT_TIMEOUT", "5")
+        assert load_rdf_collect_timeout() == 5.0
+        for raw in ("abc", "0", "-1"):
+            monkeypatch.setenv("COXPH_RDF_COLLECT_TIMEOUT", raw)
+            with pytest.raises(UserInputError, match="COXPH_RDF_COLLECT_TIMEOUT"):
+                load_rdf_collect_timeout()
 
 
 @pytest.mark.unit

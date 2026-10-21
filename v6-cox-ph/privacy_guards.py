@@ -89,6 +89,7 @@ The held-event fraction abort cap is loaded centrally too
 
 from __future__ import annotations
 
+import threading
 from typing import Optional, TypedDict
 
 import numpy as np
@@ -122,6 +123,7 @@ ENV_MAX_COVARIATES = "COXPH_MAX_COVARIATES"
 ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
 ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
 ENV_MAX_HELD_EVENT_FRACTION = "COXPH_MAX_HELD_EVENT_FRACTION"
+ENV_RDF_COLLECT_TIMEOUT = "COXPH_RDF_COLLECT_TIMEOUT"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
@@ -131,6 +133,7 @@ DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
 DEFAULT_CURVE_TIME_SIG_FIGS = 6
 DEFAULT_MAX_HELD_EVENT_FRACTION = 0.5
+DEFAULT_RDF_COLLECT_TIMEOUT = 60.0
 
 # The sample-size check admits a node only when it has at least this many
 # times the risk-set size floor in rows (on top of the reconstruction bound
@@ -424,6 +427,80 @@ def load_curve_time_sig_figs() -> Optional[int]:
     )
 
 
+def load_rdf_collect_timeout() -> float:
+    """Load the RDF collect timeout from the environment (node side).
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. The STRONG AYA
+    collect step (``collect_sparql_data``) issues its SPARQL query
+    without a timeout; this bounds it so an unreachable or hanging
+    endpoint fails the run instead of blocking the partial.
+
+    Returns
+    -------
+    float
+        The timeout in seconds (default 60).
+
+    Raises
+    ------
+    UserInputError
+        If the value is not a positive number.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    raw = get_env_var(ENV_RDF_COLLECT_TIMEOUT, default=None)
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_RDF_COLLECT_TIMEOUT
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        raise UserInputError(f"{ENV_RDF_COLLECT_TIMEOUT} must be a positive number of seconds.") from None
+    if not timeout > 0:
+        raise UserInputError(f"{ENV_RDF_COLLECT_TIMEOUT} must be a positive number of seconds.")
+    return timeout
+
+
+def collect_rdf_data_bounded(df: pd.DataFrame, variables_to_analyse: list) -> pd.DataFrame:
+    """Collect RDF data with a bounded timeout (STRONG AYA).
+
+    ``collect_sparql_data`` runs without a timeout of its own; an
+    unreachable or hanging endpoint would otherwise block the partial
+    until the container is killed. The collect runs in a daemon thread;
+    on timeout the run fails with an ``AlgorithmError`` naming the
+    configured timeout, never the endpoint internals.
+    """
+    from vantage6_strongaya_rdf import collect_sparql_data
+
+    timeout = load_rdf_collect_timeout()
+    endpoint = df["endpoint"].iloc[0]
+    outcome: dict = {}
+
+    def _collect():
+        try:
+            outcome["df"] = collect_sparql_data(variables_to_analyse, endpoint=endpoint)
+        except Exception as e:  # surfaced through the caller's error handling
+            outcome["error"] = e
+
+    worker = threading.Thread(target=_collect, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise AlgorithmError(
+            f"RDF data collection did not finish within the configured timeout "
+            f"({timeout:.0f}s, {ENV_RDF_COLLECT_TIMEOUT}); refusing to proceed."
+        )
+    if "error" in outcome:
+        error = outcome["error"]
+        if isinstance(error, UserInputError):
+            raise error
+        # The library wraps endpoint errors in an AlgorithmError whose
+        # message embeds the underlying error text (endpoint host, URL,
+        # connection details). The container log reaches the researcher,
+        # so the wrapper surfaces only the failure stage, never the
+        # endpoint internals.
+        raise AlgorithmError("RDF data collection failed; refusing to proceed.") from None
+    return outcome["df"]
+
+
 def load_max_held_event_fraction() -> Optional[float]:
     """Load the central abort cap on the held-event fraction.
 
@@ -605,9 +682,9 @@ def prepare_node_data(
     if variables_to_stratify is not None:
         variables_to_analyse.extend(variables_to_stratify.keys())
     if "endpoint" in df.columns:
-        from vantage6_strongaya_rdf import collect_sparql_data
-
-        df = collect_sparql_data(variables_to_analyse, endpoint=df["endpoint"].iloc[0])
+        # STRONG AYA: the collect is bounded (COXPH_RDF_COLLECT_TIMEOUT) so
+        # a hanging endpoint fails the run instead of blocking the partial.
+        df = collect_rdf_data_bounded(df, variables_to_analyse)
     df = mask_unnecessary_variables(df, variables_to_analyse)
 
     if variables_to_stratify is not None:
