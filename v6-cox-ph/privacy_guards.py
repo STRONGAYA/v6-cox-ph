@@ -518,9 +518,7 @@ def _rdf_cache_path() -> Path:
 
     folder = get_env_var("TEMPORARY_FOLDER", default=None)
     if folder is None or str(folder).strip() == "":
-        raise UserInputError(
-            "TEMPORARY_FOLDER is not set; the RDF data path needs the run's temporary volume."
-        )
+        raise UserInputError("TEMPORARY_FOLDER is not set; the RDF data path needs the run's temporary volume.")
     return Path(folder) / RDF_CACHE_FILENAME
 
 

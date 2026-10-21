@@ -599,9 +599,7 @@ def _validate_riskset_aggregates(organization_id: int, agg1) -> None:
             f"Organisation {organization_id}: released risk-set sizes must be non-negative and finite."
         )
     if sizes[0] <= 0:
-        raise AlgorithmError(
-            f"Organisation {organization_id}: the first released risk-set size must be positive."
-        )
+        raise AlgorithmError(f"Organisation {organization_id}: the first released risk-set size must be positive.")
     if np.any(np.diff(sizes) > 0):
         raise AlgorithmError(
             f"Organisation {organization_id}: released risk-set sizes increase along the "
@@ -634,9 +632,9 @@ def _task_provenance(client) -> dict:
         return provenance
     try:
         # nosec B101 - intentional: the node verified the token; only sub is read
-        task_id = jwt.decode(
-            token, options={"verify_signature": False, "verify_exp": False, "verify_sub": False}
-        )["sub"]["task_id"]
+        task_id = jwt.decode(token, options={"verify_signature": False, "verify_exp": False, "verify_sub": False})[
+            "sub"
+        ]["task_id"]
         task = client.task.get(task_id)
     except Exception as e:
         safe_log("warn", f"Could not record task provenance: {type(e).__name__}")
