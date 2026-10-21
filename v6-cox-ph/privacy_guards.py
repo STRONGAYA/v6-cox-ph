@@ -871,12 +871,12 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
             warn(
                 f"Sample size threshold not met: row count does not meet the admission bound "
                 f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change}, "
-                f"{FLOOR_ADMISSION_MULTIPLE} x R={floor}: at least {admission_bound} rows)."
+                f"{FLOOR_ADMISSION_MULTIPLE} x R={floor}: at least {admission_bound} rows).",
             )
         else:
             warn(
                 f"Sample size threshold not met: row count does not meet the reconstruction bound "
-                f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change})."
+                f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change}).",
             )
         return False
 
