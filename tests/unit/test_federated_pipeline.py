@@ -333,7 +333,6 @@ class TestSingularHessian:
 
 
 @pytest.mark.unit
-@pytest.mark.unit
 class TestValidateRisksetAggregates:
     """Structural sanity bounds on a node's released risk-set sizes."""
 
@@ -375,6 +374,7 @@ class TestValidateRisksetAggregates:
         central._validate_riskset_aggregates(1, [5.0, 3.0, 0.0, 0.0])
 
 
+@pytest.mark.unit
 class TestSubTaskValidation:
     """The result parser catches malformed sub-task results.
 
