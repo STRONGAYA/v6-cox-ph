@@ -18,10 +18,16 @@ from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
 from vantage6.algorithm.tools.util import info, warn
 
-from .coxph_logic import back_transform_results, compute_derivatives, compute_model_results
-from .coxph_logic import partial_log_likelihood, pooled_standardisation
-from .coxph_logic import survival_curves as survival_curves_from_aggregates
-from .coxph_logic import format_results_dataframe, held_event_fraction
+from .coxph_logic import (
+    back_transform_results,
+    compute_derivatives,
+    compute_model_results,
+    format_results_dataframe,
+    held_event_fraction,
+    partial_log_likelihood,
+    pooled_standardisation,
+    survival_curves as survival_curves_from_aggregates,
+)
 from .miscellaneous import IterationResult, SummedZResult, format_validation_error, validate_coxph_input
 from .privacy_guards import (
     ENV_MAX_COVARIATES,
@@ -90,6 +96,10 @@ def central(
         Organisations that do not meet the sample-size threshold fail the
         whole run with ``PrivacyThresholdViolation`` — select them explicitly
         here rather than relying on automatic exclusion.
+    covariate_profiles : list, optional
+        Optional covariate profiles for survival curves. Each entry maps
+        explanatory variable names to values; variables left out are taken
+        at the pooled event-case mean (the baseline profile).
 
     Returns
     -------
@@ -168,9 +178,9 @@ def central(
         description="Computing the summed Z statistic",
     )
 
-    info("Waiting for results")
+    info(f"Waiting for results of task: {task.get('id')}")
     results = client.wait_for_results(task_id=task.get("id"))
-    info("Results obtained!")
+    info(f"Results obtained of task: {task.get('id')}!")
     _require_all_organisations_answered(results, ids)
 
     z_sum = None
@@ -192,6 +202,7 @@ def central(
         time_event_df = pd.DataFrame.from_dict(result.times)
         time_event_dfs.append(time_event_df)
         node_privacy_settings.append(result.privacy_settings)
+
         # Per-node event counts and settings, paired by organisation id for
         # the held-fraction diagnostic (results are not in dispatch order).
         node_info[result.organization_id] = (
@@ -295,9 +306,6 @@ def central(
     epoch = 0
 
     for epoch in range(epochs):
-        # Serialise beta for vantage6
-        beta_serialised: list = beta.tolist()
-
         info("Defining input parameters for subtask — perform iteration")
         input_ = {
             "method": "perform_iteration",
@@ -305,7 +313,7 @@ def central(
                 "time_col": time_col,
                 "outcome_col": outcome_col,
                 "expl_vars": expl_vars,
-                "beta": beta_serialised,
+                "beta": beta.tolist(),
                 "centre": centre.tolist(),
                 "scale": scale.tolist(),
                 "unique_time_events": unique_time_events,
@@ -320,9 +328,9 @@ def central(
             description="Iterating to find the optimal beta",
         )
 
-        info("Waiting for results")
+        info(f"Waiting for results of task: {task.get('id')}")
         results = client.wait_for_results(task_id=task.get("id"))
-        info("Results obtained!")
+        info(f"Results obtained of task: {task.get('id')}!")
         _require_all_organisations_answered(results, ids)
 
         n_times = len(unique_time_events)
