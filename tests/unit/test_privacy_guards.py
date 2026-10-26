@@ -1274,6 +1274,125 @@ class TestMinRiskSetFloor:
 
 
 @pytest.mark.unit
+class TestRestrictedGroupHolds:
+    """The risk-set hold walk extends to category-restricted groups.
+
+    The 0/1 indicator term of a categorical covariate lets a reader split
+    the released sums into a category's members and the rest, so the walk
+    holds a grid point while any group — or its complement — has fewer than
+    k members leaving since the held point (its jump guard) or fewer than
+    the floor members at risk (its floor). At beta = 0 with a single
+    covariate, agg1[t] equals the risk-set size |R(t)|, so the walk is
+    observable directly on agg1.
+    """
+
+    def _agg1(self, times, grid, k, min_risk_set_size, groups=None):
+        X = np.zeros((len(times), 1))
+        beta = np.zeros(1)
+        agg1, _, _ = guarded_risk_set_aggregates(
+            pd.Series(times), grid, k, X, beta, min_risk_set_size, restricted_groups=groups
+        )
+        return agg1
+
+    def test_group_jump_guard_holds_small_member_differences(self):
+        # 10 rows; the group holds the rows at times 1..5. Between grid 4
+        # and 10 the total walk releases (6 rows leave >= k=5) but only 2
+        # group members leave (< k) — the group jump guard holds.
+        times = [float(i) for i in range(1, 11)]
+        group = np.zeros(10, dtype=bool)
+        group[:5] = True
+        agg1 = self._agg1(times, [4.0, 10.0], k=5, min_risk_set_size=None, groups=[group])
+        np.testing.assert_array_equal(agg1, [7.0, 7.0])  # held at the first set
+        # without the groups the same walk releases the smaller set
+        agg1_plain = self._agg1(times, [4.0, 10.0], k=5, min_risk_set_size=None)
+        np.testing.assert_array_equal(agg1_plain, [7.0, 1.0])
+
+    def test_group_floor_holds_small_member_risk_sets(self):
+        # 12 rows; the group holds the rows at times 1..2. The total walk
+        # releases 11, 8, 1 (k=2); the group holds everything: its jump
+        # guard holds at grid 5 (1 member leaves < k=2) and its floor
+        # holds from there on (no members at risk < R=3).
+        times = [float(i) for i in range(1, 13)]
+        group = np.zeros(12, dtype=bool)
+        group[:2] = True
+        agg1 = self._agg1(times, [2.0, 5.0, 12.0], k=2, min_risk_set_size=3, groups=[group])
+        np.testing.assert_array_equal(agg1, [11.0, 11.0, 11.0])
+        agg1_plain = self._agg1(times, [2.0, 5.0, 12.0], k=2, min_risk_set_size=3)
+        np.testing.assert_array_equal(agg1_plain, [11.0, 8.0, 8.0])
+
+    def test_complement_jump_guard_holds_single_nonmember_differences(self):
+        # 8 rows; the group holds the rows at times 1..5. Between grid 4
+        # and 7 the total walk releases (3 rows leave >= k=2) and 2 group
+        # members leave (>= k), but exactly 1 non-member leaves — the
+        # complement's jump guard holds.
+        times = [float(i) for i in range(1, 9)]
+        group = np.zeros(8, dtype=bool)
+        group[:5] = True
+        agg1 = self._agg1(times, [4.0, 7.0], k=2, min_risk_set_size=None, groups=[group])
+        np.testing.assert_array_equal(agg1, [5.0, 5.0])
+        agg1_plain = self._agg1(times, [4.0, 7.0], k=2, min_risk_set_size=None)
+        np.testing.assert_array_equal(agg1_plain, [5.0, 2.0])
+
+    def test_complement_floor_holds_small_nonmember_risk_sets(self):
+        # 20 rows; the group holds the rows at times 1..8 and 11..18 (16
+        # members), the rest at 9, 10, 19, 20. At grid 15.5 the total
+        # risk set (5) clears the floor R=4, but only 2 non-members are at
+        # risk (< R) — the complement's floor holds alone.
+        times = [float(i) for i in range(1, 21)]
+        group = np.zeros(20, dtype=bool)
+        group[:8] = True
+        group[10:18] = True
+        agg1 = self._agg1(times, [10.5, 15.5], k=2, min_risk_set_size=4, groups=[group])
+        np.testing.assert_array_equal(agg1, [10.0, 10.0])
+        agg1_plain = self._agg1(times, [10.5, 15.5], k=2, min_risk_set_size=4)
+        np.testing.assert_array_equal(agg1_plain, [10.0, 5.0])
+
+    def test_no_groups_leaves_the_walk_unchanged(self):
+        times = [float(i) for i in range(1, 11)]
+        grid = [float(i) for i in range(1, 11)]
+        explicit = self._agg1(times, grid, 5, 8, groups=None)
+        default = self._agg1(times, grid, 5, 8)
+        np.testing.assert_array_equal(explicit, default)
+
+    def test_k1_disables_the_group_holds(self):
+        times = [float(i) for i in range(1, 11)]
+        group = np.zeros(10, dtype=bool)
+        group[:5] = True
+        with_groups = self._agg1(times, [4.0, 10.0], k=1, min_risk_set_size=8, groups=[group])
+        without = self._agg1(times, [4.0, 10.0], k=1, min_risk_set_size=8)
+        np.testing.assert_array_equal(with_groups, without)
+        np.testing.assert_array_equal(with_groups, [7.0, 1.0])  # plain risk-set sizes
+
+    def test_released_member_differences_are_zero_or_ge_k(self):
+        """End-to-end on the guard: every released interval involves 0 or
+        >= k members of the group, so no single member is isolated."""
+        rng = np.random.default_rng(7)
+        n = 60
+        times = np.sort(rng.uniform(0.5, 50.0, size=n))
+        group = np.zeros(n, dtype=bool)
+        group[rng.choice(n, size=20, replace=False)] = True
+        grid = sorted(set(np.round(times, 1)))
+        k, floor = 5, 10
+        agg1 = self._agg1(times, grid, k, floor, groups=[group])
+        # released indices: where agg1 (the risk-set size at beta=0) changes
+        released = [0] + [j for j in range(1, len(grid)) if agg1[j] != agg1[j - 1]]
+        # member counts at risk per grid point
+        member_at_risk = np.array([int((group & (times >= g)).sum()) for g in grid])
+        for a, b in zip(released, released[1:]):
+            leaving = int(member_at_risk[a] - member_at_risk[b])
+            assert leaving == 0 or leaving >= k, f"interval ({grid[a]}, {grid[b]}] isolates {leaving} members"
+        # and the guard actually engaged (the plain walk would isolate one)
+        agg1_plain = self._agg1(times, grid, k, floor)
+        released_plain = [0] + [j for j in range(1, len(grid)) if agg1_plain[j] != agg1_plain[j - 1]]
+        isolated = [
+            (a, b)
+            for a, b in zip(released_plain, released_plain[1:])
+            if 0 < int(member_at_risk[a] - member_at_risk[b]) < k
+        ]
+        assert isolated, "the test data must isolate a member without the group holds"
+
+
+@pytest.mark.unit
 class TestValidateExplVars:
     """Tests for validate_expl_vars (source columns first, then term columns)."""
 

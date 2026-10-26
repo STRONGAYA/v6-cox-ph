@@ -782,6 +782,7 @@ def guarded_risk_set_aggregates(
     X: np.ndarray,
     beta: np.ndarray,
     min_risk_set_size: Optional[int] = None,
+    restricted_groups: Optional[list] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Vectorised risk-set aggregates with the minimum-change ("jump") guard.
 
@@ -804,6 +805,18 @@ def guarded_risk_set_aggregates(
     guard, and the first grid point is always released whatever its
     risk-set size.
 
+    ``restricted_groups`` extends the same walk to researcher-defined
+    groups (the categories of the categorical covariates, reference
+    included). The 0/1 indicator term of a category lets a reader separate
+    the released sums into the group's members and the rest, so the walk
+    holds a grid point while any group — or its complement — has fewer
+    than ``k`` members leaving since the held point (its jump guard) or
+    fewer than the floor members at risk (its floor). Released differences
+    then involve 0 or at least ``k`` members of any category, and released
+    group risk sets hold at least the floor — the same guarantee the total
+    counts give, so category-restricted sums are no finer than the
+    whole-node sums.
+
     Complexity: O(N·p²) compute and O(N·p + T·p²) memory, instead of T×N
     boolean masks.
 
@@ -822,6 +835,10 @@ def guarded_risk_set_aggregates(
     min_risk_set_size : int | None
         The absolute floor on the size of a released risk set; ``None``
         disables the floor. Only effective when ``k > 1``.
+    restricted_groups : list of array-like | None
+        Boolean masks (length N), one per category of the categorical
+        covariates (reference included): the rows of each researcher-
+        defined group. ``None`` disables the group holds.
 
     Returns
     -------
@@ -867,10 +884,21 @@ def guarded_risk_set_aggregates(
                 s2_bucket[:, c2, c1] = s2_bucket[:, c1, c2]
     s2 = np.cumsum(s2_bucket[::-1], axis=0)[::-1]
 
+    # Per-group member counts at risk per grid point (reverse cumulative
+    # sums of the per-bucket member counts), for the group holds below.
+    group_count_r = []
+    if restricted_groups:
+        for mask in restricted_groups:
+            member = np.asarray(mask, dtype=bool)
+            sel = in_grid & member
+            g_counts = np.bincount(bucket_clipped[sel], minlength=n_times).astype(float)
+            group_count_r.append(np.cumsum(g_counts[::-1])[::-1])
+
     # Effective grid index from the counts alone (the jump guard, extended
-    # by the absolute risk-set floor). The floor is part of the same guard
-    # family, so k <= 1 disables it together with the jump guard; the first
-    # grid point is always released, whatever its risk-set size.
+    # by the absolute risk-set floor and by the category-restricted group
+    # holds). The floor is part of the same guard family, so k <= 1
+    # disables it together with the jump guard; the first grid point is
+    # always released, whatever its risk-set size.
     floor = min_risk_set_size if (k is not None and k > 1) else None
     if k is None or k <= 1:
         effective = np.arange(n_times)
@@ -882,7 +910,17 @@ def guarded_risk_set_aggregates(
             removed = count_r[held] - count_r[j]
             jump_holds = 0 < removed < k
             floor_holds = floor is not None and count_r[j] < floor
-            if not jump_holds and not floor_holds:
+            group_holds = False
+            for gcr in group_count_r:
+                g_removed = gcr[held] - gcr[j]
+                comp_removed = removed - g_removed
+                if 0 < g_removed < k or 0 < comp_removed < k:
+                    group_holds = True
+                    break
+                if floor is not None and (gcr[j] < floor or (count_r[j] - gcr[j]) < floor):
+                    group_holds = True
+                    break
+            if not jump_holds and not floor_holds and not group_holds:
                 held = j
             effective[j] = held
 

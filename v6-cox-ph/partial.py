@@ -202,6 +202,21 @@ def perform_iteration(
 
         X_all = (df[covariates.terms].to_numpy(dtype=float) - centre_arr) / scale_arr
 
+        # The categories of the categorical covariates (reference included):
+        # their 0/1 indicator terms let a reader separate the released sums
+        # into each category's members and the rest, so the risk-set guard
+        # holds the same jump/floor guarantees for them as for the whole.
+        restricted_groups = []
+        for entry in covariates.categorical:
+            if entry.name not in df.columns:
+                continue
+            term_columns = [f"{entry.name}[{label}]" for label in entry.categories if label != entry.reference]
+            if not all(term in df.columns for term in term_columns):
+                continue
+            for term in term_columns:
+                restricted_groups.append(df[term].to_numpy(dtype=float) == 1.0)
+            restricted_groups.append((df[term_columns].to_numpy(dtype=float) == 0.0).all(axis=1))
+
         agg1, agg2, agg3 = guarded_risk_set_aggregates(
             df[time_col],
             unique_time_events,
@@ -209,6 +224,7 @@ def perform_iteration(
             X_all,
             beta_arr,
             settings.min_risk_set_size,
+            restricted_groups=restricted_groups,
         )
 
         # Round the released aggregates to the configured precision, then
