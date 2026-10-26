@@ -15,8 +15,8 @@ RUN python -m venv /opt/venv \
  && grep -v ' @ git+' requirements-lock.txt > /tmp/constraints.txt \
  && /opt/venv/bin/pip install --no-cache-dir -r /tmp/constraints.txt \
  && /opt/venv/bin/pip install --no-cache-dir \
-      "vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.4" \
-      "vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.0.2" \
+      "vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.5" \
+      "vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.1.0" \
  && /opt/venv/bin/pip install --no-cache-dir --no-deps .
 
 FROM python:${PYTHON_VERSION}-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4

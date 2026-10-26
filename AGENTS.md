@@ -483,11 +483,17 @@ block 3 above, not here.
 
 ### STRONG AYA layer
 
+- This branch supports vantage6 4.15 only, unlike block 3's 4.14–4.15
+  range: ``vantage6-strongaya-general`` v1.0.5 pins
+  ``vantage6-algorithm-tools==4.15`` exactly, so vantage6 4.14 can no
+  longer be installed next to this package. ``pyproject.toml`` declares
+  ``vantage6-algorithm-tools>=4.15,<4.16`` and the CI test matrix runs
+  4.15 only.
 - Dependencies (pinned to git tags; regenerate ``requirements-lock.txt``
   after a bump): ``vantage6-strongaya-general @
-  git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.4`` and
+  git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.5`` and
   ``vantage6-strongaya-rdf @
-  git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.0.2``.
+  git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.1.0``.
 - Logging goes through ``safe_log(level, message)`` — never vantage6's
   ``info``/``warn``/``error`` and never ``print``.
 - Inside ``prepare_node_data`` (block 2 order): RDF collect when the node

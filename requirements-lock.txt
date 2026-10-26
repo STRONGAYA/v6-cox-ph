@@ -97,16 +97,16 @@ urllib3==2.8.0
     # via
     #   docker
     #   requests
-vantage6-algorithm-tools==4.15.2
+vantage6-algorithm-tools==4.15.0
     # via
     #   v6-cox-ph (pyproject.toml)
     #   vantage6-strongaya-general
     #   vantage6-strongaya-rdf
-vantage6-common==4.15.2
+vantage6-common==4.15.0
     # via vantage6-algorithm-tools
-vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@153e61d31dc32e6eadf9df44eea89fbd889b10b7
+vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@e21d3f5bb86edb6d776edf42a4386e8ad5813c3d
     # via
     #   v6-cox-ph (pyproject.toml)
     #   vantage6-strongaya-rdf
-vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@56eac1678efca42f71462bcd6a487f22ed49443c
+vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@2a9d2a2b2d75bb77a815cc6197e5c3e0c6c0f6d2
     # via v6-cox-ph (pyproject.toml)

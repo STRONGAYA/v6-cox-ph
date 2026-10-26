@@ -9,13 +9,13 @@ description = "Federated Cox Proportional Hazards algorithm for vantage6"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "vantage6-algorithm-tools>=4.14,<4.16",
+    "vantage6-algorithm-tools>=4.15,<4.16",
     "pandas>=2.2.0",
     "numpy",
     "scipy",
     "pydantic>=2.0.0",
-    "vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.4",
-    "vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.0.2",
+    "vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.5",
+    "vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.1.0",
     "pyjwt>=2.4,<3",
 ]
 

@@ -19,7 +19,7 @@ jobs:
         # integration tests drive) does not work on 3.12; the runtime image
         # itself is built and smoke-tested as 3.12 in the docker job.
         python-version: ["3.10"]
-        vantage6-version: ["4.14", "4.15"]
+        vantage6-version: ["4.15"]
 
     steps:
       - name: Checkout code

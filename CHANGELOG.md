@@ -65,6 +65,16 @@ plain column name stays valid). Both are recorded in
   never describes a below-threshold subpopulation, and without naming the
   codes found. ``outcome_col`` is validated with Pydantic at ``central``
   entry and re-validated on the node; the provenance block echoes it.
+- The STRONG AYA libraries are bumped to ``vantage6-strongaya-general``
+  v1.0.5 and ``vantage6-strongaya-rdf`` v1.1.0. The previous
+  ``v6-tools-rdf`` pin joined the variables of a SPARQL collection by
+  result-row position, so collected values could be attributed to the
+  wrong patient; v1.1.0 collects per patient and also cleans the
+  triplifier's empty-cell literals. ``v6-tools-general`` v1.0.5 pins
+  ``vantage6-algorithm-tools==4.15`` exactly, so this branch now supports
+  vantage6 4.15 only: ``pyproject.toml`` declares
+  ``vantage6-algorithm-tools>=4.15,<4.16`` and the CI test matrix runs
+  4.15 only.
 
 ## 2.1.0
 
