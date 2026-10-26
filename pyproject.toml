@@ -26,6 +26,7 @@ dev = [
     "pytest-mock>=3.10.0",
     "docker>=6.0.0",
     "lifelines",
+    "requests",
 ]
 lint = ["flake8", "black", "mypy"]
 
