@@ -8,15 +8,30 @@ The input arguments for the central function consist of:
 - ``time_col`` (string): the name of the column containing the time data.
 - ``outcome_col`` (string): the name of the column containing the outcome data
   (1 = event, 0 = censored).
-- ``expl_vars`` (list): a list of explanatory variables (predictors) to be
-  used in the computation.
+- ``expl_vars`` (list): the explanatory variables (predictors) of the model.
+  Each entry is either a plain column name (a numeric covariate) or a
+  single-entry mapping of a column name to a spec:
+
+  - categorical: ``{"sex": {"reference": "M", "categories": {"M": ["M"],
+    "F": ["F"]}}}`` gives one 0/1 model term per non-reference category,
+    named ``sex[F]``;
+  - scored (ordinal): ``{"stage": {"scores": {"I": 1, "II": 2, "III": 3,
+    "IV": 4}, "missing": ["unknown"]}}`` gives one numeric model term
+    ``stage``.
+
+  Codes are matched as numbers or text (``1``, ``"1"`` and ``1.0`` are the
+  same code); codes listed under ``missing``, and codes the spec does not
+  list, are treated as missing. The model terms — not the variable names —
+  index the result's ``model`` table and the order of ``covariance``.
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
   organisations are used.
 - ``covariate_profiles`` (list of objects, optional): covariate profiles for
-  survival curves. Each entry maps explanatory variable names to values;
-  variables left out are taken at the pooled event-case mean. An entry
-  naming an unknown variable raises ``UserInputError``.
+  survival curves. Each entry maps explanatory variable names to values: a
+  number for a plain or scored variable, a category label for a categorical
+  variable. Variables left out are taken at the pooled event-case mean. An
+  entry naming an unknown variable or an unknown label raises
+  ``UserInputError``.
 
 Input rules
 ------------
@@ -26,8 +41,10 @@ Every node validates its data before sharing anything:
 - ``time_col`` must exist and be numeric, finite and non-negative.
 - ``outcome_col`` must exist and be binary: only 0 and 1 (booleans are
   allowed).
-- Every ``expl_var`` must exist and be numeric (see below), and rows with
-  missing values in any analysed column are dropped before the sample-size
+- Every ``expl_var`` source column must exist; categorical and scored
+  entries are encoded into numeric model-term columns on the node before
+  validation, and every model term must be numeric. Rows with missing
+  values in any analysed column are dropped before the sample-size
   threshold is checked.
 
 A column that violates these rules raises ``UserInputError`` and stops the
@@ -36,12 +53,40 @@ codings (for example an outcome coded 1/2, or string labels) must recode
 **before** calling the algorithm — recoding belongs in the project layer,
 not in the vanilla algorithm.
 
+Categorical and scored covariates
+---------------------------------
+
+With the test data (``tests/data/coxph_test_data_1.csv``, where ``sex`` is
+coded ``M``/``F``), a categorical covariate and a scored one look like:
+
+.. code-block:: python
+
+  expl_vars = [
+      "age",  # numeric covariate, as before
+      {"sex": {  # categorical: one 0/1 column per non-reference category
+          "reference": "M",
+          "categories": {"M": ["M"], "F": ["F"]},
+      }},
+      {"stage": {  # ordinal: one numeric column
+          "scores": {"I": 1, "II": 2, "III": 3, "IV": 4},
+          "missing": ["unknown"],  # optional
+      }},
+  ]
+
+The model terms are ``["age", "sex[F]", "stage"]``: they are the names in
+the result's ``model``, the order of ``covariance``, ``beta``, ``centre``
+and ``scale``, and the keys of the partials' ``sum``/``sum_squares``. A
+covariate profile names a categorical variable by one of its labels
+(``{"sex": "F"}``); central expands the label to the 1/0 values of that
+variable's terms before computing the curves.
+
 Output fields
 -------------
 
 The central function returns a dictionary with:
 
-- ``model``: a JSON object indexed by variable name with columns ``Coef``,
+- ``model``: a JSON object indexed by model term (a variable name, or
+  ``<name>[<label>]`` for a categorical variable) with columns ``Coef``,
   ``Exp(coef)``, ``SE``, ``lower_CI``, ``upper_CI``, ``Z`` and ``p-value``.
   The coefficients are on the original covariates: nodes fit on the
   standardised ``(x - centre) / scale`` and the central function transforms

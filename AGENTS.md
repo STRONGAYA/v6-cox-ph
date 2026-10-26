@@ -100,6 +100,13 @@ user task → central → compute_summed_z
 - ``compute_summed_z`` also returns the node's privacy settings
   (configuration, not data); the result summary based on them is built in a
   later step.
+- ``expl_vars`` entries are plain column names or single-entry mappings of a
+  column name to a categorical spec (``reference`` + ``categories``) or a
+  scored spec (``scores``, optional ``missing``); the store type of
+  ``expl_vars`` is ``json`` and a list of names stays valid. The model terms
+  they expand to (one per plain or scored variable, one per non-reference
+  category) replace the variable names in the result's ``model``, the order
+  of ``covariance`` and the partials' ``sum``/``sum_squares`` keys.
 - ``central`` optionally takes ``covariate_profiles`` (validated by the
   Pydantic input model: keys must be known explanatory variables) and
   returns ``baseline_cumulative_hazard`` and ``survival_curves`` computed

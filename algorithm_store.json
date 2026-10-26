@@ -22,8 +22,8 @@
         },
         {
           "name": "expl_vars",
-          "type": "list",
-          "description": "List of explanatory variable names to include in the model."
+          "type": "json",
+          "description": "List of explanatory variables to include in the model: plain column names, or single-entry mappings of a column name to a categorical spec (reference and categories) or a scored spec (scores, optional missing). A list of names stays valid."
         },
         {
           "name": "organization_ids",
@@ -59,8 +59,8 @@
         },
         {
           "name": "expl_vars",
-          "type": "list",
-          "description": "List of explanatory variable names."
+          "type": "json",
+          "description": "List of explanatory variables to include in the model: plain column names, or single-entry mappings of a column name to a categorical spec (reference and categories) or a scored spec (scores, optional missing). A list of names stays valid."
         }
       ]
     },
@@ -86,8 +86,8 @@
         },
         {
           "name": "expl_vars",
-          "type": "list",
-          "description": "List of explanatory variable names."
+          "type": "json",
+          "description": "List of explanatory variables to include in the model: plain column names, or single-entry mappings of a column name to a categorical spec (reference and categories) or a scored spec (scores, optional missing). A list of names stays valid."
         },
         {
           "name": "beta",
