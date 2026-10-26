@@ -8,7 +8,7 @@ This module contains the Pydantic models for the wire contract: user input
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -38,10 +38,12 @@ def format_validation_error(exc: ValidationError) -> str:
     return "; ".join(parts)
 
 
-# Stratification variable names must be identifier-shaped:
-# ``apply_data_stratification`` interpolates them into a dataframe query, so
-# anything beyond this pattern is rejected before the query is built.
-STRATIFICATION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Stratification variable names must be identifier-shaped, or prefixed names
+# such as ``ncit:C28421`` (the STRONG AYA semantic map names RDF variables by
+# their class): ``apply_data_stratification`` interpolates them into a
+# dataframe query between backticks, so anything beyond this pattern (a
+# backtick above all) is rejected before the query is built.
+STRATIFICATION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z0-9_]+)?$")
 
 
 def validate_stratification_spec(spec: object) -> Dict[str, Any]:
@@ -61,7 +63,10 @@ def validate_stratification_spec(spec: object) -> Dict[str, Any]:
         raise ValueError("variables_to_stratify must be a non-empty mapping of variable names to values or ranges")
     for name, selection in spec.items():
         if not isinstance(name, str) or not STRATIFICATION_NAME_PATTERN.match(name):
-            raise ValueError(f"stratification variable names must be identifier-shaped, got '{name}'")
+            raise ValueError(
+                f"stratification variable names must be identifier-shaped or prefixed names "
+                f"(such as ncit:C28421), got '{name}'"
+            )
         if isinstance(selection, dict):
             unknown_keys = sorted(set(selection) - {"start", "end"})
             if unknown_keys:
@@ -86,6 +91,139 @@ def validate_stratification_spec(spec: object) -> Dict[str, Any]:
     return spec
 
 
+# Namespaces of the STRONG AYA semantic map (the ``prefixes`` of
+# AYA_cancer_schema.jsonld), plus the SNOMED namespace the RDF library's
+# queries declare. RDF data carries mapped terms as full IRIs; compacting
+# them lets the outcome codes in ``outcome_col`` and the values in
+# ``variables_to_stratify`` name a term either way (``ncit:C37987`` or its
+# full IRI).
+ONTOLOGY_NAMESPACES = {
+    "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#": "ncit",
+    "http://semanticscience.org/resource/": "sio",
+    "http://www.cancerdata.org/roo/": "roo",
+    "https://strongaya.eu/": "strongaya",
+    "http://purl.bioontology.org/ontology/SNOMEDCT/": "sct",
+    "http://snomed.info/id/": "sct",
+    "http://id.nlm.nih.gov/mesh/": "mesh",
+    "http://purl.obolibrary.org/obo/": "gsso",
+}
+
+# The STRONG AYA semantic map codes a missing or unspecified value of any
+# variable, numeric ones included, with this term.
+MISSING_TERM = "ncit:C54031"
+
+OUTCOME_CODE_KEYS = ("event", "censored", "missing")
+
+_NUMBER_PATTERN = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$")
+
+
+def term_key(value: object) -> Optional[Any]:
+    """The comparable form of a coded value, from the data or the user input.
+
+    A term IRI in a known namespace is compacted to its prefixed name
+    (``http://...Thesaurus.owl#C37987`` and ``<...>`` both become
+    ``ncit:C37987``); a number, or a string that reads as one, becomes a
+    float, so ``1``, ``1.0`` and ``"1"`` are the same code; any other string
+    is compared as written, without surrounding whitespace. Missing values
+    (``None``, NaN, an empty string) have no key and return ``None``.
+    """
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, (bool, np.bool_, int, float, np.integer, np.floating)):
+        number = float(value)
+        return number if np.isfinite(number) else None
+    if not isinstance(value, str):
+        return str(value)
+    term = value.strip()
+    if term.startswith("<") and term.endswith(">"):
+        term = term[1:-1].strip()
+    if not term:
+        return None
+    for namespace, prefix in ONTOLOGY_NAMESPACES.items():
+        if term.startswith(namespace) and len(term) > len(namespace):
+            return f"{prefix}:{term[len(namespace):]}"
+    if _NUMBER_PATTERN.match(term):
+        return float(term)
+    return term
+
+
+def validate_outcome_codes(codes: object, name: str) -> Dict[str, List[Any]]:
+    """Validate the outcome codes of an ``outcome_col`` (STRONG AYA data standard).
+
+    A mapping with the required non-empty lists ``event`` and ``censored``
+    and an optional list ``missing``, each holding outcome codes (strings
+    or numbers). No code may be listed under two keys, also not when one
+    entry is a prefixed name and the other its full IRI. The messages echo
+    the user-supplied names and codes only, never data values.
+
+    Raises
+    ------
+    ValueError
+        On any structural problem.
+    """
+    if not isinstance(codes, dict):
+        raise ValueError(f"outcome_col '{name}' must map to an object with 'event' and 'censored' lists of codes")
+    unknown_keys = sorted(str(key) for key in set(codes) - set(OUTCOME_CODE_KEYS))
+    if unknown_keys:
+        raise ValueError(
+            f"outcome_col '{name}' may only list 'event', 'censored' and 'missing' codes, got {unknown_keys}"
+        )
+    listed_under: Dict[Any, str] = {}
+    for key in OUTCOME_CODE_KEYS:
+        if key not in codes:
+            if key == "missing":
+                continue
+            raise ValueError(f"outcome_col '{name}' must list the '{key}' codes")
+        listed = codes[key]
+        if not isinstance(listed, list):
+            raise ValueError(f"outcome_col '{name}' '{key}' must be a list of outcome codes")
+        if key != "missing" and len(listed) == 0:
+            raise ValueError(f"outcome_col '{name}' '{key}' must not be empty")
+        for code in listed:
+            if isinstance(code, bool) or not isinstance(code, (str, int, float)):
+                raise ValueError(f"outcome_col '{name}' '{key}' codes must be strings or numbers")
+            term = term_key(code)
+            if term is None:
+                raise ValueError(f"outcome_col '{name}' '{key}' codes must not be empty or non-finite")
+            other = listed_under.get(term)
+            if other is not None and other != key:
+                raise ValueError(f"outcome code '{code}' is listed under both '{other}' and '{key}'")
+            listed_under[term] = key
+    return codes
+
+
+def parse_outcome_col(outcome_col: object) -> Tuple[str, Optional[Dict[str, List[Any]]]]:
+    """Split ``outcome_col`` into the column name and its outcome codes.
+
+    ``outcome_col`` is the name of an outcome column coded 0/1, or (STRONG
+    AYA) a mapping of one column name to the codes that mean an event, a
+    censored observation and, optionally, a missing value::
+
+        {"ncit:C25717": {"event": ["ncit:C99799"], "censored": ["ncit:C37987"], "missing": ["ncit:C54031"]}}
+
+    Returns
+    -------
+    Tuple[str, Optional[Dict[str, List[Any]]]]
+        The column name (without surrounding whitespace) and the validated
+        codes, or ``None`` for a plain column name.
+
+    Raises
+    ------
+    ValueError
+        On any structural problem.
+    """
+    if isinstance(outcome_col, str):
+        if not outcome_col.strip():
+            raise ValueError("Column names must be non-empty strings")
+        return outcome_col.strip(), None
+    if not isinstance(outcome_col, dict) or len(outcome_col) != 1:
+        raise ValueError("outcome_col must be a column name, or a mapping of one column name to its outcome codes")
+    ((name, codes),) = outcome_col.items()
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Column names must be non-empty strings")
+    return name.strip(), validate_outcome_codes(codes, name.strip())
+
+
 class CoxPHInput(BaseModel):
     """
     Pydantic model for validating Cox-PH algorithm input parameters.
@@ -95,7 +233,13 @@ class CoxPHInput(BaseModel):
     """
 
     time_col: str = Field(..., description="Name of the column containing time data")
-    outcome_col: str = Field(..., description="Name of the column containing outcome/event data")
+    outcome_col: Union[str, Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "Name of the outcome column coded 0/1, or (STRONG AYA) a mapping of the "
+            "column name to its 'event', 'censored' and optionally 'missing' codes"
+        ),
+    )
     expl_vars: List[str] = Field(..., description="List of explanatory variable names")
     organization_ids: Optional[List[int]] = Field(
         default=None,
@@ -119,13 +263,25 @@ class CoxPHInput(BaseModel):
         ),
     )
 
-    @field_validator("time_col", "outcome_col")
+    @field_validator("time_col")
     @classmethod
     def validate_column_names(cls, v: str) -> str:
         """Validate that column names are non-empty strings."""
         if not isinstance(v, str) or not v.strip():
             raise ValueError("Column names must be non-empty strings")
         return v.strip()
+
+    @field_validator("outcome_col")
+    @classmethod
+    def validate_outcome_col(cls, v: Union[str, Dict[str, Any]]) -> Union[str, Dict[str, Any]]:
+        """A column name, or a mapping of one column name to its outcome codes."""
+        name, codes = parse_outcome_col(v)
+        return name if codes is None else {name: codes}
+
+    @property
+    def outcome_name(self) -> str:
+        """The name of the outcome column, without its outcome codes."""
+        return parse_outcome_col(self.outcome_col)[0]
 
     @field_validator("expl_vars")
     @classmethod
@@ -165,16 +321,16 @@ class CoxPHInput(BaseModel):
 
         The messages echo only the user-supplied column names.
         """
-        if self.time_col == self.outcome_col:
+        if self.time_col == self.outcome_name:
             raise ValueError(f"time_col and outcome_col must be different columns, both are '{self.time_col}'")
         duplicates = sorted({var for var in self.expl_vars if self.expl_vars.count(var) > 1})
         if duplicates:
             raise ValueError(f"expl_vars contains duplicate variables: {duplicates}")
-        clash = [var for var in self.expl_vars if var in (self.time_col, self.outcome_col)]
+        clash = [var for var in self.expl_vars if var in (self.time_col, self.outcome_name)]
         if clash:
             raise ValueError(
                 f"expl_vars must not name the time or outcome column; found {clash} "
-                f"(time_col='{self.time_col}', outcome_col='{self.outcome_col}')"
+                f"(time_col='{self.time_col}', outcome_col='{self.outcome_name}')"
             )
         return self
 
@@ -197,7 +353,7 @@ class CoxPHInput(BaseModel):
 
 def validate_coxph_input(
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, Dict[str, Any]],
     expl_vars: List[str],
     organization_ids: Optional[List[int]] = None,
     covariate_profiles: Optional[List[Dict[str, float]]] = None,
@@ -210,8 +366,8 @@ def validate_coxph_input(
     ----------
     time_col : str
         Name of the time column.
-    outcome_col : str
-        Name of the outcome column.
+    outcome_col : Union[str, Dict[str, Any]]
+        Name of the outcome column, or a mapping of it to its outcome codes.
     expl_vars : List[str]
         List of explanatory variable names.
     organization_ids : Optional[List[int]]

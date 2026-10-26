@@ -6,10 +6,48 @@ Input arguments
 The input arguments for the central function consist of:
 
 - ``time_col`` (string): the name of the column containing the time data.
-- ``outcome_col`` (string): the name of the column containing the outcome data
-  (1 = event, 0 = censored).
+  STRONG AYA times are numeric deltas (for example days since diagnosis,
+  ``ncit:C125201``); the node converts them to floats, so times that RDF
+  data delivers as text work, and a missing time (``ncit:C54031``) drops the
+  row.
+- ``outcome_col`` (string or object): the name of the column containing the
+  outcome data (1 = event, 0 = censored), or (STRONG AYA) an object that maps
+  the column name to its outcome codes, for data whose outcome is not coded
+  0/1. RDF data codes the outcome with ontology terms: the
+  ``survival_status`` variable of the STRONG AYA semantic map
+  (``ncit:C25717``) uses ``ncit:C37987`` (alive), ``ncit:C141463`` (presumed
+  alive), ``ncit:C99799`` (declared deceased), ``ncit:C99798`` (presumed
+  deceased) and ``ncit:C54031`` (missing or unspecified). The object lists
+  which codes mean an event and which mean censored, and optionally which
+  mean missing::
+
+      {"ncit:C25717": {"event": ["ncit:C99799", "ncit:C99798"],
+                       "censored": ["ncit:C37987", "ncit:C141463"],
+                       "missing": ["ncit:C54031"]}}
+
+  The object has exactly one key, the column name. ``event`` and
+  ``censored`` are required and non-empty; ``missing`` is optional. Whether
+  a presumed status counts is the researcher's decision and is made here.
+  Codes may be written as prefixed names (``ncit:...``) or as full IRIs;
+  numbers work too (``{"status": {"event": [2], "censored": [1]}}`` for an
+  outcome coded 1/2). A code may be listed under one key only. Rows with a
+  ``missing`` code are dropped like rows with a missing value, before the
+  sample-size thresholds. A code that the data holds but ``outcome_col``
+  does not list raises ``UserInputError`` (without naming the code) once the
+  node has passed its thresholds, so a mistyped code cannot silently drop
+  the censored rows. The result's provenance block echoes ``outcome_col``
+  with its codes.
 - ``expl_vars`` (list): a list of explanatory variables (predictors) to be
-  used in the computation.
+  used in the computation. Covariates must be numeric; the node converts
+  them to floats, so numbers that RDF data delivers as text work (for
+  example ``ncit:C156420``, age at diagnosis), and a missing value
+  (``ncit:C54031``) drops the row. A variable coded with terms, such as
+  biological sex (``ncit:C28421``), cannot be a covariate: select its
+  categories with ``variables_to_stratify`` instead. A covariate that holds
+  some values that are not numbers raises ``UserInputError`` (without
+  naming the values) once the node has passed its thresholds; when no value
+  is a number at all, every row is dropped and the run is refused by the
+  sample-size threshold instead.
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
   organisations are used. In a STRONG AYA collaboration, select the **data**
@@ -27,8 +65,13 @@ The input arguments for the central function consist of:
   60}}``). The run analyses only the rows inside the requested
   subpopulation; the sample-size thresholds apply to the stratified rows,
   so a stratification that isolates a handful of records fails closed with
-  ``PrivacyThresholdViolation``. Variable names must be identifier-shaped,
-  and a variable that is not a column of the node's data raises
+  ``PrivacyThresholdViolation``. Variable names must be identifier-shaped
+  or prefixed names, so RDF variables can be named by their class in the
+  STRONG AYA semantic map (``{"ncit:C28421": ["ncit:C16576"]}`` selects
+  females, ``{"ncit:C156420": {"start": 18, "end": 25}}`` an age at
+  diagnosis of 18 to 25). Values may be prefixed names or full IRIs, as in
+  ``outcome_col``, and numbers that RDF data delivers as text are compared
+  as numbers. A variable that is not a column of the node's data raises
   ``UserInputError``. The applied mapping is echoed in the result under
   ``variables_to_stratify``.
 
@@ -37,9 +80,11 @@ Input rules
 
 Every node validates its data before sharing anything:
 
-- ``time_col`` must exist and be numeric, finite and non-negative.
+- ``time_col`` must exist and hold numbers (as numbers or as text) that are
+  finite and non-negative. A value that is not a number fails the run with
+  ``UserInputError`` once the node has passed its thresholds.
 - ``outcome_col`` must exist and be binary: only 0 and 1 (booleans are
-  allowed).
+  allowed), or every code must be listed in ``outcome_col``.
 - Every ``expl_var`` must exist and be numeric (see below), and rows with
   missing values in any analysed column are dropped before the sample-size
   threshold is checked.
@@ -48,7 +93,8 @@ A column that violates these rules raises ``UserInputError`` and stops the
 whole analysis; there is no silent fallback. Projects whose data uses other
 codings (for example an outcome coded 1/2, or string labels) must recode
 **before** calling the algorithm — recoding belongs in the project layer,
-not in the vanilla algorithm.
+not in the vanilla algorithm. In this STRONG AYA layer, the outcome codes in
+``outcome_col`` are that recoding for the outcome column.
 
 Output fields
 -------------

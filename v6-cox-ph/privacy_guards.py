@@ -105,7 +105,13 @@ from vantage6.algorithm.tools.exceptions import (
 )
 
 from .coxph_logic import round_sig
-from .miscellaneous import format_validation_error, validate_stratification_spec
+from .miscellaneous import (
+    MISSING_TERM,
+    format_validation_error,
+    parse_outcome_col,
+    term_key,
+    validate_stratification_spec,
+)
 from vantage6_strongaya_general.miscellaneous import apply_data_stratification, safe_log
 from vantage6_strongaya_general.privacy_measures import (
     apply_sample_size_threshold,
@@ -691,6 +697,7 @@ def prepare_node_data(
     *,
     need_outcome: bool,
     variables_to_stratify: Optional[dict] = None,
+    outcome_codes: Optional[dict] = None,
 ) -> tuple[pd.DataFrame, PrivacySettings, bool]:
     """Run the shared node-side guard sequence once.
 
@@ -699,13 +706,19 @@ def prepare_node_data(
         ``ensure_spawned_by_central`` -> ``load_privacy_settings``
         -> RDF collect (STRONG AYA, only when the node carries an
         ``endpoint`` column) -> ``mask_unnecessary_variables`` (STRONG AYA)
-        -> ``validate_stratification_spec`` + ``apply_data_stratification``
-        (STRONG AYA, when ``variables_to_stratify`` is given)
+        -> ``coerce_time_column`` (STRONG AYA)
+        -> ``coerce_covariates`` (STRONG AYA, when ``expl_vars`` are given)
+        -> ``recode_outcome`` (STRONG AYA, when ``outcome_codes`` are
+        given)
+        -> ``validate_stratification_spec`` + ``normalise_stratification``
+        + ``apply_data_stratification`` (STRONG AYA, when
+        ``variables_to_stratify`` is given)
         -> ``validate_expl_vars`` (when ``expl_vars`` are given)
         -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
         -> ``select_rows`` (hook) -> ``check_sample_size``
         -> ``apply_sample_size_threshold`` (STRONG AYA, when the native
-        threshold passed)
+        threshold passed) -> the non-numeric-time, non-numeric-covariate and
+        unlisted-outcome checks (STRONG AYA, when the thresholds passed)
 
     Every partial calls this so that all aggregates central combines come
     from the same row set on each node. The threshold failure behaviour
@@ -735,12 +748,26 @@ def prepare_node_data(
         subpopulation are removed here, after masking (the stratification
         variables must survive it) and before every threshold, so they
         count against the thresholds like any other removed rows.
+    outcome_codes : dict | None
+        STRONG AYA outcome codes from ``outcome_col`` (the ``event``,
+        ``censored`` and optionally ``missing`` codes), already validated by
+        ``resolve_outcome_col``. The outcome column is recoded to 1, 0 and
+        NaN after masking; rows with a missing or unlisted code are dropped
+        with the other incomplete rows, before every threshold. An unlisted
+        code fails the run, but only once the thresholds passed.
 
     Returns
     -------
     tuple[pd.DataFrame, PrivacySettings, bool]
         The prepared frame, the loaded privacy settings, and whether the
         sample-size threshold was met.
+
+    Raises
+    ------
+    UserInputError
+        When the time column or an explanatory variable holds a value that
+        is not a number, or ``outcome_codes`` do not list an outcome code the
+        node's data holds (all raised only when the thresholds passed).
     """
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
@@ -754,6 +781,9 @@ def prepare_node_data(
         variables_to_analyse.extend(expl_vars)
     if variables_to_stratify is not None:
         variables_to_analyse.extend(variables_to_stratify.keys())
+    # A covariate may also be a stratification variable; name it once, or
+    # the RDF collect queries it twice and its merge renames both copies.
+    variables_to_analyse = list(dict.fromkeys(variables_to_analyse))
     if "endpoint" in df.columns:
         # STRONG AYA: query the endpoint once per run — the first partial
         # collects and caches the frame in the run's temporary volume,
@@ -763,6 +793,22 @@ def prepare_node_data(
         df = collect_or_load_rdf(variables_to_analyse, df)
     df = mask_unnecessary_variables(df, variables_to_analyse)
 
+    # STRONG AYA: times are numeric deltas, which RDF data delivers as text
+    # (and a missing time as the missing term); convert them to floats.
+    df, invalid_times = coerce_time_column(df, time_col)
+
+    invalid_covariates: list = []
+    if expl_vars:
+        # STRONG AYA: RDF data delivers numeric covariates as text as well.
+        df, invalid_covariates = coerce_covariates(df, expl_vars)
+
+    unmapped_outcome = False
+    if outcome_codes is not None and outcome_col is not None:
+        # STRONG AYA: RDF data codes the outcome with ontology terms (for
+        # example ncit:C37987 for alive); outcome_col lists which codes mean
+        # event, censored and missing.
+        df, unmapped_outcome = recode_outcome(df, outcome_col, outcome_codes)
+
     if variables_to_stratify is not None:
         # STRONG AYA: stratification selects the subpopulation this run
         # analyses. The spec is re-validated here (defence in depth: it
@@ -770,7 +816,8 @@ def prepare_node_data(
         # variables must exist — the library filter would silently keep
         # the whole frame for a missing variable, which would fit the
         # model on the wrong rows. The filter runs before every
-        # threshold, so the rows it removes count against them.
+        # threshold, so the rows it removes count against them. RDF terms
+        # and numeric text are first brought into the form the request uses.
         try:
             validate_stratification_spec(variables_to_stratify)
         except ValueError as e:
@@ -778,7 +825,8 @@ def prepare_node_data(
         missing = [name for name in variables_to_stratify if name not in df.columns]
         if missing:
             raise UserInputError(f"Stratification variables not found in data columns: {missing}.")
-        df = apply_data_stratification(df, variables_to_stratify)
+        df, stratification = normalise_stratification(df, variables_to_stratify)
+        df = apply_data_stratification(df, stratification)
 
     if expl_vars:
         validate_expl_vars(df, expl_vars, time_col, outcome_col)
@@ -805,7 +853,200 @@ def prepare_node_data(
         # this step must not double-raise.
         df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
+        # Both checks are raised only after the thresholds passed: before
+        # them, the error would tell a researcher whether a below-threshold
+        # subpopulation holds such a value. The messages name the column,
+        # never the values found.
+        if invalid_times:
+            raise UserInputError(
+                f"Time column '{time_col}' holds values that are not numbers; "
+                f"STRONG AYA times are numeric deltas (a missing time is {MISSING_TERM})."
+            )
+        if invalid_covariates:
+            raise UserInputError(
+                f"Explanatory variables {invalid_covariates} hold values that are not numbers; "
+                f"covariates must be numeric (a missing value is {MISSING_TERM}). A variable coded "
+                f"with terms (such as biological sex) cannot be a covariate; select its categories "
+                f"with variables_to_stratify instead."
+            )
+        if unmapped_outcome:
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' holds codes that outcome_col does not list; "
+                f"add every code to 'event', 'censored' or 'missing'."
+            )
+
     return df, settings, threshold_met
+
+
+def to_float_values(values: pd.Series) -> tuple[pd.Series, bool]:
+    """The numeric values of a column that may arrive as text (STRONG AYA).
+
+    RDF data delivers every value as text, and a missing value as the
+    STRONG AYA missing term. Numbers and numeric text become floats; empty
+    values and the missing term (as prefixed name or full IRI) become NaN.
+    Any other value also becomes NaN, and is reported through the returned
+    flag.
+
+    Returns
+    -------
+    tuple[pd.Series, bool]
+        The values as floats and whether any value was not a number.
+    """
+    if pd.api.types.is_numeric_dtype(values):
+        return values.astype(float), False
+    keys = {value: term_key(value) for value in values.dropna().unique()}
+    invalid = any(key is not None and key != MISSING_TERM and not isinstance(key, float) for key in keys.values())
+    numbers = {value: key if isinstance(key, float) else np.nan for value, key in keys.items()}
+    return values.map(numbers).astype(float), invalid
+
+
+def coerce_time_column(df: pd.DataFrame, time_col: str) -> tuple[pd.DataFrame, bool]:
+    """Convert the time column to floats (STRONG AYA).
+
+    STRONG AYA times are numeric deltas (for example days since diagnosis),
+    never dates, so the conversion is numeric only (``to_float_values``):
+    a missing time becomes NaN and ``drop_incomplete_rows`` removes it
+    before every threshold. A value that is not a number is dropped the
+    same way and reported through the returned flag, so that the caller
+    can refuse the run once the thresholds passed. A missing time column is
+    left for ``validate_survival_columns`` to report.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, bool]
+        The frame with a float time column and whether the time column held
+        a value that is not a number.
+    """
+    if time_col not in df.columns:
+        return df, False
+    out = df.copy()
+    out[time_col], invalid = to_float_values(out[time_col])
+    return out, invalid
+
+
+def coerce_covariates(df: pd.DataFrame, expl_vars: list) -> tuple[pd.DataFrame, list]:
+    """Convert the explanatory variables to floats (STRONG AYA).
+
+    RDF data delivers numeric covariates as text, like times, so each
+    covariate is converted the same way (``to_float_values``): a missing
+    value becomes NaN and ``drop_incomplete_rows`` removes the row before
+    every threshold. A value that is not a number (such as a term of a
+    categorical variable) is dropped the same way and reported through the
+    returned list, so that the caller can refuse the run once the thresholds
+    passed. A missing covariate column is left for ``validate_expl_vars``
+    to report.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, list]
+        The frame with float covariates and the names of the covariates that
+        held a value that is not a number.
+    """
+    out = df.copy()
+    invalid = []
+    for name in expl_vars:
+        if name not in out.columns:
+            continue
+        out[name], has_invalid = to_float_values(out[name])
+        if has_invalid:
+            invalid.append(name)
+    return out, invalid
+
+
+def normalise_stratification(df: pd.DataFrame, variables_to_stratify: dict) -> tuple[pd.DataFrame, dict]:
+    """Bring RDF-coded stratification columns and values into one form (STRONG AYA).
+
+    ``apply_data_stratification`` compares the values as they are, but RDF
+    data delivers terms as full IRIs and numbers as text, while a request
+    names ``ncit:C16576`` or ``40``. For a list of values, the column and the
+    listed values are both brought into their ``term_key`` form: a full IRI
+    matches its prefixed name, and ``1``, ``1.0`` and ``"1"`` match. For a
+    range, the column is converted to floats (``to_float_values``), so a
+    missing value or one that is not a number falls outside every range.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict]
+        The frame with the stratification columns in comparable form and
+        the stratification in the matching form, for
+        ``apply_data_stratification``.
+    """
+    out = df.copy()
+    stratification: dict = {}
+    for name, selection in variables_to_stratify.items():
+        if isinstance(selection, dict):
+            out[name], _ = to_float_values(out[name])
+            stratification[name] = selection
+        else:
+            values = out[name]
+            out[name] = values.map({value: term_key(value) for value in values.dropna().unique()})
+            keys = (term_key(value) for value in selection)
+            stratification[name] = [key for key in keys if key is not None]
+    return out, stratification
+
+
+def resolve_outcome_col(outcome_col) -> tuple[str, Optional[dict]]:
+    """Validate ``outcome_col`` on the node and split it (STRONG AYA).
+
+    ``outcome_col`` arrives over the wire from central as a column name or
+    a mapping of the column name to its outcome codes; it is re-validated
+    here (defence in depth) with ``parse_outcome_col``.
+
+    Returns
+    -------
+    tuple[str, dict | None]
+        The column name and the outcome codes, or ``None`` for a column
+        coded 0/1.
+
+    Raises
+    ------
+    UserInputError
+        When ``outcome_col`` is malformed.
+    """
+    try:
+        return parse_outcome_col(outcome_col)
+    except ValueError as e:
+        raise UserInputError(f"Invalid outcome_col: {e}") from None
+
+
+def recode_outcome(df: pd.DataFrame, outcome_col: str, outcome_codes: dict) -> tuple[pd.DataFrame, bool]:
+    """Recode the outcome column with validated outcome codes (STRONG AYA).
+
+    Codes listed under ``event`` become 1, codes under ``censored`` become 0
+    and codes under ``missing`` become NaN, so ``drop_incomplete_rows``
+    removes them before every threshold. Codes are compared through
+    ``term_key``: a prefixed name in ``outcome_col`` matches the
+    full IRI in RDF data. A code that is not listed also becomes NaN, and is
+    reported through the returned flag so that the caller can refuse the run
+    once the thresholds passed. A missing outcome column is left for
+    ``validate_survival_columns`` to report.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, bool]
+        The recoded frame and whether the outcome column held a code that
+        is not listed.
+    """
+    if outcome_col not in df.columns:
+        return df, False
+    codes: dict = {term_key(code): 1.0 for code in outcome_codes["event"]}
+    codes.update({term_key(code): 0.0 for code in outcome_codes["censored"]})
+    codes.update({term_key(code): np.nan for code in outcome_codes.get("missing", [])})
+
+    out = df.copy()
+    values = out[outcome_col]
+    terms = values.map({value: term_key(value) for value in values.dropna().unique()})
+    unmapped = terms.notna() & ~terms.isin(list(codes))
+    out[outcome_col] = terms.map(codes).astype(float)
+    return out, bool(unmapped.any())
 
 
 def guarded_risk_set_aggregates(

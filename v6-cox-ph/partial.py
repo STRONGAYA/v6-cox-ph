@@ -7,7 +7,7 @@ encryption if that is enabled). From there, they are sent to the partial task
 or directly to the user (if they requested partial results).
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
@@ -27,6 +27,7 @@ from .privacy_guards import (
     prepare_node_data,
     prepare_time_column,
     quantise_wire_aggregates,
+    resolve_outcome_col,
     round_released_aggregates,
     suppress_small_time_counts,
     validate_iteration_input,
@@ -39,7 +40,7 @@ def compute_summed_z(
     client: AlgorithmClient,
     df: pd.DataFrame,
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, dict],
     expl_vars: list,
     variables_to_stratify: Optional[dict] = None,
 ) -> dict:
@@ -54,8 +55,10 @@ def compute_summed_z(
         The DataFrame containing the data.
     time_col : str
         The name of the column containing the time data.
-    outcome_col : str
-        The name of the column containing the outcome data.
+    outcome_col : str | dict
+        The name of the outcome column coded 0/1, or (STRONG AYA) a mapping
+        of the column name to its ``event``, ``censored`` and optionally
+        ``missing`` codes.
     expl_vars : list
         A list of explanatory variables to be used in the computation.
     variables_to_stratify : dict, optional
@@ -71,8 +74,19 @@ def compute_summed_z(
     try:
         safe_log("info", "Computing summed Z statistics")
 
+        # STRONG AYA: outcome_col may carry the outcome codes of RDF data;
+        # from here on outcome_col is the column name.
+        outcome_col, outcome_codes = resolve_outcome_col(outcome_col)
+
         df, settings, threshold_met = prepare_node_data(
-            client, df, time_col, outcome_col, expl_vars, need_outcome=True, variables_to_stratify=variables_to_stratify
+            client,
+            df,
+            time_col,
+            outcome_col,
+            expl_vars,
+            need_outcome=True,
+            variables_to_stratify=variables_to_stratify,
+            outcome_codes=outcome_codes,
         )
 
         if not threshold_met:
@@ -132,7 +146,7 @@ def perform_iteration(
     client: AlgorithmClient,
     df: pd.DataFrame,
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, dict],
     expl_vars: list,
     beta: list,
     centre: list,
@@ -157,10 +171,11 @@ def perform_iteration(
         The DataFrame containing the data.
     time_col : str
         The name of the column containing the time data.
-    outcome_col : str
-        The name of the column containing the outcome data. Rows with a
-        missing outcome are dropped so that tail censoring uses the same
-        rows as ``compute_summed_z``.
+    outcome_col : str | dict
+        The name of the outcome column coded 0/1, or (STRONG AYA) a mapping
+        of the column name to its outcome codes; must match the run's
+        ``compute_summed_z``. Rows with a missing outcome are dropped so
+        that tail censoring uses the same rows as ``compute_summed_z``.
     expl_vars : list
         A list of explanatory variables to be used in the computation.
     beta : list
@@ -185,8 +200,19 @@ def perform_iteration(
     try:
         safe_log("info", "Computing aggregates for the derivation of the partial likelihood")
 
+        # STRONG AYA: outcome_col may carry the outcome codes of RDF data;
+        # from here on outcome_col is the column name.
+        outcome_col, outcome_codes = resolve_outcome_col(outcome_col)
+
         df, settings, threshold_met = prepare_node_data(
-            client, df, time_col, outcome_col, expl_vars, need_outcome=True, variables_to_stratify=variables_to_stratify
+            client,
+            df,
+            time_col,
+            outcome_col,
+            expl_vars,
+            need_outcome=True,
+            variables_to_stratify=variables_to_stratify,
+            outcome_codes=outcome_codes,
         )
 
         # A node that passed compute_summed_z passes this check as well (the same

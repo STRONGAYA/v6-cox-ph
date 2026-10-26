@@ -43,6 +43,12 @@ merged_time_map = privacy_guards.merged_time_map
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
 quantise_wire_aggregates = privacy_guards.quantise_wire_aggregates
+recode_outcome = privacy_guards.recode_outcome
+coerce_time_column = privacy_guards.coerce_time_column
+coerce_covariates = privacy_guards.coerce_covariates
+normalise_stratification = privacy_guards.normalise_stratification
+to_float_values = privacy_guards.to_float_values
+resolve_outcome_col = privacy_guards.resolve_outcome_col
 round_released_aggregates = privacy_guards.round_released_aggregates
 suppress_small_time_counts = privacy_guards.suppress_small_time_counts
 tail_cutoff = privacy_guards.tail_cutoff
@@ -50,6 +56,15 @@ validate_expl_vars = privacy_guards.validate_expl_vars
 validate_iteration_input = privacy_guards.validate_iteration_input
 validate_survival_columns = privacy_guards.validate_survival_columns
 from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
+
+NCIT = "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#"
+# The STRONG AYA survival_status terms (AYA_cancer_schema.jsonld): declared
+# and presumed deceased, alive and presumed alive, missing or unspecified.
+OUTCOME_CODES = {
+    "event": ["ncit:C99799", "ncit:C99798"],
+    "censored": ["ncit:C37987", "ncit:C141463"],
+    "missing": ["ncit:C54031"],
+}
 
 
 @pytest.mark.unit
@@ -611,7 +626,11 @@ class TestPrepareNodeData:
             "ensure_spawned_by_central",
             "load_privacy_settings",
             "mask_unnecessary_variables",
+            "coerce_time_column",
+            "coerce_covariates",
+            "recode_outcome",
             "validate_stratification_spec",
+            "normalise_stratification",
             "apply_data_stratification",
             "validate_expl_vars",
             "drop_incomplete_rows",
@@ -642,6 +661,8 @@ class TestPrepareNodeData:
             "ensure_spawned_by_central",
             "load_privacy_settings",
             "mask_unnecessary_variables",
+            "coerce_time_column",
+            "coerce_covariates",
             "validate_expl_vars",
             "drop_incomplete_rows",
             "validate_survival_columns",
@@ -660,6 +681,7 @@ class TestPrepareNodeData:
             "ensure_spawned_by_central",
             "load_privacy_settings",
             "mask_unnecessary_variables",
+            "coerce_time_column",
             "drop_incomplete_rows",
             "validate_survival_columns",
             "select_rows",
@@ -684,7 +706,44 @@ class TestPrepareNodeData:
             "ensure_spawned_by_central",
             "load_privacy_settings",
             "mask_unnecessary_variables",
+            "coerce_time_column",
+            "coerce_covariates",
             "validate_stratification_spec",
+            "normalise_stratification",
+            "apply_data_stratification",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "validate_survival_columns",
+            "select_rows",
+            "check_sample_size",
+            "apply_sample_size_threshold",
+        ]
+        assert threshold_met is True
+        assert len(df) == 200
+
+    def test_guard_order_with_outcome_codes(self, client, node_df, default_env, monkeypatch):
+        """The outcome is recoded after masking, before stratification and every threshold."""
+        calls = self._record_guard_calls(monkeypatch)
+        node_df["event"] = node_df["event"].map({1: f"{NCIT}C99799", 0: f"{NCIT}C37987"})
+        df, settings, threshold_met = prepare_node_data(
+            client,
+            node_df,
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            variables_to_stratify={"age": {"start": 0, "end": 100}},
+            outcome_codes=OUTCOME_CODES,
+        )
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "mask_unnecessary_variables",
+            "coerce_time_column",
+            "coerce_covariates",
+            "recode_outcome",
+            "validate_stratification_spec",
+            "normalise_stratification",
             "apply_data_stratification",
             "validate_expl_vars",
             "drop_incomplete_rows",
@@ -887,6 +946,397 @@ class TestStratification:
 
 
 @pytest.mark.unit
+class TestOutcomeCodes:
+    """STRONG AYA outcome codes at the prepare_node_data hook.
+
+    RDF data codes the outcome with ontology terms; the codes in outcome_col
+    recode them to 1 (event), 0 (censored) and NaN (missing) before every
+    threshold. An unlisted code fails the run, but only once the thresholds
+    passed, so the error never describes a below-threshold subpopulation.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def minimal_env(self, monkeypatch):
+        # Minimal level: the sample-size threshold is the binding guard.
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+
+    def _df(self, outcomes):
+        n = len(outcomes)
+        return pd.DataFrame(
+            {
+                "time": [float(i) for i in range(1, n + 1)],
+                "event": outcomes,
+                "age": [50.0] * n,
+                "treatment": ([0, 1] * n)[:n],
+            }
+        )
+
+    def test_recode_maps_full_iris_with_prefixed_codes(self):
+        df = self._df([f"{NCIT}C99799", f"{NCIT}C37987", f"{NCIT}C54031", f"{NCIT}C99798", f"{NCIT}C141463", None])
+        out, unmapped = recode_outcome(df, "event", OUTCOME_CODES)
+        assert unmapped is False
+        np.testing.assert_array_equal(out["event"].to_numpy(), [1.0, 0.0, np.nan, 1.0, 0.0, np.nan])
+        assert df["event"].iloc[0] == f"{NCIT}C99799", "the input frame must not be modified"
+
+    def test_recode_flags_unmapped_codes(self):
+        df = self._df([f"{NCIT}C99799", f"{NCIT}C37987", "http://example.org/unknown"])
+        out, unmapped = recode_outcome(df, "event", {"event": ["ncit:C99799"], "censored": ["ncit:C37987"]})
+        assert unmapped is True
+        np.testing.assert_array_equal(out["event"].to_numpy(), [1.0, 0.0, np.nan])
+
+    def test_recode_numeric_coding(self):
+        """A numeric coding other than 0/1 (here 2 = event, 1 = censored) maps too."""
+        df = self._df([2, 1, 1, 2, 9])
+        out, unmapped = recode_outcome(df, "event", {"event": [2], "censored": [1], "missing": [9]})
+        assert unmapped is False
+        np.testing.assert_array_equal(out["event"].to_numpy(), [1.0, 0.0, 0.0, 1.0, np.nan])
+
+    def test_recode_leaves_missing_column_to_validation(self):
+        df = self._df([1, 0])
+        out, unmapped = recode_outcome(df, "status", OUTCOME_CODES)
+        assert unmapped is False
+        assert out is df
+
+    def test_prepare_node_data_recodes_and_drops_missing(self, client, minimal_env):
+        outcomes = [f"{NCIT}C99799"] * 100 + [f"{NCIT}C37987"] * 90 + [f"{NCIT}C54031"] * 10
+        out, _, threshold_met = prepare_node_data(
+            client,
+            self._df(outcomes),
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            outcome_codes=OUTCOME_CODES,
+        )
+        assert threshold_met is True
+        assert len(out) == 190
+        assert out["event"].sum() == 100
+        assert set(out["event"].unique()) == {0.0, 1.0}
+
+    def test_without_mapping_iri_outcome_is_rejected(self, client, minimal_env):
+        outcomes = [f"{NCIT}C99799"] * 100 + [f"{NCIT}C37987"] * 100
+        with pytest.raises(UserInputError, match="must be numeric or boolean"):
+            prepare_node_data(client, self._df(outcomes), "time", "event", ["age"], need_outcome=True)
+
+    def test_missing_rows_count_against_threshold(self, client, minimal_env):
+        """Rows with a missing code do not count: k-1/k refuse, k+1 passes."""
+        for n_events, expected in ((9, False), (10, False), (11, True)):
+            outcomes = [f"{NCIT}C99799"] * n_events + [f"{NCIT}C54031"] * 190
+            _, _, threshold_met = prepare_node_data(
+                client,
+                self._df(outcomes),
+                "time",
+                "event",
+                ["age", "treatment"],
+                need_outcome=True,
+                outcome_codes=OUTCOME_CODES,
+            )
+            assert threshold_met is expected, f"mapped events {n_events}: expected {expected}"
+
+    def test_unmapped_code_above_threshold_raises_without_echoing_it(self, client, minimal_env):
+        outcomes = [f"{NCIT}C99799"] * 100 + [f"{NCIT}C37987"] * 99 + [f"{NCIT}C99798"]
+        codes = {"event": ["ncit:C99799"], "censored": ["ncit:C37987"]}
+        with pytest.raises(UserInputError, match="outcome_col does not list") as excinfo:
+            prepare_node_data(
+                client,
+                self._df(outcomes),
+                "time",
+                "event",
+                ["age", "treatment"],
+                need_outcome=True,
+                outcome_codes=codes,
+            )
+        assert "C99798" not in str(excinfo.value)
+
+    def test_unmapped_code_below_threshold_reports_the_threshold(self, client, minimal_env):
+        """Below the threshold the unmapped code is not reported: no oracle on small subpopulations."""
+        outcomes = [f"{NCIT}C99799"] * 9 + [f"{NCIT}C99798"] + [f"{NCIT}C54031"] * 190
+        codes = {"event": ["ncit:C99799"], "censored": ["ncit:C37987"], "missing": ["ncit:C54031"]}
+        _, _, threshold_met = prepare_node_data(
+            client,
+            self._df(outcomes),
+            "time",
+            "event",
+            ["age", "treatment"],
+            need_outcome=True,
+            outcome_codes=codes,
+        )
+        assert threshold_met is False
+
+    def test_resolve_outcome_col_splits_name_and_codes(self):
+        assert resolve_outcome_col("event") == ("event", None)
+        assert resolve_outcome_col({"ncit:C25717": OUTCOME_CODES}) == ("ncit:C25717", OUTCOME_CODES)
+
+    @pytest.mark.parametrize(
+        "outcome_col",
+        [
+            "",
+            {"ncit:C25717": {"event": [1], "censored": [1]}},
+            {"ncit:C25717": {"event": ["ncit:C99799"]}},
+            {"a": OUTCOME_CODES, "b": OUTCOME_CODES},
+        ],
+    )
+    def test_resolve_outcome_col_rejects_malformed_specs(self, outcome_col):
+        with pytest.raises(UserInputError, match="Invalid outcome_col"):
+            resolve_outcome_col(outcome_col)
+
+
+@pytest.mark.unit
+class TestTimeConversion:
+    """STRONG AYA times are numeric deltas; RDF data delivers them as text."""
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def minimal_env(self, monkeypatch):
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+
+    def test_text_times_become_floats(self):
+        values = pd.Series(["365", "120.5", " 7 ", f"{NCIT}C54031", "ncit:C54031", None, ""], dtype=object)
+        times, invalid = to_float_values(values)
+        assert invalid is False
+        assert times.dtype == float
+        np.testing.assert_array_equal(times.to_numpy(), [365.0, 120.5, 7.0, np.nan, np.nan, np.nan, np.nan])
+
+    def test_numeric_times_pass_through_as_floats(self):
+        times, invalid = to_float_values(pd.Series([1, 2, 3]))
+        assert invalid is False
+        assert times.dtype == float
+        np.testing.assert_array_equal(times.to_numpy(), [1.0, 2.0, 3.0])
+
+    @pytest.mark.parametrize("value", ["2020-01-01", f"{NCIT}C37987", "one year"])
+    def test_values_that_are_not_numbers_are_flagged(self, value):
+        times, invalid = to_float_values(pd.Series(["365", value], dtype=object))
+        assert invalid is True
+        np.testing.assert_array_equal(times.to_numpy(), [365.0, np.nan])
+
+    def test_coerce_time_column_leaves_input_and_missing_column(self):
+        df = pd.DataFrame({"time": ["1", "2"], "event": [1, 0]})
+        out, invalid = coerce_time_column(df, "time")
+        assert invalid is False
+        assert out["time"].tolist() == [1.0, 2.0]
+        assert df["time"].tolist() == ["1", "2"], "the input frame must not be modified"
+        assert coerce_time_column(df, "missing") == (df, False)
+
+    def _df(self, times):
+        n = len(times)
+        return pd.DataFrame(
+            {
+                "time": times,
+                "event": ([1, 0] * n)[:n],
+                "age": [50.0] * n,
+                "treatment": ([0, 1] * n)[:n],
+            }
+        )
+
+    def test_prepare_node_data_converts_and_drops_missing_times(self, client, minimal_env):
+        times = [str(float(i)) for i in range(1, 191)] + [f"{NCIT}C54031"] * 10
+        out, _, threshold_met = prepare_node_data(
+            client, self._df(times), "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is True
+        assert len(out) == 190
+        assert out["time"].dtype == float
+        assert out["time"].tolist() == [float(i) for i in range(1, 191)]
+
+    def test_time_that_is_not_a_number_above_threshold_raises_without_echoing_it(self, client, minimal_env):
+        times = [str(i) for i in range(1, 200)] + ["2020-01-01"]
+        with pytest.raises(UserInputError, match="not numbers") as excinfo:
+            prepare_node_data(client, self._df(times), "time", "event", ["age", "treatment"], need_outcome=True)
+        assert "2020" not in str(excinfo.value)
+
+    def test_time_that_is_not_a_number_below_threshold_reports_the_threshold(self, client, minimal_env):
+        """Below the threshold the bad time is not reported: no oracle on small subpopulations."""
+        times = [str(i) for i in range(1, 10)] + ["2020-01-01"]
+        _, _, threshold_met = prepare_node_data(
+            client, self._df(times), "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is False
+
+
+@pytest.mark.unit
+class TestCovariateConversion:
+    """RDF data delivers numeric covariates as text, like times."""
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def minimal_env(self, monkeypatch):
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+
+    def test_coerce_covariates_converts_text_and_names_the_invalid_ones(self):
+        df = pd.DataFrame(
+            {
+                "age": ["50", "61.5", f"{NCIT}C54031"],
+                "sex": [f"{NCIT}C16576", f"{NCIT}C20197", f"{NCIT}C54031"],
+                "treatment": [0, 1, 0],
+            }
+        )
+        out, invalid = coerce_covariates(df, ["age", "sex", "treatment", "missing"])
+        assert invalid == ["sex"]
+        np.testing.assert_array_equal(out["age"].to_numpy(), [50.0, 61.5, np.nan])
+        assert out["sex"].isna().all()
+        assert out["treatment"].tolist() == [0.0, 1.0, 0.0]
+        assert df["age"].tolist() == ["50", "61.5", f"{NCIT}C54031"], "the input frame must not be modified"
+
+    def _df(self, ages):
+        n = len(ages)
+        return pd.DataFrame(
+            {
+                "time": [float(i) for i in range(1, n + 1)],
+                "event": ([1, 0] * n)[:n],
+                "age": ages,
+                "treatment": ([0, 1] * n)[:n],
+            }
+        )
+
+    def test_prepare_node_data_converts_and_drops_missing_covariates(self, client, minimal_env):
+        ages = [str(20 + i % 40) for i in range(190)] + [f"{NCIT}C54031"] * 10
+        out, _, threshold_met = prepare_node_data(
+            client, self._df(ages), "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is True
+        assert len(out) == 190
+        assert out["age"].dtype == float
+        assert out["age"].tolist() == [float(20 + i % 40) for i in range(190)]
+
+    def test_covariate_that_is_not_a_number_above_threshold_raises_without_echoing_it(self, client, minimal_env):
+        ages = [str(20 + i % 40) for i in range(199)] + [f"{NCIT}C16576"]
+        with pytest.raises(UserInputError, match="not numbers") as excinfo:
+            prepare_node_data(client, self._df(ages), "time", "event", ["age", "treatment"], need_outcome=True)
+        assert "'age'" in str(excinfo.value)
+        assert "C16576" not in str(excinfo.value)
+
+    def test_covariate_that_is_not_a_number_below_threshold_reports_the_threshold(self, client, minimal_env):
+        """Below the threshold the bad covariate is not reported: no oracle on small subpopulations."""
+        ages = [str(20 + i) for i in range(9)] + [f"{NCIT}C16576"]
+        _, _, threshold_met = prepare_node_data(
+            client, self._df(ages), "time", "event", ["age", "treatment"], need_outcome=True
+        )
+        assert threshold_met is False
+
+
+@pytest.mark.unit
+class TestRdfStratification:
+    """Stratification on RDF variables through the library function.
+
+    RDF columns are named by their class (``ncit:C28421``), categorical
+    values arrive as full IRIs and numeric values as text; a request names
+    prefixed codes and numbers.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def minimal_env(self, monkeypatch):
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+
+    def _df(self):
+        n = 300
+        return pd.DataFrame(
+            {
+                "ncit:C125201": [str(float(i)) for i in range(1, n + 1)],
+                "ncit:C25717": ([f"{NCIT}C99799", f"{NCIT}C37987"] * n)[:n],
+                "ncit:C28421": [f"{NCIT}C16576"] * 120 + [f"{NCIT}C20197"] * 170 + [f"{NCIT}C54031"] * 10,
+                "ncit:C156420": [str(15 + i % 25) for i in range(n)],
+                "treatment": ([0, 1] * n)[:n],
+            }
+        )
+
+    def _prepare(self, client, stratification):
+        return prepare_node_data(
+            client,
+            self._df(),
+            "ncit:C125201",
+            "ncit:C25717",
+            ["treatment"],
+            need_outcome=True,
+            variables_to_stratify=stratification,
+            outcome_codes=OUTCOME_CODES,
+        )
+
+    def test_prefixed_code_selects_rows_holding_the_full_iri(self, client, minimal_env):
+        out, _, threshold_met = self._prepare(client, {"ncit:C28421": ["ncit:C16576"]})
+        assert threshold_met is True
+        assert len(out) == 120
+        assert (out["ncit:C28421"] == "ncit:C16576").all()
+
+    def test_full_iri_in_the_request_selects_the_same_rows(self, client, minimal_env):
+        out, _, _ = self._prepare(client, {"ncit:C28421": [f"{NCIT}C16576"]})
+        assert len(out) == 120
+
+    def test_range_on_text_numbers(self, client, minimal_env):
+        out, _, threshold_met = self._prepare(client, {"ncit:C156420": {"start": 18, "end": 25}})
+        expected = sum(18 <= 15 + i % 25 <= 25 for i in range(300))
+        assert threshold_met is True
+        assert len(out) == expected
+        assert out["ncit:C156420"].between(18, 25).all()
+
+    def test_codes_and_range_together(self, client, minimal_env):
+        out, _, _ = self._prepare(client, {"ncit:C28421": ["ncit:C20197"], "ncit:C156420": {"start": 30}})
+        df = self._df()
+        expected = ((df["ncit:C28421"] == f"{NCIT}C20197") & (df["ncit:C156420"].astype(float) >= 30)).sum()
+        assert len(out) == expected
+
+    def test_normalise_stratification_keeps_the_input(self):
+        df = self._df()
+        out, stratification = normalise_stratification(df, {"ncit:C28421": [f"{NCIT}C16576", 1]})
+        assert stratification == {"ncit:C28421": ["ncit:C16576", 1.0]}
+        assert df["ncit:C28421"].iloc[0] == f"{NCIT}C16576", "the input frame must not be modified"
+        assert out["ncit:C28421"].iloc[0] == "ncit:C16576"
+
+
+@pytest.mark.unit
 class TestRdfCollectBounded:
     """The RDF collect step is bounded by COXPH_RDF_COLLECT_TIMEOUT."""
 
@@ -946,6 +1396,33 @@ class TestRdfCollectBounded:
         self._fake_rdf_module(monkeypatch, lambda variables, endpoint: collected.copy())
         out, _, _ = prepare_node_data(client, self._df_with_endpoint(), "time", "event", ["age"], need_outcome=True)
         assert len(out) == 4
+
+    def test_stratified_covariate_is_collected_once(self, client, tmp_folder, monkeypatch):
+        """A covariate that is also a stratification variable is queried once."""
+        requested = []
+
+        def recording_collect(variables, endpoint):
+            requested.extend(variables)
+            return pd.DataFrame(
+                {
+                    "time": [1.0, 2.0, 3.0, 4.0],
+                    "event": [1, 0, 1, 0],
+                    "age": [50.0, 51.0, 52.0, 53.0],
+                }
+            )
+
+        self._fake_rdf_module(monkeypatch, recording_collect)
+        out, _, _ = prepare_node_data(
+            client,
+            self._df_with_endpoint(),
+            "time",
+            "event",
+            ["age"],
+            need_outcome=True,
+            variables_to_stratify={"age": {"start": 51, "end": 53}},
+        )
+        assert requested == ["time", "event", "age"]
+        assert out["age"].tolist() == [51.0, 52.0, 53.0]
 
     def test_library_error_is_sanitised(self, client, tmp_folder, monkeypatch):
         """The library's chained error text (endpoint internals) is not echoed."""

@@ -6,7 +6,7 @@ The results in a return statement are sent to the vantage6 server (after
 encryption if that is enabled).
 """
 
-from typing import Optional, TypeVar
+from typing import Optional, TypeVar, Union
 
 import jwt
 import numpy as np
@@ -66,7 +66,7 @@ _ModelT = TypeVar("_ModelT", bound=BaseModel)
 def central(
     client: AlgorithmClient,
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, dict],
     expl_vars: list,
     organization_ids: Optional[list] = None,
     covariate_profiles: Optional[list] = None,
@@ -89,8 +89,13 @@ def central(
         The vantage6 client instance.
     time_col : str
         Name of the column containing time data.
-    outcome_col : str
-        Name of the column containing outcome/event data (1=event, 0=censored).
+    outcome_col : str | dict
+        Name of the column containing outcome/event data (1=event, 0=censored),
+        or (STRONG AYA) a mapping of the column name to its outcome codes:
+        lists of the codes that mean ``event`` and ``censored``, and
+        optionally ``missing``, for example ``{"ncit:C25717": {"event":
+        ["ncit:C99799"], "censored": ["ncit:C37987"], "missing":
+        ["ncit:C54031"]}}``. Codes may be prefixed names or full IRIs.
     expl_vars : list
         List of explanatory variable names to include in the model.
     organization_ids : list, optional

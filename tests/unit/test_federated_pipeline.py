@@ -50,7 +50,9 @@ def _load_datasets():
     return df1, df2, df3
 
 
-def _run_central(datasets, organization_ids, expl_vars=None, variables_to_stratify=None):
+def _run_central(
+    datasets, organization_ids, expl_vars=None, variables_to_stratify=None, outcome_col="event", time_col="time"
+):
     """Run ``central`` through the mock client and return the result dict."""
     client = MockAlgorithmClient(
         datasets=datasets,
@@ -61,8 +63,8 @@ def _run_central(datasets, organization_ids, expl_vars=None, variables_to_strati
         input_={
             "method": "central",
             "kwargs": {
-                "time_col": "time",
-                "outcome_col": "event",
+                "time_col": time_col,
+                "outcome_col": outcome_col,
                 "expl_vars": EXPL_VARS if expl_vars is None else expl_vars,
                 "organization_ids": organization_ids,
                 "variables_to_stratify": variables_to_stratify,
@@ -409,6 +411,137 @@ class TestValidateRisksetAggregates:
         # zeros at pooled grid points beyond the node's own data
         central._validate_riskset_aggregates(1, [5.0, 5.0, 3.0, 1.0])
         central._validate_riskset_aggregates(1, [5.0, 3.0, 0.0, 0.0])
+
+
+NCIT = "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#"
+# The STRONG AYA survival_status terms (AYA_cancer_schema.jsonld).
+OUTCOME_CODES = {
+    "event": ["ncit:C99799", "ncit:C99798"],
+    "censored": ["ncit:C37987", "ncit:C141463"],
+    "missing": ["ncit:C54031"],
+}
+
+
+def _rdf_coded(df):
+    """Code the outcome as RDF data does: full IRIs, every tenth row missing."""
+    coded = df.copy()
+    coded["event"] = coded["event"].map({1: f"{NCIT}C99799", 0: f"{NCIT}C37987"})
+    coded.loc[coded["id"] % 10 == 0, "event"] = f"{NCIT}C54031"
+    return coded
+
+
+@pytest.mark.unit
+class TestOutcomeCodesPipeline:
+    """An RDF-coded outcome with its codes in outcome_col fits the same model as 0/1 data."""
+
+    def test_mapped_fit_equals_numeric_fit_on_the_same_rows(self, guards_off):
+        df1, df2, _ = _load_datasets()
+        mapped = _run_central(
+            [[{"database": _rdf_coded(df1), "db_type": "csv"}], [{"database": _rdf_coded(df2), "db_type": "csv"}]],
+            [1, 2],
+            outcome_col={"event": OUTCOME_CODES},
+        )
+        numeric = _run_central(
+            [
+                [{"database": df1[df1["id"] % 10 != 0], "db_type": "csv"}],
+                [{"database": df2[df2["id"] % 10 != 0], "db_type": "csv"}],
+            ],
+            [1, 2],
+        )
+        assert mapped["converged"] is True
+        assert mapped["n_events"] == numeric["n_events"]
+        mapped_model = pd.DataFrame(mapped["model"]).T
+        numeric_model = pd.DataFrame(numeric["model"]).T
+        for var in EXPL_VARS:
+            for column in ("Coef", "SE"):
+                assert mapped_model.loc[var, column] == pytest.approx(numeric_model.loc[var, column], abs=1e-12), (
+                    f"{column} mismatch {var}: mapped={mapped_model.loc[var, column]}, "
+                    f"numeric={numeric_model.loc[var, column]}"
+                )
+
+    def test_provenance_echoes_the_codes(self, guards_off):
+        df1, df2, _ = _load_datasets()
+        result = _run_central(
+            [[{"database": _rdf_coded(df1), "db_type": "csv"}], [{"database": _rdf_coded(df2), "db_type": "csv"}]],
+            [1, 2],
+            outcome_col={"event": OUTCOME_CODES},
+        )
+        assert result["provenance"]["input_arguments"]["outcome_col"] == {"event": OUTCOME_CODES}
+
+    def test_unmapped_code_fails_the_run(self, guards_off):
+        df1, df2, _ = _load_datasets()
+        coded1 = _rdf_coded(df1)
+        coded1.loc[coded1.index[0], "event"] = f"{NCIT}C99798"
+        with pytest.raises(UserInputError, match="outcome_col does not list"):
+            _run_central(
+                [[{"database": coded1, "db_type": "csv"}], [{"database": _rdf_coded(df2), "db_type": "csv"}]],
+                [1, 2],
+                outcome_col={
+                    "event": {"event": ["ncit:C99799"], "censored": ["ncit:C37987"], "missing": ["ncit:C54031"]}
+                },
+            )
+
+    def test_invalid_codes_are_rejected_at_central(self, guards_off):
+        df1, df2, _ = _load_datasets()
+        with pytest.raises(UserInputError, match="outcome_col"):
+            _run_central(
+                [[{"database": df1, "db_type": "csv"}], [{"database": df2, "db_type": "csv"}]],
+                [1, 2],
+                outcome_col={"event": {"event": ["ncit:C99799"], "censored": ["ncit:C99799"]}},
+            )
+
+
+def _rdf_shaped(df):
+    """Shape a test dataset as an RDF station delivers it.
+
+    Columns are named by their class in the STRONG AYA semantic map, times
+    arrive as text (every tenth one missing), and the outcome and sex as full
+    IRIs; the covariates stay numeric.
+    """
+    shaped = pd.DataFrame(
+        {
+            "ncit:C125201": df["time"].astype(str),
+            "ncit:C25717": df["event"].map({1: f"{NCIT}C99799", 0: f"{NCIT}C37987"}),
+            "ncit:C28421": df["sex"].map({"F": f"{NCIT}C16576", "M": f"{NCIT}C20197"}),
+            "age": df["age"],
+            "treatment": df["treatment"],
+        }
+    )
+    shaped.loc[df["id"] % 10 == 0, "ncit:C125201"] = f"{NCIT}C54031"
+    return shaped
+
+
+@pytest.mark.unit
+class TestRdfShapedPipeline:
+    """RDF-shaped data fits the same model as the numeric data on the same rows."""
+
+    def test_rdf_shaped_stratified_fit_equals_numeric_fit(self, guards_off):
+        df1, df2, _ = _load_datasets()
+        rdf = _run_central(
+            [[{"database": _rdf_shaped(df1), "db_type": "csv"}], [{"database": _rdf_shaped(df2), "db_type": "csv"}]],
+            [1, 2],
+            time_col="ncit:C125201",
+            outcome_col={"ncit:C25717": OUTCOME_CODES},
+            variables_to_stratify={"ncit:C28421": ["ncit:C16576"]},
+        )
+        numeric = _run_central(
+            [
+                [{"database": df1[df1["id"] % 10 != 0], "db_type": "csv"}],
+                [{"database": df2[df2["id"] % 10 != 0], "db_type": "csv"}],
+            ],
+            [1, 2],
+            variables_to_stratify={"sex": ["F"]},
+        )
+        assert rdf["converged"] is True
+        assert rdf["n_events"] == numeric["n_events"]
+        rdf_model = pd.DataFrame(rdf["model"]).T
+        numeric_model = pd.DataFrame(numeric["model"]).T
+        for var in EXPL_VARS:
+            for column in ("Coef", "SE"):
+                assert rdf_model.loc[var, column] == pytest.approx(numeric_model.loc[var, column], abs=1e-12), (
+                    f"{column} mismatch {var}: rdf={rdf_model.loc[var, column]}, "
+                    f"numeric={numeric_model.loc[var, column]}"
+                )
 
 
 @pytest.mark.unit

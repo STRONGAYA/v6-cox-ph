@@ -10,7 +10,10 @@ main leakage channels of the federated design. All guards are implemented in
 ``v6-cox-ph/privacy_guards.py`` and applied in the same order in every
 partial: parent-task check, settings load, RDF collection (STRONG AYA, when
 the node carries an ``endpoint`` column), masking of unanalysed variables
-(STRONG AYA), stratification (STRONG AYA, when requested — see below),
+(STRONG AYA), time and covariate conversion to floats (STRONG AYA),
+outcome recoding (STRONG AYA, when ``outcome_col`` carries outcome codes —
+see below),
+stratification (STRONG AYA, when requested — see below),
 explanatory-variable validation (``compute_summed_z`` and
 ``perform_iteration``), NaN row dropping, sample-size threshold, the
 STRONG AYA sample-size threshold, iteration-input validation
@@ -135,12 +138,21 @@ apply to the stratified rows. The same holds for the STRONG AYA
 sample-size threshold on top.
 
 Two properties are pinned at validation time. Stratification variable
-names must be identifier-shaped, because ``apply_data_stratification``
-interpolates them into a dataframe query; anything else is rejected with
+names must be identifier-shaped or prefixed names such as ``ncit:C28421``
+(``prefix:local``, letters, digits and underscores only), because
+``apply_data_stratification`` interpolates them between backticks into a
+dataframe query; anything else, a backtick above all, is rejected with
 ``UserInputError`` at ``central`` entry and re-validated on the node. And a
 stratification variable that is not a column of the node's data raises
 ``UserInputError`` — the library filter would otherwise silently keep the
 whole frame, fitting the model on the wrong rows.
+
+Before the library filter runs, RDF-coded columns are brought into the
+form the request uses: for a list of values, the column and the values are
+both compared as prefixed names (a full IRI matches its ``ncit:`` name) or
+as numbers; for a range, the column is converted to floats, so a missing
+value or one that is not a number falls outside every range. The filter
+itself is the library's ``apply_data_stratification``.
 
 The model itself is unchanged: a stratified run fits the same Cox-PH model
 on the stratified rows, and the released aggregates are the same shapes as
@@ -149,6 +161,34 @@ reconstruction exposure of the risk-set guards (see the sections below)
 applies within the subpopulation, and a stratification that leaves a node
 just above the threshold releases aggregates over a small group, guarded
 by the same risk-set floor and jump guard as any small risk set.
+
+Outcome codes
+~~~~~~~~~~~~~
+
+The outcome codes in ``outcome_col`` (STRONG AYA) recode an outcome column
+that is coded with ontology terms, as RDF data is, to 1 (event), 0
+(censored) and NaN (missing). The recoding runs inside the shared
+``prepare_node_data`` hook, after masking and before stratification, in
+every partial; the RDF cache holds the collected values and every partial
+recodes them the same way, so all partials analyse the same rows. Rows with a ``missing`` code, or with a
+code ``outcome_col`` does not list, are dropped with the other incomplete
+rows and therefore count against every threshold. ``outcome_col`` is
+validated with Pydantic at ``central`` entry and re-validated on the node.
+
+A code the data holds but ``outcome_col`` does not list fails the run with
+``UserInputError``, so that a mistyped code cannot silently drop all
+censored rows and fit a model on the events alone. That error is raised
+only **after** the native and STRONG AYA thresholds passed. Raised earlier,
+it would be an oracle: a researcher could stratify down to a
+below-threshold subpopulation, leave one code out of ``outcome_col``, and
+tell from the error type (``UserInputError`` rather than
+``PrivacyThresholdViolation``) whether that subpopulation holds the code.
+After the thresholds, the error describes a subpopulation of at least
+threshold size. Telling one person's code from it would take two runs on
+subpopulations that differ by that person: cross-run differencing, which
+falls under the audited posture of Researcher accountability above (the
+result's provenance records ``outcome_col`` with the other input arguments).
+The message names the outcome column only, never the codes found.
 
 Time binning
 ~~~~~~~~~~~~

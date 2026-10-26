@@ -1,11 +1,15 @@
 # Changelog
 
-## 3.0.0
+## 2.3.0
 
-BREAKING wire change: ``central``, ``compute_summed_z`` and
-``perform_iteration`` take a new optional ``variables_to_stratify``
-argument (STRONG AYA stratification), recorded in ``algorithm_store.json``,
-and the central result echoes the applied mapping.
+Backwards-compatible additions to the wire contract, so a minor release: a
+request that ran on an earlier 2.x release runs unchanged. ``central``,
+``compute_summed_z`` and ``perform_iteration`` take a new optional
+``variables_to_stratify`` argument (STRONG AYA stratification), and their
+``outcome_col`` argument may also carry the outcome codes (STRONG AYA; its
+``algorithm_store.json`` type changes from ``string`` to ``json``, and a
+plain column name stays valid). Both are recorded in
+``algorithm_store.json``, and the central result echoes them.
 
 - STRONG AYA stratification (subpopulation selection): the mapping of
   variable names to value lists or ``{'start', 'end'}`` ranges selects the
@@ -18,13 +22,49 @@ and the central result echoes the applied mapping.
 - The mapping is validated with Pydantic at ``central`` entry
   (``CoxPHInput.variables_to_stratify``) and re-validated on the node
   (defence in depth). Stratification variable names must be
-  identifier-shaped, because ``apply_data_stratification`` interpolates
-  them into a dataframe query. A stratification variable that is not a
-  column of the node's data raises ``UserInputError`` instead of the
-  library filter's silent no-op.
+  identifier-shaped or prefixed names such as ``ncit:C28421`` (the class
+  of an RDF variable), because ``apply_data_stratification`` interpolates
+  them between backticks into a dataframe query. A stratification variable
+  that is not a column of the node's data raises ``UserInputError`` instead
+  of the library filter's silent no-op.
+- Stratification on RDF data: before the library filter runs, a
+  stratification column and its listed values are compared as prefixed
+  names (a full IRI matches its ``ncit:`` name) or numbers, and a range
+  column is converted to floats, so ``{"ncit:C28421": ["ncit:C16576"]}``
+  and ``{"ncit:C156420": {"start": 18, "end": 25}}`` select the rows RDF
+  data delivers as IRIs and text.
+- STRONG AYA times are numeric deltas: the time column is converted to
+  floats on the node right after masking, so times that RDF data delivers
+  as text work and a missing time (``ncit:C54031``) drops the row before
+  every threshold. A value that is not a number fails the run with
+  ``UserInputError``, raised only after the thresholds passed and without
+  naming the value.
+- The explanatory variables are converted to floats the same way, so
+  numeric covariates that RDF data delivers as text (such as
+  ``ncit:C156420``, age at diagnosis) work; previously every RDF run failed
+  the numeric check. A covariate coded with terms cannot be a covariate and
+  fails the run with ``UserInputError`` after the thresholds. A covariate
+  that is also a stratification variable is collected from the RDF endpoint
+  once; requesting it twice made the merge rename both copies and the run
+  fail.
 - The model itself is unchanged: a stratified run fits the same Cox-PH
   model on the stratified rows, and the result echoes the applied mapping
   under ``variables_to_stratify``.
+- STRONG AYA outcome codes: RDF data codes the outcome with ontology
+  terms (for example ``ncit:C37987`` for alive and ``ncit:C99799`` for
+  declared deceased) where the node-side validation required 0/1.
+  ``outcome_col`` is now either the column name (coded 0/1, as before) or a
+  mapping of the column name to its ``event``, ``censored`` and optional
+  ``missing`` codes, e.g. ``{"ncit:C25717": {"event": [...], "censored":
+  [...], "missing": [...]}}``; a prefixed name matches its full IRI, and
+  numbers work for other numeric codings. The outcome is recoded inside the
+  shared ``prepare_node_data`` hook, after masking and before
+  stratification; missing and unlisted codes are dropped before every
+  threshold. A code ``outcome_col`` does not list fails the run with
+  ``UserInputError``, raised only after the thresholds passed so that it
+  never describes a below-threshold subpopulation, and without naming the
+  codes found. ``outcome_col`` is validated with Pydantic at ``central``
+  entry and re-validated on the node; the provenance block echoes it.
 
 ## 2.1.0
 

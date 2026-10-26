@@ -501,10 +501,36 @@ block 3 above, not here.
   every threshold, so the rows the filter removes count against them. The
   spec is validated with Pydantic at ``central`` entry
   (``CoxPHInput.variables_to_stratify``) and re-validated on the node;
-  stratification variable names must be identifier-shaped (they are
-  interpolated into a dataframe query), and a missing stratification
-  variable raises ``UserInputError`` instead of the library filter's
-  silent no-op.
+  stratification variable names must be identifier-shaped or prefixed
+  names such as ``ncit:C28421`` (they are interpolated between backticks
+  into a dataframe query; never allow a backtick), and a missing
+  stratification variable raises ``UserInputError`` instead of the library
+  filter's silent no-op. ``normalise_stratification`` brings RDF terms and
+  numeric text into the form of the request before the library filter
+  runs; keep the filter itself the library's ``apply_data_stratification``.
+- Times (STRONG AYA data standard) are numeric deltas, never dates:
+  ``coerce_time_column`` converts the time column to floats right after
+  masking (text from RDF data, ``ncit:C54031`` for a missing time), and
+  ``coerce_covariates`` does the same for ``expl_vars``. A value that is not
+  a number is dropped before the thresholds and fails the run with
+  ``UserInputError`` only after them, like an unlisted outcome code.
+  ``variables_to_analyse`` names each variable once (a covariate may also be
+  a stratification variable; the RDF collect would otherwise query it twice
+  and its merge would rename both copies).
+- Outcome codes (STRONG AYA data standard): RDF data codes the outcome with
+  ontology terms (``survival_status``, ``ncit:C25717``), so ``outcome_col``
+  is either a column name (coded 0/1) or a mapping of one column name to
+  its ``event``, ``censored`` and optional ``missing`` codes — no separate
+  parameter. ``central`` forwards ``outcome_col`` unchanged; each partial
+  splits it with ``resolve_outcome_col`` and ``recode_outcome`` maps the
+  codes to 1, 0 and NaN after masking and before stratification. Codes
+  compare through ``term_key`` (a prefixed name matches its full
+  IRI). Missing and unlisted codes become NaN and are dropped before every
+  threshold; an unlisted code then fails the run with
+  ``UserInputError``, but only **after** the thresholds passed — raising it
+  earlier would tell a researcher whether a below-threshold subpopulation
+  holds a code. Never move that check before the thresholds and never echo
+  the codes found.
 - The STRONG AYA guards are in addition to the vanilla guards, never
   instead of them; ``perform_iteration`` runs them too, through the same
   shared ``prepare_node_data``.
@@ -519,6 +545,15 @@ block 3 above, not here.
   the release workflow).
 - The lock file is compiled against musl/Python 3.12 and includes the git
   dependencies; regenerate it after any dependency bump.
+- Versions: tags are shared by every branch of this repository, so a
+  release of this branch takes the next version number no other branch
+  uses (phase1: 2.1.0, then 2.2.0 with categorical covariates; this
+  branch: 2.3.0). An additive wire change — a new optional argument, an
+  argument that also accepts a mapping while a plain name stays valid, a
+  new result key — is a minor bump without ``BREAKING(wire):``; a change
+  that breaks an existing request or result stays a major bump. Blocks 1
+  and 3 still say "wire change ⇒ major"; that wording is to be refined at
+  its source.
 
 ### Do not
 
