@@ -4,8 +4,8 @@ Unit tests for the privacy guards module.
 Covers settings parsing, the sample-size threshold, the parent-task guard,
 and iteration-input validation. The time-binning / tail-censoring / jump-guard
 functions are tested here as well (added in a later step). The categorical
-covariate encoding, the category threshold and the unlisted-code error are
-tested here too.
+covariate encoding, the category threshold and the unlisted-code handling
+are tested here too.
 """
 
 from importlib import import_module
@@ -1352,8 +1352,7 @@ class TestEncodeCovariates:
 
     def test_categorical_encoding(self, sex_covariates):
         df = pd.DataFrame({"sex": ["M", "F", "M", "F"], "age": [1.0, 2.0, 3.0, 4.0]})
-        out, unlisted = encode_covariates(df, sex_covariates)
-        assert unlisted == []
+        out = encode_covariates(df, sex_covariates)
         assert out["sex"].tolist() == ["M", "F", "M", "F"]  # the source column is kept
         assert out["sex[F]"].tolist() == [0.0, 1.0, 0.0, 1.0]
         assert pd.api.types.is_float_dtype(out["sex[F]"])
@@ -1361,8 +1360,7 @@ class TestEncodeCovariates:
     def test_numbers_given_as_numbers_or_text(self):
         covariates = resolve_expl_vars([{"grp": {"reference": "0", "categories": {"0": [0], "1": ["1"]}}}])
         df = pd.DataFrame({"grp": [0, 1, "1", "0"]})
-        out, unlisted = encode_covariates(df, covariates)
-        assert unlisted == []
+        out = encode_covariates(df, covariates)
         assert out["grp[1]"].tolist() == [0.0, 1.0, 1.0, 0.0]
 
     def test_missing_codes_become_nan(self):
@@ -1370,23 +1368,24 @@ class TestEncodeCovariates:
             [{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}, "missing": ["unknown"]}}]
         )
         df = pd.DataFrame({"sex": ["M", "unknown", "F"]})
-        out, unlisted = encode_covariates(df, covariates)
-        assert unlisted == []
+        out = encode_covariates(df, covariates)
         assert out["sex[F]"].iloc[0] == 0.0
         assert pd.isna(out["sex[F]"].iloc[1])
         assert out["sex[F]"].iloc[2] == 1.0
 
-    def test_unlisted_codes_flagged_and_nan(self, sex_covariates):
+    def test_unlisted_codes_become_nan(self, sex_covariates):
+        # An unlisted code maps to NaN exactly like a listed missing code;
+        # the row drops with the other incomplete rows.
         df = pd.DataFrame({"sex": ["M", "F", "X"]})
-        out, unlisted = encode_covariates(df, sex_covariates)
-        assert unlisted == ["sex"]
+        out = encode_covariates(df, sex_covariates)
         assert pd.isna(out["sex[F]"].iloc[2])
+        assert out["sex[F]"].iloc[0] == 0.0
+        assert out["sex[F]"].iloc[1] == 1.0
 
     def test_scored_encoding(self):
         covariates = resolve_expl_vars([{"stage": {"scores": {"I": 1, "II": 2}, "missing": ["unknown"]}}])
         df = pd.DataFrame({"stage": ["I", "II", "unknown", "III"]})
-        out, unlisted = encode_covariates(df, covariates)
-        assert unlisted == ["stage"]
+        out = encode_covariates(df, covariates)
         assert out["stage"].iloc[0] == 1.0
         assert out["stage"].iloc[1] == 2.0
         assert pd.isna(out["stage"].iloc[2])
@@ -1401,8 +1400,7 @@ class TestEncodeCovariates:
 
         covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["m"], "F": ["f"]}}}])
         df = pd.DataFrame({"sex": ["M", "F", "m", "f"]})
-        out, unlisted = encode_covariates(df, covariates, key=lower_key)
-        assert unlisted == []
+        out = encode_covariates(df, covariates, key=lower_key)
         assert out["sex[F]"].tolist() == [0.0, 1.0, 0.0, 1.0]
 
     def test_colliding_codes_under_custom_key_raise(self):
@@ -1421,8 +1419,7 @@ class TestEncodeCovariates:
 
     def test_missing_source_column_left_for_validate(self, sex_covariates):
         df = pd.DataFrame({"age": [1.0]})
-        out, unlisted = encode_covariates(df, sex_covariates)
-        assert unlisted == []
+        out = encode_covariates(df, sex_covariates)
         assert "sex[F]" not in out.columns
         with pytest.raises(UserInputError, match="not found"):
             validate_expl_vars(out, sex_covariates, "time", "event")
@@ -1431,9 +1428,8 @@ class TestEncodeCovariates:
         """The encoder handles only categories and scores entries."""
         covariates = resolve_expl_vars(["age"])
         df = pd.DataFrame({"age": ["not", "numeric"]})
-        out, unlisted = encode_covariates(df, covariates)
+        out = encode_covariates(df, covariates)
         assert out["age"].tolist() == ["not", "numeric"]
-        assert unlisted == []
 
     def test_input_not_modified(self, sex_covariates):
         df = pd.DataFrame({"sex": ["M", "F"]})
@@ -1467,8 +1463,7 @@ class TestCheckCategorySizes:
                 "sex": sexes,
             }
         )
-        encoded, _ = encode_covariates(df, covariates)
-        return encoded
+        return encode_covariates(df, covariates)
 
     def test_all_categories_large_enough(self, settings, covariates):
         # 15 M (12 events) and 15 F (12 events): both above threshold 10.
@@ -1565,8 +1560,14 @@ class TestCheckCategorySizes:
 
 
 @pytest.mark.unit
-class TestUnlistedCodeError:
-    """The unlisted-code UserInputError comes only after every threshold."""
+class TestUnlistedCodesTreatedAsMissing:
+    """Unlisted codes map to NaN and drop with the other incomplete rows.
+
+    No error fires on data values: whether a node holds an unlisted code
+    must not change the run's outcome (an error would be a per-value
+    existence oracle). The rows drop identically in every partial, so the
+    analysed row set stays consistent.
+    """
 
     @pytest.fixture
     def client(self):
@@ -1588,29 +1589,45 @@ class TestUnlistedCodeError:
         monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
 
-    def test_unlisted_code_raises_after_thresholds(self, client, covariates, env):
+    def test_unlisted_code_drops_its_row_without_error(self, client, covariates, env):
         # 22 M (11 events) and 22 F (11 events); one censored F row holds an
-        # unlisted code. Every threshold passes, so the unlisted-code error
-        # fires.
+        # unlisted code. Every threshold passes; the row drops and the run
+        # proceeds over the listed rows.
         sexes = ["M"] * 22 + ["F"] * 22
         events = [1] * 11 + [0] * 11 + [1] * 11 + [0] * 11
         df = pd.DataFrame({"time": [float(i + 1) for i in range(44)], "event": events, "sex": sexes})
         df.loc[43, "sex"] = "X"  # a censored F row
-        with pytest.raises(UserInputError, match="does not list"):
-            prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        df_out, _, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        assert threshold_met is True
+        assert len(df_out) == 43  # the unlisted-code row dropped
+        assert "sex[F]" in df_out.columns
 
-    def test_below_threshold_node_raises_no_unlisted_error(self, client, covariates, env):
-        """A node below the threshold is refused without the unlisted-code error.
+    def test_unlisted_and_missing_codes_drop_identically(self, client, env):
+        # A node holding an unlisted code and a node holding the same code
+        # listed as missing analyse the same rows.
+        covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+        missing_covariates = resolve_expl_vars(
+            [{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}, "missing": ["X"]}}]
+        )
+        sexes = ["M"] * 22 + ["F"] * 21 + ["X"]
+        events = [1] * 11 + [0] * 11 + [1] * 11 + [0] * 10 + [0]
+        df = pd.DataFrame({"time": [float(i + 1) for i in range(44)], "event": events, "sex": sexes})
+        out_unlisted, _, met_unlisted = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        out_missing, _, met_missing = prepare_node_data(
+            client, df, "time", "event", missing_covariates, need_outcome=True
+        )
+        assert met_unlisted is True and met_missing is True
+        assert len(out_unlisted) == len(out_missing) == 43
+        pd.testing.assert_frame_equal(out_unlisted, out_missing)
 
-        Raised earlier, the error would tell a researcher whether a
-        below-threshold node holds a code.
-        """
+    def test_below_threshold_node_is_refused(self, client, covariates, env):
+        """A node below the threshold is refused; no data-dependent error."""
         df = pd.DataFrame({"time": [1.0, 2.0, 3.0], "event": [1, 1, 0], "sex": ["M", "X", "F"]})
         _, _, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
         assert threshold_met is False
 
-    def test_category_below_threshold_beats_unlisted_code(self, client, covariates, env):
-        """A category below the threshold raises PrivacyThresholdViolation first."""
+    def test_category_below_threshold_still_fails(self, client, covariates, env):
+        """The category threshold is unaffected by the unlisted code."""
         # 30 rows, 15 events; M has 5 rows (below threshold) and one row holds
         # an unlisted code.
         df = pd.DataFrame(

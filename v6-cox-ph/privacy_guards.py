@@ -10,7 +10,6 @@ shared ``prepare_node_data`` step, in this order::
     -> drop_incomplete_rows -> validate_survival_columns
     -> select_rows (hook) -> check_sample_size
     -> check_category_sizes (only when the threshold was met)
-    -> the unlisted-code UserInputError (only when every threshold passed)
     -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work; perform_iteration
     builds its risk sets with guarded_risk_set_aggregates)
@@ -553,15 +552,15 @@ def resolve_expl_vars(expl_vars: list) -> ResolvedCovariates:
         raise UserInputError(f"Invalid explanatory variables: {e}") from None
 
 
-def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> tuple[pd.Series, bool]:
+def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> pd.Series:
     """Map a source column through a code map.
 
     Returns the mapped values (the label or score of each listed code,
-    ``None`` for a missing or unlisted code) and whether any value's key is
-    not in the map (an unlisted code).
+    ``None`` for a missing or unlisted code). Unlisted codes map to
+    ``None`` exactly like listed ``missing`` codes, so the rows drop in
+    the shared ``drop_incomplete_rows`` — no data-dependent error surface.
     """
     mapped: list = []
-    has_unlisted = False
     for value in values:
         code_key_value = key(value)
         if code_key_value is None:
@@ -570,30 +569,30 @@ def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> tuple[pd.Ser
             mapped.append(code_map[code_key_value])
         else:
             mapped.append(None)
-            has_unlisted = True
-    return pd.Series(mapped, index=values.index, dtype=object), has_unlisted
+    return pd.Series(mapped, index=values.index, dtype=object)
 
 
 def encode_covariates(
     df: pd.DataFrame,
     covariates: ResolvedCovariates,
     key: Callable = code_key,
-) -> tuple[pd.DataFrame, list]:
+) -> pd.DataFrame:
     """Encode the categorical and scored covariates into numeric term columns.
 
     A categorical variable maps each value to its category label and writes
     one float column ``"<name>[<label>]"`` per non-reference label (1.0/0.0);
     a scored variable maps each value to its score in the column named after
     the variable. Listed ``missing`` codes and unlisted codes become NaN in
-    all of the variable's columns; the source columns are kept. A missing
-    source column is left for ``validate_expl_vars``. Plain names are
-    untouched: the encoder handles only ``categories`` and ``scores`` entries.
+    all of the variable's columns, so those rows drop with the other
+    incomplete rows (identically in every partial); the source columns are
+    kept. A missing source column is left for ``validate_expl_vars``. Plain
+    names are untouched: the encoder handles only ``categories`` and
+    ``scores`` entries.
 
     Returns
     -------
-    tuple[pd.DataFrame, list]
-        The frame with the term columns and the sorted names of the source
-        columns that held at least one unlisted code.
+    pd.DataFrame
+        The frame with the term columns.
 
     Raises
     ------
@@ -602,7 +601,6 @@ def encode_covariates(
         depends on the request only, never on data).
     """
     out = df.copy()
-    unlisted: set = set()
     for entry in covariates.categorical:
         if entry.name not in out.columns:
             continue
@@ -610,9 +608,7 @@ def encode_covariates(
             code_map = build_code_map(entry, key)
         except ValueError as e:
             raise UserInputError(str(e)) from None
-        labels, has_unlisted = _map_codes(out[entry.name], code_map, key)
-        if has_unlisted:
-            unlisted.add(entry.name)
+        labels = _map_codes(out[entry.name], code_map, key)
         for label in entry.categories:
             if label == entry.reference:
                 continue
@@ -626,11 +622,9 @@ def encode_covariates(
             code_map = build_code_map(scored_entry, key)
         except ValueError as e:
             raise UserInputError(str(e)) from None
-        scores, has_unlisted = _map_codes(out[scored_entry.name], code_map, key)
-        if has_unlisted:
-            unlisted.add(scored_entry.name)
+        scores = _map_codes(out[scored_entry.name], code_map, key)
         out[scored_entry.name] = scores.astype(float)
-    return out, sorted(unlisted)
+    return out
 
 
 def check_category_sizes(
@@ -712,8 +706,6 @@ def prepare_node_data(
         -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
         -> ``select_rows`` (hook) -> ``check_sample_size``
         -> ``check_category_sizes`` (only when the threshold was met)
-        -> the unlisted-code ``UserInputError`` (only when every threshold
-        passed)
 
     Every partial calls this so that all aggregates central combines come
     from the same row set on each node. The threshold failure behaviour
@@ -747,9 +739,8 @@ def prepare_node_data(
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
 
-    unlisted_names: list = []
     if covariates is not None:
-        df, unlisted_names = encode_covariates(df, covariates)
+        df = encode_covariates(df, covariates)
         validate_expl_vars(df, covariates, time_col, outcome_col)
 
     cols = [time_col]
@@ -770,13 +761,6 @@ def prepare_node_data(
         # The category threshold runs only when the sample-size threshold
         # was met: a node below it is refused for that reason alone.
         check_category_sizes(df, outcome, covariates, settings)
-        if unlisted_names:
-            # Only after every threshold: raised earlier, the error would
-            # tell a researcher whether a below-threshold node holds a code.
-            raise UserInputError(
-                f"Explanatory variables {unlisted_names} hold codes that expl_vars does not list; "
-                f"add every code to a category, a score or missing."
-            )
 
     return df, settings, threshold_met
 
