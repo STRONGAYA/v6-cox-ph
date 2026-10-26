@@ -1,5 +1,10 @@
 """
-Pytest configuration and fixtures for v6-cox-ph tests.
+Pytest configuration and fixtures for a vantage6 algorithm's integration
+tests. Copied from this repository's `test-infra/` into the consumer's
+`tests/conftest.py`; a consumer changes ONLY the two marked spots: the
+`DATASETS` constant below and the `variables_config` fixture at the end.
+Fixes to everything else go to the conventions repository, not to a local
+copy.
 """
 
 import os
@@ -8,6 +13,7 @@ import docker
 import time
 import json
 import platform
+import re
 import subprocess
 
 from vantage6.client import UserClient as Client
@@ -37,6 +43,17 @@ def _skip_or_fail(reason):
     if _running_in_ci():
         pytest.fail(reason, pytrace=False)
     pytest.skip(reason)
+
+
+# EDIT POINT 1 of 2 — the datasets the dev network attaches to the nodes.
+# One (label, path) pair per dataset; the CLI splits each file across the
+# nodes in contiguous slices, so a multi-node test needs one file with equal
+# blocks per node (see the audit harness's canary.py for the layout).
+DATASETS = [
+    ("coxph_test_data_1", Path(__file__).parent / "data" / "coxph_test_data_1.csv"),
+    ("coxph_test_data_2", Path(__file__).parent / "data" / "coxph_test_data_2.csv"),
+    ("coxph_test_data_3", Path(__file__).parent / "data" / "coxph_test_data_3.csv"),
+]
 
 
 @pytest.fixture(scope="session")
@@ -69,12 +86,110 @@ def docker_client():
         _skip_or_fail("Docker not available")
 
 
+def _setuptools_packages(pyproject_text):
+    """Return the ``packages`` list of ``[tool.setuptools]``, or ``None``.
+
+    ``tomllib`` is used when it is available (Python 3.11 and later); on
+    older interpreters a minimal parse of the ``packages`` value inside the
+    ``[tool.setuptools]`` section is the fallback — the test infrastructure
+    only needs a plain list of package names.
+    """
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10 has no tomllib
+        tomllib = None
+
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(pyproject_text)
+        except tomllib.TOMLDecodeError:
+            return None
+        packages = data.get("tool", {}).get("setuptools", {}).get("packages")
+        if isinstance(packages, list) and packages:
+            return [str(package) for package in packages]
+        return None
+
+    lines = pyproject_text.splitlines()
+    in_section = False
+    position = 0
+    while position < len(lines):
+        stripped = lines[position].strip()
+        position += 1
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = stripped == "[tool.setuptools]"
+            continue
+        if not in_section:
+            continue
+        match = re.match(r"packages\s*=\s*\[(.*)$", stripped)
+        if not match:
+            continue
+        # The list may span several lines; collect up to the closing bracket.
+        collected = match.group(1)
+        while "]" not in collected and position < len(lines):
+            collected += lines[position].strip()
+            position += 1
+        inner = collected.split("]", 1)[0]
+        packages = [item.strip().strip("\"'") for item in inner.split(",")]
+        packages = [package for package in packages if package]
+        return packages or None
+    return None
+
+
+def _dockerfile_pkg_name(repo_root):
+    """Return the ``ARG PKG_NAME`` default of the Dockerfile, or ``None``."""
+    try:
+        lines = (repo_root / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        match = re.match(r"\s*ARG\s+PKG_NAME\s*=\s*(.+?)\s*$", line)
+        if match:
+            value = match.group(1).strip().strip("\"'")
+            if value:
+                return value
+    return None
+
+
+def _package_name_from_project(repo_root):
+    """Derive the algorithm package name from the project itself.
+
+    The package name must not come from the checkout folder's name: a
+    consumer repository checked out under a different folder (a GitHub
+    Actions checkout uses the repository name, for instance) would otherwise
+    build an image that imports a package that does not exist. The name is
+    read from ``[tool.setuptools] packages[0]`` in ``pyproject.toml``; the
+    Dockerfile's ``ARG PKG_NAME`` is the fallback when the pyproject cannot
+    be read or parsed.
+    """
+    try:
+        pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        pyproject_text = None
+
+    if pyproject_text is not None:
+        packages = _setuptools_packages(pyproject_text)
+        if packages:
+            return packages[0]
+
+    dockerfile_name = _dockerfile_pkg_name(repo_root)
+    if dockerfile_name:
+        return dockerfile_name
+
+    _skip_or_fail(
+        "Cannot determine the algorithm package name: no readable "
+        "[tool.setuptools] packages in pyproject.toml and no ARG PKG_NAME "
+        "in the Dockerfile"
+    )
+
+
 @pytest.fixture(scope="session")
 def algorithm_image(docker_client):
     """Build the algorithm Docker image for the entire test session."""
-    # Get repository root and derive package name from folder
+    # Get repository root and derive the package name from the project
+    # (pyproject.toml [tool.setuptools] packages[0], falling back to the
+    # Dockerfile's ARG PKG_NAME) — never from the checkout folder's name.
     repo_root = Path(__file__).parent.parent
-    pkg_name = repo_root.name.lower()  # Use folder name as package name
+    pkg_name = _package_name_from_project(repo_root)
 
     # Create image tag from package name
     image_tag = f"{pkg_name}:ci-test"
@@ -242,12 +357,7 @@ def vantage6_network_session(docker_client, extra_node_config_file):
         server_config_path = data_directory / "additional_vantage6_server_config.yaml"
         store_config_path = data_directory / "additional_vantage6_store_config.yaml"
 
-        # Define dataset paths and names
-        datasets = [
-            ("coxph_test_data_1", data_directory / "coxph_test_data_1.csv"),
-            ("coxph_test_data_2", data_directory / "coxph_test_data_2.csv"),
-            ("coxph_test_data_3", data_directory / "coxph_test_data_3.csv"),
-        ]
+        datasets = DATASETS
 
         # Create and start a demo network with extra node config
         print("Creating demo network: algorithm-ci-test.")

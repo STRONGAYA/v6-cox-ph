@@ -1,5 +1,5 @@
 <!-- BEGIN block1 vantage6-general (copied verbatim; edit at the source, never here) -->
-<!-- v6-agents v1 (2026-10-03). Block 1 of an algorithm repository's AGENTS.md.
+<!-- v6-agents v3 (2026-10-26). Block 1 of an algorithm repository's AGENTS.md.
      Copied verbatim from the conventions repository; do not edit here. -->
 
 ## 1. vantage6 general rules
@@ -72,10 +72,27 @@ sheet; it applies to every federated algorithm on vantage6 4.x.
   committed with justification and expiry.
 - Dockerfile: Alpine two-stage, ``PYTHON_VERSION`` build arg (3.12),
   digest-pinned base, ``requirements-lock.txt`` as constraints, no ``USER``.
-- Semver; wire change ⇒ major bump, commit starts ``BREAKING(wire):``,
-  store/central/docs in the same commit. Releases by tag; image
-  ``ghcr.io/<owner>/<repo>-<branch>:<tag>`` with the branch whose tip is
-  the tag.
+- Semver; a breaking wire-contract change (one that breaks an existing
+  request or result) is a major bump and its commit message starts with
+  ``BREAKING(wire):``; an additive change — a new optional argument, a
+  widened argument type that keeps the old form valid, a new result key —
+  is a minor bump; store/central/docs in the same commit. Releases by tag;
+  image ``ghcr.io/<owner>/<repo>-<branch>:<tag>`` with the branch whose tip
+  is the tag.
+
+### Security audits
+- Handbook: the ``vantage6-security-audit`` skill. An audit is
+  **mandatory** before a major release and after any wire-contract change.
+- Audit artefacts (reports, findings, mitigation plans, evidence) are
+  **confidential until released**: they live in the audit vault — a private
+  store outside every code repository — never in this repository, the image,
+  issues, PRs, commit messages or the CHANGELOG.
+- Belt and braces: ``.gitignore``/``.dockerignore`` ignore
+  ``security-audit/``, ``*-audit/`` and ``F-[0-9][0-9][0-9]*.md``; CI
+  fails if any tracked file contains the audit header marker defined in
+  the ``vantage6-security-audit`` skill.
+- Mitigations are developed on a private fork and merged at release; the
+  *released* gate needs the four sign-offs in the audit skill.
 
 ### Upstream and fork
 - Upstream improvements first, free of project code; project layer on top,
