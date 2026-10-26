@@ -644,17 +644,29 @@ def check_category_sizes(
     Every category — the reference included — must have strictly more rows
     and more events than ``settings.sample_size_threshold`` on the analysed
     rows, the same comparison ``check_sample_size`` uses. An empty category
-    fails as well: a zero is a disclosure too. The error names the variable,
-    the category label and the configured threshold, never the count.
+    fails as well: a zero is a disclosure too.
+
+    The rows must also reach the reconstruction admission bound
+    (``_admission_bound``) — the same bound ``check_sample_size`` applies to
+    whole nodes. A category's members are jointly isolated in the released
+    risk-set sums (the 0/1 indicator term restricts S0/S1/S2 to them, and the
+    first grid point is always released), so a category that small would be
+    reconstructable member-by-member exactly as a small node is; the
+    participation threshold alone does not bound that.
+
+    The error names the variable, the category label and the configured
+    bounds, never the count.
 
     Raises
     ------
     PrivacyThresholdViolation
-        When a category does not exceed the threshold.
+        When a category does not exceed the threshold or reach the
+        admission bound.
     """
     if covariates is None:
         return
     threshold = settings.sample_size_threshold
+    admission_bound = _admission_bound(settings)
     for entry in covariates.categorical:
         if entry.name not in df.columns:
             continue  # validate_expl_vars already refused the missing column
@@ -664,10 +676,13 @@ def check_category_sizes(
         masks = {label: df[f"{entry.name}[{label}]"] == 1.0 for label in entry.categories if label != entry.reference}
         masks[entry.reference] = (df[term_columns] == 0.0).all(axis=1)
         for label, mask in masks.items():
-            if int(mask.sum()) <= threshold:
+            n_rows = int(mask.sum())
+            if n_rows <= threshold or n_rows < admission_bound:
                 raise PrivacyThresholdViolation(
-                    f"Category '{label}' of explanatory variable '{entry.name}' does not exceed the "
-                    f"configured sample-size threshold {threshold} (rows and events must both be greater)."
+                    f"Category '{label}' of explanatory variable '{entry.name}' does not meet the "
+                    f"configured sample-size threshold {threshold} and admission bound "
+                    f"{admission_bound} (rows and events must both exceed the threshold; "
+                    f"rows must also reach the admission bound)."
                 )
             if outcome_col is not None:
                 n_events = int((mask & (df[outcome_col] == 1)).sum())
@@ -983,6 +998,25 @@ def validate_survival_columns(df: pd.DataFrame, time_col: str, outcome_col: Opti
             )
 
 
+def _admission_bound(settings: PrivacySettings) -> int:
+    """The reconstruction admission bound: the smallest group whose members
+    the released aggregates may isolate whole.
+
+    ``max(reconstruction_row_factor * k, FLOOR_ADMISSION_MULTIPLE * R)``
+    with the floor term only while the risk-set floor is in effect
+    (``COXPH_MIN_RISK_SET_CHANGE > 1``). Applied to whole nodes in
+    ``check_sample_size`` and to every category in ``check_category_sizes``:
+    a group that small would have (nearly) its whole content inside the
+    smallest released risk set, and the floor would hold nearly its whole
+    risk-set trajectory at the first grid point.
+    """
+    bound = settings.reconstruction_row_factor * settings.min_risk_set_change
+    floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
+    if floor is not None:
+        bound = max(bound, FLOOR_ADMISSION_MULTIPLE * floor)
+    return bound
+
+
 def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: PrivacySettings) -> bool:
     """Check whether the node meets the sample-size threshold.
 
@@ -1029,11 +1063,8 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
 
     # The admission bound covers both reconstruction routes; the warning
     # names the configured bound only, never the actual count.
-    reconstruction_bound = settings.reconstruction_row_factor * settings.min_risk_set_change
+    admission_bound = _admission_bound(settings)
     floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
-    admission_bound = reconstruction_bound
-    if floor is not None:
-        admission_bound = max(admission_bound, FLOOR_ADMISSION_MULTIPLE * floor)
     if n_rows < admission_bound:
         if floor is not None:
             warn(

@@ -660,6 +660,10 @@ class TestPrepareNodeData:
 
     def test_guard_order_with_categorical(self, client, node_df, default_env, monkeypatch):
         """A categorical covariate runs the same order; the category threshold passes."""
+        # The minimal level keeps the admission bound at k rows: this test
+        # asserts the guard ORDER, and the 100-row categories of node_df
+        # cannot reach the standard level's bound of 150 on a 200-row node.
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         calls = self._record_guard_calls(monkeypatch)
         covariates = resolve_expl_vars(["age", {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
         df, settings, threshold_met = prepare_node_data(client, node_df, "time", "event", covariates, need_outcome=True)
@@ -1522,6 +1526,42 @@ class TestCheckCategorySizes:
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50.0]})
         check_category_sizes(df, "event", covariates, settings)
         check_category_sizes(df, "event", None, settings)
+
+    @pytest.fixture
+    def hardened_settings(self):
+        # Standard-level-like: factor 10, floor 50 -> admission bound 150.
+        return PrivacySettings(
+            sample_size_threshold=10,
+            time_bin_width=None,
+            min_risk_set_change=5,
+            reconstruction_row_factor=10,
+            min_risk_set_size=50,
+        )
+
+    def test_category_below_admission_bound_fails(self, hardened_settings, covariates):
+        # 149 M rows (149 events) pass the threshold but not the bound 150;
+        # the F category reaches the bound so M is the refused one.
+        df = self._frame(["M"] * 149 + ["F"] * 151, [1] * 149 + [1] * 151, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'M'"):
+            check_category_sizes(df, "event", covariates, hardened_settings)
+
+    def test_category_at_admission_bound_passes(self, hardened_settings, covariates):
+        # 150 M rows (150 events) reach the bound 150 and pass.
+        df = self._frame(["M"] * 150 + ["F"] * 150, [1] * 150 + [1] * 150, covariates)
+        check_category_sizes(df, "event", covariates, hardened_settings)
+
+    def test_admission_bound_message_names_bounds_not_count(self, hardened_settings, covariates):
+        # 149 M rows: the message names the threshold and the bound, never
+        # the count.
+        df = self._frame(["M"] * 149 + ["F"] * 151, [1] * 149 + [1] * 151, covariates)
+        with pytest.raises(PrivacyThresholdViolation) as exc_info:
+            check_category_sizes(df, "event", covariates, hardened_settings)
+        message = str(exc_info.value)
+        assert "10" in message  # the configured threshold
+        assert "150" in message  # the configured admission bound
+        assert "sex" in message
+        assert "'M'" in message
+        assert "149" not in message  # never the count
 
 
 @pytest.mark.unit
