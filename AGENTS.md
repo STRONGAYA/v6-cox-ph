@@ -31,8 +31,11 @@ compatible with that:
   node, and rows the project removes still count against the threshold.
 - Never weaken the vanilla guards: the parent-task guard, the sample-size
   threshold and the logging rules stay as they are.
-- A change to the wire contract is a **major** version bump, and the commit
-  message starts with ``BREAKING(wire):``.
+- A **breaking** wire-contract change — one that breaks an existing request
+  or result — is a **major** version bump, and the commit message starts
+  with ``BREAKING(wire):``. An additive change — a new optional argument,
+  a widened argument type that keeps the old form valid, a new result key
+  — is a minor bump.
 
 ## Repository layout
 
@@ -277,9 +280,12 @@ deliberately runs glibc and unlocked to test the declared range.
 ## Branches, docs and releases
 
 - ``standard-coxph`` is the default branch and the PR target.
-- Semantic versioning. A wire-contract change (partial signatures, result
-  keys, ``algorithm_store.json``) is a major bump and its commit message
-  starts with ``BREAKING(wire):``.
+- Semantic versioning. A **breaking** wire-contract change (one that breaks
+  an existing request or result — partial signatures, result keys,
+  ``algorithm_store.json``) is a major bump and its commit message starts
+  with ``BREAKING(wire):``. An additive change — a new optional argument,
+  a widened argument type that keeps the old form valid, a new result key
+  — is a minor bump.
 - Releases are git tags. ``release.yaml`` publishes
   ``ghcr.io/<owner>/<repository>-<branch>:<tag>`` where ``<branch>`` is the
   branch whose **tip** is the tagged commit; it fails clearly when none or
