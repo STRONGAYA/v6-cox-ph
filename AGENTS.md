@@ -616,9 +616,7 @@ block 3 above, not here.
   branch: 2.3.0). An additive wire change — a new optional argument, an
   argument that also accepts a mapping while a plain name stays valid, a
   new result key — is a minor bump without ``BREAKING(wire):``; a change
-  that breaks an existing request or result stays a major bump. Blocks 1
-  and 3 still say "wire change ⇒ major"; that wording is to be refined at
-  its source.
+  that breaks an existing request or result stays a major bump.
 
 ### Do not
 
