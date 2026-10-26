@@ -37,17 +37,32 @@ The input arguments for the central function consist of:
   node has passed its thresholds, so a mistyped code cannot silently drop
   the censored rows. The result's provenance block echoes ``outcome_col``
   with its codes.
-- ``expl_vars`` (list): a list of explanatory variables (predictors) to be
-  used in the computation. Covariates must be numeric; the node converts
-  them to floats, so numbers that RDF data delivers as text work (for
-  example ``ncit:C156420``, age at diagnosis), and a missing value
-  (``ncit:C54031``) drops the row. A variable coded with terms, such as
-  biological sex (``ncit:C28421``), cannot be a covariate: select its
-  categories with ``variables_to_stratify`` instead. A covariate that holds
-  some values that are not numbers raises ``UserInputError`` (without
-  naming the values) once the node has passed its thresholds; when no value
-  is a number at all, every row is dropped and the run is refused by the
-  sample-size threshold instead.
+- ``expl_vars`` (list): the explanatory variables (predictors) of the
+  model. Each entry is either a plain column name (a numeric covariate) or
+  a single-entry mapping of a column name to a spec:
+
+  - categorical: ``{"sex": {"reference": "M", "categories": {"M": ["M"],
+    "F": ["F"]}}}`` gives one 0/1 model term per non-reference category,
+    named ``sex[F]``;
+  - scored (ordinal): ``{"stage": {"scores": {"I": 1, "II": 2, "III": 3,
+    "IV": 4}, "missing": ["unknown"]}}`` gives one numeric model term
+    ``stage``.
+
+  Codes are matched as numbers or text (``1``, ``"1"`` and ``1.0`` are the
+  same code; STRONG AYA compares them through the term key, so a prefixed
+  name matches its full IRI), and codes listed under ``missing``, or codes
+  the spec does not list, are treated as missing. A plain name must be
+  numeric: the node converts it to floats, so numbers that RDF data
+  delivers as text work (for example ``ncit:C156420``, age at diagnosis),
+  and a missing value (``ncit:C54031``) drops the row. A plain name that
+  holds terms, such as biological sex (``ncit:C28421``), is not a numeric
+  covariate: give it a categorical or scored spec instead. A plain name
+  that holds some values that are not numbers raises ``UserInputError``
+  (without naming the values) once the node has passed its thresholds; when
+  no value is a number at all, every row is dropped and the run is refused
+  by the sample-size threshold instead. The model terms — not the variable
+  names — index the result's ``model`` table and the order of
+  ``covariance``.
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
   organisations are used. In a STRONG AYA collaboration, select the **data**
@@ -56,9 +71,11 @@ The input arguments for the central function consist of:
   includes it fails closed (the error names the organisations that did not
   return a result).
 - ``covariate_profiles`` (list of objects, optional): covariate profiles for
-  survival curves. Each entry maps explanatory variable names to values;
-  variables left out are taken at the pooled event-case mean. An entry
-  naming an unknown variable raises ``UserInputError``.
+  survival curves. Each entry maps explanatory variable names to values: a
+  number for a plain or scored variable, a category label for a categorical
+  variable. Variables left out are taken at the pooled event-case mean. An
+  entry naming an unknown variable or an unknown label raises
+  ``UserInputError``.
 - ``variables_to_stratify`` (object, optional): STRONG AYA stratification.
   A mapping of variable names to lists of values to keep (``{"sex":
   ["F"]}``) or ``{'start', 'end'}`` ranges (``{"age": {"start": 40, "end":
@@ -85,8 +102,10 @@ Every node validates its data before sharing anything:
   ``UserInputError`` once the node has passed its thresholds.
 - ``outcome_col`` must exist and be binary: only 0 and 1 (booleans are
   allowed), or every code must be listed in ``outcome_col``.
-- Every ``expl_var`` must exist and be numeric (see below), and rows with
-  missing values in any analysed column are dropped before the sample-size
+- Every ``expl_var`` source column must exist; categorical and scored
+  entries are encoded into numeric model-term columns on the node before
+  validation, and every model term must be numeric. Rows with missing
+  values in any analysed column are dropped before the sample-size
   threshold is checked.
 
 A column that violates these rules raises ``UserInputError`` and stops the
@@ -96,12 +115,40 @@ codings (for example an outcome coded 1/2, or string labels) must recode
 not in the vanilla algorithm. In this STRONG AYA layer, the outcome codes in
 ``outcome_col`` are that recoding for the outcome column.
 
+Categorical and scored covariates
+---------------------------------
+
+With the test data (``tests/data/coxph_test_data_1.csv``, where ``sex`` is
+coded ``M``/``F``), a categorical covariate and a scored one look like:
+
+.. code-block:: python
+
+  expl_vars = [
+      "age",  # numeric covariate, as before
+      {"sex": {  # categorical: one 0/1 column per non-reference category
+          "reference": "M",
+          "categories": {"M": ["M"], "F": ["F"]},
+      }},
+      {"stage": {  # ordinal: one numeric column
+          "scores": {"I": 1, "II": 2, "III": 3, "IV": 4},
+          "missing": ["unknown"],  # optional
+      }},
+  ]
+
+The model terms are ``["age", "sex[F]", "stage"]``: they are the names in
+the result's ``model``, the order of ``covariance``, ``beta``, ``centre``
+and ``scale``, and the keys of the partials' ``sum``/``sum_squares``. A
+covariate profile names a categorical variable by one of its labels
+(``{"sex": "F"}``); central expands the label to the 1/0 values of that
+variable's terms before computing the curves.
+
 Output fields
 -------------
 
 The central function returns a dictionary with:
 
-- ``model``: a JSON object indexed by variable name with columns ``Coef``,
+- ``model``: a JSON object indexed by model term (a variable name, or
+  ``<name>[<label>]`` for a categorical variable) with columns ``Coef``,
   ``Exp(coef)``, ``SE``, ``lower_CI``, ``upper_CI``, ``Z`` and ``p-value``.
   The coefficients are on the original covariates: nodes fit on the
   standardised ``(x - centre) / scale`` and the central function transforms

@@ -76,6 +76,37 @@ plain column name stays valid). Both are recorded in
   ``vantage6-algorithm-tools>=4.15,<4.16`` and the CI test matrix runs
   4.15 only.
 
+## 2.2.0
+
+Additive wire change: ``expl_vars`` entries may now be categorical or scored
+covariates, not only plain column names. A list of names stays valid, so
+existing requests keep working.
+
+- ``expl_vars`` accepts, next to plain column names, single-entry mappings of
+  a column name to a spec: ``{"sex": {"reference": "M", "categories": {"M":
+  ["M"], "F": ["F"]}}}`` gives one 0/1 model term ``sex[F]`` per
+  non-reference category; ``{"stage": {"scores": {"I": 1, "II": 2},
+  "missing": ["unknown"]}}`` gives one numeric model term ``stage``. The
+  model terms — the names in the result's ``model``, the order of
+  ``covariance``/``beta``/``centre``/``scale`` and the keys of the partials'
+  ``sum``/``sum_squares`` — replace the variable names downstream, and
+  ``COXPH_MAX_COVARIATES`` counts model terms, not entries.
+- The node encodes the categorical and scored covariates into numeric term
+  columns before validation (``encode_covariates``); the source columns are
+  kept. Codes compare through ``code_key``: a number and the text that reads
+  as one are the same code.
+- Every category of a categorical covariate — the reference included — must
+  have more rows and more events than ``SAMPLE_SIZE_THRESHOLD`` on each node,
+  otherwise ``PrivacyThresholdViolation`` (``check_category_sizes``). Scored
+  variables are numeric covariates and get no category check.
+- A code the spec does not list is treated as missing and fails the run with
+  ``UserInputError`` only after every threshold passed.
+- ``covariate_profiles`` values may be numbers (plain and scored variables)
+  or category labels (categorical variables); central expands a label to the
+  1/0 values of that variable's terms.
+- ``algorithm_store.json``: the ``expl_vars`` argument type is ``json`` in
+  all three functions.
+
 ## 2.1.0
 
 Non-breaking internal change; the wire contract (``algorithm_store.json``

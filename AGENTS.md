@@ -212,8 +212,11 @@ compatible with that:
   node, and rows the project removes still count against the threshold.
 - Never weaken the vanilla guards: the parent-task guard, the sample-size
   threshold and the logging rules stay as they are.
-- A change to the wire contract is a **major** version bump, and the commit
-  message starts with ``BREAKING(wire):``.
+- A **breaking** wire-contract change — one that breaks an existing request
+  or result — is a **major** version bump, and the commit message starts
+  with ``BREAKING(wire):``. An additive change — a new optional argument,
+  a widened argument type that keeps the old form valid, a new result key
+  — is a minor bump.
 
 ## Repository layout
 
@@ -281,6 +284,13 @@ user task → central → compute_summed_z
 - ``compute_summed_z`` also returns the node's privacy settings
   (configuration, not data); the result summary based on them is built in a
   later step.
+- ``expl_vars`` entries are plain column names or single-entry mappings of a
+  column name to a categorical spec (``reference`` + ``categories``) or a
+  scored spec (``scores``, optional ``missing``); the store type of
+  ``expl_vars`` is ``json`` and a list of names stays valid. The model terms
+  they expand to (one per plain or scored variable, one per non-reference
+  category) replace the variable names in the result's ``model``, the order
+  of ``covariance`` and the partials' ``sum``/``sum_squares`` keys.
 - ``central`` optionally takes ``covariate_profiles`` (validated by the
   Pydantic input model: keys must be known explanatory variables) and
   returns ``baseline_cumulative_hazard`` and ``survival_curves`` computed
@@ -384,15 +394,19 @@ deliberately runs glibc and unlocked to test the declared range.
   node. The result dicts of the partials are built from the Pydantic
   result models, so their keys and nesting are pinned in one place.
 - **Every partial prepares its data through the shared**
-  ``prepare_node_data(client, df, time_col, outcome_col, expl_vars, *,
-  need_outcome)`` (in ``privacy_guards.py``), which runs the guards in
-  order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
-  ``validate_expl_vars`` (when ``expl_vars`` are given) →
+  ``prepare_node_data(client, df, time_col, outcome_col, covariates, *,
+  need_outcome)`` (in ``privacy_guards.py``; ``covariates`` is the resolved
+  ``ResolvedCovariates`` from ``resolve_expl_vars``), which runs the guards
+  in order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
+  ``encode_covariates`` (when covariates are given) →
+  ``validate_expl_vars`` (when covariates are given) →
   ``drop_incomplete_rows`` → ``validate_survival_columns`` →
   ``select_rows`` (the marked hook for project row selection) →
-  ``check_sample_size``. Do not reorder or skip any of them; the unit
-  tests assert the order. ``validate_iteration_input``
-  (``perform_iteration`` only) and ``prepare_time_column`` run afterwards.
+  ``check_sample_size`` → ``check_category_sizes`` (only when the threshold
+  was met) → the unlisted-code ``UserInputError`` (only when every threshold
+  passed). Do not reorder or skip any of them; the unit tests assert the
+  order. ``validate_iteration_input`` (``perform_iteration`` only) and
+  ``prepare_time_column`` run afterwards.
   ``perform_iteration`` builds its aggregates with the vectorised
   ``guarded_risk_set_aggregates`` (``searchsorted``/``bincount``/reverse
   cumsum; the jump guard comes from the bucket counts) — the previous mask
@@ -424,7 +438,7 @@ deliberately runs glibc and unlocked to test the declared range.
 - The parent-task guard fails closed: if the task lookup fails or the token
   is missing (and the client is not a ``MockAlgorithmClient``), raise
   ``AlgorithmError``, never proceed.
-- Rows with NaN in ``time_col``, ``outcome_col`` or any ``expl_var`` are
+- Rows with NaN in ``time_col``, ``outcome_col`` or any model term are
   dropped before the sample-size threshold is checked.
 
 ## Coding conventions
@@ -447,9 +461,12 @@ deliberately runs glibc and unlocked to test the declared range.
 ## Branches, docs and releases
 
 - ``standard-coxph`` is the default branch and the PR target.
-- Semantic versioning. A wire-contract change (partial signatures, result
-  keys, ``algorithm_store.json``) is a major bump and its commit message
-  starts with ``BREAKING(wire):``.
+- Semantic versioning. A **breaking** wire-contract change (one that breaks
+  an existing request or result — partial signatures, result keys,
+  ``algorithm_store.json``) is a major bump and its commit message starts
+  with ``BREAKING(wire):``. An additive change — a new optional argument,
+  a widened argument type that keeps the old form valid, a new result key
+  — is a minor bump.
 - Releases are git tags. ``release.yaml`` publishes
   ``ghcr.io/<owner>/<repository>-<branch>:<tag>`` where ``<branch>`` is the
   branch whose **tip** is the tagged commit; it fails clearly when none or

@@ -97,7 +97,11 @@ def central(
         ["ncit:C99799"], "censored": ["ncit:C37987"], "missing":
         ["ncit:C54031"]}}``. Codes may be prefixed names or full IRIs.
     expl_vars : list
-        List of explanatory variable names to include in the model.
+        List of explanatory variables to include in the model: plain column
+        names, or single-entry mappings of a column name to a categorical
+        spec (``reference`` and ``categories``) or a scored spec (``scores``,
+        optional ``missing``). Forwarded to the partials unchanged; the model
+        terms they expand to size the fit.
     organization_ids : list, optional
         List of organisation IDs to include. If None, all organisations are used.
         Organisations that do not meet the sample-size threshold fail the
@@ -105,8 +109,9 @@ def central(
         here rather than relying on automatic exclusion.
     covariate_profiles : list, optional
         Optional covariate profiles for survival curves. Each entry maps
-        explanatory variable names to values; variables left out are taken
-        at the pooled event-case mean (the baseline profile).
+        explanatory variable names to values: a number for a plain or scored
+        variable, a category label for a categorical variable. Variables left
+        out are taken at the pooled event-case mean (the baseline profile).
     variables_to_stratify : dict, optional
         STRONG AYA stratification mapping (variable names to value lists or
         ``start``/``end`` ranges). The run analyses only the rows inside the
@@ -134,14 +139,18 @@ def central(
     expl_vars = validated.expl_vars
     organization_ids = validated.organization_ids
     variables_to_stratify = validated.variables_to_stratify
+    # The model terms (one per plain or scored variable, one per
+    # non-reference category) size the fit: the Hessian, the covariate cap,
+    # the result table and the order of covariance/beta/centre/scale.
+    model_terms = validated.model_terms
 
     # Resource caps bound the problem size the algorithm accepts; they are
     # configuration, read centrally. The message names the user-supplied
     # count and the configured cap only.
     caps = load_resource_caps()
-    if len(expl_vars) > caps.max_covariates:
+    if len(model_terms) > caps.max_covariates:
         raise UserInputError(
-            f"Too many explanatory variables: {len(expl_vars)} requested, the configured "
+            f"Too many explanatory variables: {len(model_terms)} model terms requested, the configured "
             f"maximum ({ENV_MAX_COVARIATES}) is {caps.max_covariates}."
         )
 
@@ -171,7 +180,7 @@ def central(
 
     safe_log("info", f"Sending task to organisations {ids}")
 
-    n_covs = len(expl_vars)
+    n_covs = len(model_terms)
     epochs = MAX_ITERATIONS
 
     # Subtask: compute summed Z
@@ -206,7 +215,7 @@ def central(
     node_info = {}
     for output in results:
         result = _parse_result(
-            SummedZResult, output, {"expected_ids": ids, "expl_vars": expl_vars, "time_col": time_col}
+            SummedZResult, output, {"expected_ids": ids, "expl_vars": model_terms, "time_col": time_col}
         )
         if z_sum is None:
             z_sum = pd.Series(result.sum)
@@ -515,17 +524,19 @@ def central(
         z_sum=z_sum_star,
         aggregated_time_events=aggregated_time_events,
         summed_agg1=summed_agg1,
-        expl_vars=expl_vars,
+        expl_vars=model_terms,
         converged=converged,
         n_iterations=n_iterations,
     )
     model = back_transform_results(model, scale)
 
-    results_df = format_results_dataframe(model["results_data"], expl_vars)
+    results_df = format_results_dataframe(model["results_data"], model_terms)
 
     # Baseline cumulative hazard and survival curves, computed centrally from
     # quantities that are already aggregated (see coxph_logic): no new
-    # partial, no new data leaves a node.
+    # partial, no new data leaves a node. The profiles are expanded to
+    # model-term values first (a categorical label becomes the 1/0 values of
+    # that variable's terms), so the curves work on terms unchanged.
     baseline_cumulative_hazard, survival_curves = survival_curves_from_aggregates(
         aggregated_time_events["freq"].to_numpy(dtype=float),
         summed_agg1,
@@ -533,8 +544,8 @@ def central(
         beta,
         centre,
         scale,
-        expl_vars,
-        validated.covariate_profiles,
+        model_terms,
+        validated.expanded_covariate_profiles,
         curve_time_sig_figs,
     )
 

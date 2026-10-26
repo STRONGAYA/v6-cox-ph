@@ -6,8 +6,23 @@ so they can be unit-tested without vantage6. All partial functions run the
 shared ``prepare_node_data`` step, in this order::
 
     ensure_spawned_by_central -> load_privacy_settings
-    -> (validate_expl_vars, where expl_vars are used) -> drop_incomplete_rows
-    -> validate_survival_columns -> select_rows (hook) -> check_sample_size
+    -> RDF collect (STRONG AYA, only when the node carries an ``endpoint``
+    column) -> ``mask_unnecessary_variables`` (STRONG AYA)
+    -> ``coerce_time_column`` (STRONG AYA)
+    -> ``coerce_covariates`` (STRONG AYA, plain names only)
+    -> ``recode_outcome`` (STRONG AYA, when ``outcome_codes`` are given)
+    -> ``validate_stratification_spec`` + ``normalise_stratification``
+    + ``apply_data_stratification`` (STRONG AYA, when
+    ``variables_to_stratify`` is given)
+    -> ``encode_covariates`` (STRONG AYA key, when covariates are given)
+    -> ``validate_expl_vars`` (when covariates are given)
+    -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
+    -> ``select_rows`` (hook) -> ``check_sample_size``
+    -> ``check_category_sizes`` (only when the threshold was met)
+    -> ``apply_sample_size_threshold`` (STRONG AYA, when the native
+    threshold passed) -> the checks after the thresholds (a time that is
+    not a number, a plain covariate that is not a number, an unlisted
+    outcome code, an unlisted covariate code)
     -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work; perform_iteration
     builds its risk sets with guarded_risk_set_aggregates)
@@ -92,7 +107,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Callable, Optional, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -100,6 +115,7 @@ import jwt
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
+    PrivacyThresholdViolation,
     PrivacyViolation,
     UserInputError,
 )
@@ -107,6 +123,10 @@ from vantage6.algorithm.tools.exceptions import (
 from .coxph_logic import round_sig
 from .miscellaneous import (
     MISSING_TERM,
+    ResolvedCovariates,
+    build_code_map,
+    code_key,
+    covariate_key,
     format_validation_error,
     parse_outcome_col,
     term_key,
@@ -688,12 +708,158 @@ def select_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def resolve_expl_vars(expl_vars: list) -> ResolvedCovariates:
+    """Re-validate the explanatory-variable spec on the node.
+
+    The spec was validated at central entry; the node re-validates it (the
+    wire is not trusted) and raises ``UserInputError`` on a malformed spec.
+    The error messages echo only names, labels and codes of the request.
+
+    Raises
+    ------
+    UserInputError
+        On any malformed entry, duplicate name, clashing term or colliding
+        code.
+    """
+    from .miscellaneous import parse_expl_vars
+
+    try:
+        return parse_expl_vars(expl_vars)
+    except ValueError as e:
+        raise UserInputError(f"Invalid explanatory variables: {e}") from None
+
+
+def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> tuple[pd.Series, bool]:
+    """Map a source column through a code map.
+
+    Returns the mapped values (the label or score of each listed code,
+    ``None`` for a missing or unlisted code) and whether any value's key is
+    not in the map (an unlisted code).
+    """
+    mapped: list = []
+    has_unlisted = False
+    for value in values:
+        code_key_value = key(value)
+        if code_key_value is None:
+            mapped.append(None)
+        elif code_key_value in code_map:
+            mapped.append(code_map[code_key_value])
+        else:
+            mapped.append(None)
+            has_unlisted = True
+    return pd.Series(mapped, index=values.index, dtype=object), has_unlisted
+
+
+def encode_covariates(
+    df: pd.DataFrame,
+    covariates: ResolvedCovariates,
+    key: Callable = code_key,
+) -> tuple[pd.DataFrame, list]:
+    """Encode the categorical and scored covariates into numeric term columns.
+
+    A categorical variable maps each value to its category label and writes
+    one float column ``"<name>[<label>]"`` per non-reference label (1.0/0.0);
+    a scored variable maps each value to its score in the column named after
+    the variable. Listed ``missing`` codes and unlisted codes become NaN in
+    all of the variable's columns; the source columns are kept. A missing
+    source column is left for ``validate_expl_vars``. Plain names are
+    untouched: the encoder handles only ``categories`` and ``scores`` entries.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, list]
+        The frame with the term columns and the sorted names of the source
+        columns that held at least one unlisted code.
+
+    Raises
+    ------
+    UserInputError
+        When two listed codes collide under ``key`` (a spec error that
+        depends on the request only, never on data).
+    """
+    out = df.copy()
+    unlisted: set = set()
+    for entry in covariates.categorical:
+        if entry.name not in out.columns:
+            continue
+        try:
+            code_map = build_code_map(entry, key)
+        except ValueError as e:
+            raise UserInputError(str(e)) from None
+        labels, has_unlisted = _map_codes(out[entry.name], code_map, key)
+        if has_unlisted:
+            unlisted.add(entry.name)
+        for label in entry.categories:
+            if label == entry.reference:
+                continue
+            term = f"{entry.name}[{label}]"
+            out[term] = (labels == label).astype(float)
+            out.loc[labels.isna(), term] = np.nan
+    for scored_entry in covariates.scored:
+        if scored_entry.name not in out.columns:
+            continue
+        try:
+            code_map = build_code_map(scored_entry, key)
+        except ValueError as e:
+            raise UserInputError(str(e)) from None
+        scores, has_unlisted = _map_codes(out[scored_entry.name], code_map, key)
+        if has_unlisted:
+            unlisted.add(scored_entry.name)
+        out[scored_entry.name] = scores.astype(float)
+    return out, sorted(unlisted)
+
+
+def check_category_sizes(
+    df: pd.DataFrame,
+    outcome_col: Optional[str],
+    covariates: Optional[ResolvedCovariates],
+    settings: PrivacySettings,
+) -> None:
+    """Check that every category of every categorical covariate is large enough.
+
+    Every category — the reference included — must have strictly more rows
+    and more events than ``settings.sample_size_threshold`` on the analysed
+    rows, the same comparison ``check_sample_size`` uses. An empty category
+    fails as well: a zero is a disclosure too. The error names the variable,
+    the category label and the configured threshold, never the count.
+
+    Raises
+    ------
+    PrivacyThresholdViolation
+        When a category does not exceed the threshold.
+    """
+    if covariates is None:
+        return
+    threshold = settings.sample_size_threshold
+    for entry in covariates.categorical:
+        if entry.name not in df.columns:
+            continue  # validate_expl_vars already refused the missing column
+        term_columns = [f"{entry.name}[{label}]" for label in entry.categories if label != entry.reference]
+        if not all(term in df.columns for term in term_columns):
+            continue
+        masks = {label: df[f"{entry.name}[{label}]"] == 1.0 for label in entry.categories if label != entry.reference}
+        masks[entry.reference] = (df[term_columns] == 0.0).all(axis=1)
+        for label, mask in masks.items():
+            if int(mask.sum()) <= threshold:
+                raise PrivacyThresholdViolation(
+                    f"Category '{label}' of explanatory variable '{entry.name}' does not exceed the "
+                    f"configured sample-size threshold {threshold} (rows and events must both be greater)."
+                )
+            if outcome_col is not None:
+                n_events = int((mask & (df[outcome_col] == 1)).sum())
+                if n_events <= threshold:
+                    raise PrivacyThresholdViolation(
+                        f"Category '{label}' of explanatory variable '{entry.name}' does not exceed the "
+                        f"configured sample-size threshold {threshold} (rows and events must both be greater)."
+                    )
+
+
 def prepare_node_data(
     client,
     df: pd.DataFrame,
     time_col: str,
     outcome_col: Optional[str],
-    expl_vars: Optional[list],
+    covariates: Optional[ResolvedCovariates],
     *,
     need_outcome: bool,
     variables_to_stratify: Optional[dict] = None,
@@ -707,18 +873,22 @@ def prepare_node_data(
         -> RDF collect (STRONG AYA, only when the node carries an
         ``endpoint`` column) -> ``mask_unnecessary_variables`` (STRONG AYA)
         -> ``coerce_time_column`` (STRONG AYA)
-        -> ``coerce_covariates`` (STRONG AYA, when ``expl_vars`` are given)
+        -> ``coerce_covariates`` (STRONG AYA, plain names only, when
+        covariates are given)
         -> ``recode_outcome`` (STRONG AYA, when ``outcome_codes`` are
         given)
         -> ``validate_stratification_spec`` + ``normalise_stratification``
         + ``apply_data_stratification`` (STRONG AYA, when
         ``variables_to_stratify`` is given)
-        -> ``validate_expl_vars`` (when ``expl_vars`` are given)
+        -> ``encode_covariates`` (STRONG AYA key, when covariates are given)
+        -> ``validate_expl_vars`` (when covariates are given)
         -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
         -> ``select_rows`` (hook) -> ``check_sample_size``
+        -> ``check_category_sizes`` (only when the threshold was met)
         -> ``apply_sample_size_threshold`` (STRONG AYA, when the native
-        threshold passed) -> the non-numeric-time, non-numeric-covariate and
-        unlisted-outcome checks (STRONG AYA, when the thresholds passed)
+        threshold passed) -> the checks after the thresholds (a time that
+        is not a number, a plain covariate that is not a number, an
+        unlisted outcome code, an unlisted covariate code)
 
     Every partial calls this so that all aggregates central combines come
     from the same row set on each node. The threshold failure behaviour
@@ -736,9 +906,9 @@ def prepare_node_data(
         Name of the outcome column, or ``None`` when the partial does not
         receive it (``perform_iteration`` until the outcome column joins
         the wire contract).
-    expl_vars : list | None
-        Explanatory variable names, or an empty list/None when the partial
-        does not use covariates.
+    covariates : ResolvedCovariates | None
+        The resolved explanatory variables (``resolve_expl_vars``), or
+        ``None`` when the partial does not use covariates.
     need_outcome : bool
         Whether the sample-size threshold also counts events (rows and
         events must both exceed the threshold).
@@ -765,9 +935,11 @@ def prepare_node_data(
     Raises
     ------
     UserInputError
-        When the time column or an explanatory variable holds a value that
-        is not a number, or ``outcome_codes`` do not list an outcome code the
-        node's data holds (all raised only when the thresholds passed).
+        When the time column or a plain explanatory variable holds a value
+        that is not a number, ``outcome_codes`` do not list an outcome code
+        the node's data holds, or a categorical or scored covariate holds a
+        code ``expl_vars`` does not list (all raised only when the thresholds
+        passed).
     """
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
@@ -777,8 +949,8 @@ def prepare_node_data(
     variables_to_analyse = [time_col]
     if outcome_col is not None:
         variables_to_analyse.append(outcome_col)
-    if expl_vars:
-        variables_to_analyse.extend(expl_vars)
+    if covariates is not None:
+        variables_to_analyse.extend(covariates.columns)
     if variables_to_stratify is not None:
         variables_to_analyse.extend(variables_to_stratify.keys())
     # A covariate may also be a stratification variable; name it once, or
@@ -798,9 +970,11 @@ def prepare_node_data(
     df, invalid_times = coerce_time_column(df, time_col)
 
     invalid_covariates: list = []
-    if expl_vars:
-        # STRONG AYA: RDF data delivers numeric covariates as text as well.
-        df, invalid_covariates = coerce_covariates(df, expl_vars)
+    if covariates is not None:
+        # STRONG AYA: RDF data delivers numeric covariates as text as well;
+        # only the plain names are converted — a categorical or scored
+        # covariate is coded with terms, which encode_covariates maps.
+        df, invalid_covariates = coerce_covariates(df, covariates.plain)
 
     unmapped_outcome = False
     if outcome_codes is not None and outcome_col is not None:
@@ -828,14 +1002,20 @@ def prepare_node_data(
         df, stratification = normalise_stratification(df, variables_to_stratify)
         df = apply_data_stratification(df, stratification)
 
-    if expl_vars:
-        validate_expl_vars(df, expl_vars, time_col, outcome_col)
+    unlisted_names: list = []
+    if covariates is not None:
+        # The encoder keeps the source column the stratification filter
+        # uses, so encoding runs after stratification. Codes compare through
+        # the STRONG AYA key: a prefixed name matches its full IRI, and the
+        # missing term is missing.
+        df, unlisted_names = encode_covariates(df, covariates, key=covariate_key)
+        validate_expl_vars(df, covariates, time_col, outcome_col)
 
     cols = [time_col]
     if outcome_col is not None:
         cols.append(outcome_col)
-    if expl_vars:
-        cols.extend(expl_vars)
+    if covariates is not None:
+        cols.extend(covariates.terms)
     df = drop_incomplete_rows(df, cols)
 
     validate_survival_columns(df, time_col, outcome_col)
@@ -846,17 +1026,21 @@ def prepare_node_data(
     threshold_met = check_sample_size(df, outcome, settings)
 
     if threshold_met:
-        # STRONG AYA: an additional threshold on top of the native one.
+        # The category threshold runs only when the sample-size threshold
+        # was met: a node below it is refused for that reason alone.
+        check_category_sizes(df, outcome, covariates, settings)
+
+        # STRONG AYA: an additional threshold on top of the native ones.
         # Masks variables with too few observations and raises
         # PrivacyThresholdViolation when the node as a whole is too small;
         # when the native threshold already failed, the caller raises and
         # this step must not double-raise.
         df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
-        # Both checks are raised only after the thresholds passed: before
-        # them, the error would tell a researcher whether a below-threshold
-        # subpopulation holds such a value. The messages name the column,
-        # never the values found.
+        # The checks below are raised only after every threshold passed:
+        # before them, the error would tell a researcher whether a
+        # below-threshold subpopulation holds such a value. The messages
+        # name the column, never the values found.
         if invalid_times:
             raise UserInputError(
                 f"Time column '{time_col}' holds values that are not numbers; "
@@ -866,13 +1050,20 @@ def prepare_node_data(
             raise UserInputError(
                 f"Explanatory variables {invalid_covariates} hold values that are not numbers; "
                 f"covariates must be numeric (a missing value is {MISSING_TERM}). A variable coded "
-                f"with terms (such as biological sex) cannot be a covariate; select its categories "
-                f"with variables_to_stratify instead."
+                f"with terms (such as biological sex) cannot be a plain covariate; give it a "
+                f"categorical or scored spec in expl_vars instead."
             )
         if unmapped_outcome:
             raise UserInputError(
                 f"Outcome column '{outcome_col}' holds codes that outcome_col does not list; "
                 f"add every code to 'event', 'censored' or 'missing'."
+            )
+        if unlisted_names:
+            # Only after every threshold: raised earlier, the error would
+            # tell a researcher whether a below-threshold node holds a code.
+            raise UserInputError(
+                f"Explanatory variables {unlisted_names} hold codes that expl_vars does not list; "
+                f"add every code to a category, a score or missing."
             )
 
     return df, settings, threshold_met
@@ -927,16 +1118,18 @@ def coerce_time_column(df: pd.DataFrame, time_col: str) -> tuple[pd.DataFrame, b
 
 
 def coerce_covariates(df: pd.DataFrame, expl_vars: list) -> tuple[pd.DataFrame, list]:
-    """Convert the explanatory variables to floats (STRONG AYA).
+    """Convert the plain explanatory variables to floats (STRONG AYA).
 
-    RDF data delivers numeric covariates as text, like times, so each
+    RDF data delivers numeric covariates as text, like times, so each plain
     covariate is converted the same way (``to_float_values``): a missing
     value becomes NaN and ``drop_incomplete_rows`` removes the row before
     every threshold. A value that is not a number (such as a term of a
     categorical variable) is dropped the same way and reported through the
     returned list, so that the caller can refuse the run once the thresholds
     passed. A missing covariate column is left for ``validate_expl_vars``
-    to report.
+    to report. Only the plain names are converted: a categorical or scored
+    covariate is coded with terms, which ``encode_covariates`` maps, and
+    converting its codes would flag every one of them as not a number.
 
     The input is not modified; a copy is returned.
 
@@ -1626,28 +1819,36 @@ def prepare_time_column(
     return out
 
 
-def validate_expl_vars(df: pd.DataFrame, expl_vars: list, time_col: str, outcome_col: str | None) -> None:
-    """Validate explanatory variables on the node.
+def validate_expl_vars(
+    df: pd.DataFrame,
+    covariates: ResolvedCovariates,
+    time_col: str,
+    outcome_col: Optional[str],
+) -> None:
+    """Validate the explanatory variables on the node.
 
-    Checks that every name in ``expl_vars`` is a column of ``df``, does not
-    overlap with ``time_col`` or ``outcome_col``, and is numeric. Column
-    names are user input and may be echoed in the error message; data
-    values are never echoed.
+    First checks that each source column exists (reporting it by its own
+    name) and does not overlap ``time_col`` or ``outcome_col``; then that
+    each model-term column is numeric. Column names are user input and may
+    be echoed in the error message; data values are never echoed.
 
     Raises
     ------
     UserInputError
         On any validation failure.
     """
-    for var in expl_vars:
-        if var not in df.columns:
-            raise UserInputError(f"Explanatory variable '{var}' not found in data columns.")
-        if var == time_col:
-            raise UserInputError(f"Explanatory variable '{var}' must not equal time_col " f"'{time_col}'.")
-        if outcome_col is not None and var == outcome_col:
-            raise UserInputError(f"Explanatory variable '{var}' must not equal outcome_col " f"'{outcome_col}'.")
-        if not pd.api.types.is_numeric_dtype(df[var]):
-            raise UserInputError(f"Explanatory variable '{var}' must be numeric, got " f"dtype {df[var].dtype}.")
+    for name in covariates.columns:
+        if name not in df.columns:
+            raise UserInputError(f"Explanatory variable '{name}' not found in data columns.")
+        if name == time_col:
+            raise UserInputError(f"Explanatory variable '{name}' must not equal time_col '{time_col}'.")
+        if outcome_col is not None and name == outcome_col:
+            raise UserInputError(f"Explanatory variable '{name}' must not equal outcome_col '{outcome_col}'.")
+    for term in covariates.terms:
+        if term not in df.columns:
+            raise UserInputError(f"Explanatory variable '{term}' not found in data columns.")
+        if not pd.api.types.is_numeric_dtype(df[term]):
+            raise UserInputError(f"Explanatory variable '{term}' must be numeric, got dtype {df[term].dtype}.")
 
 
 def drop_incomplete_rows(df: pd.DataFrame, cols: list) -> pd.DataFrame:

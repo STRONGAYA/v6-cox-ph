@@ -113,6 +113,30 @@ def test_configurations():
                 AlgorithmError,
             ],
         },
+        "categorical_dataset": {
+            "database_label": "coxph_test_data_1",
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": ["age", {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}],
+            "organisation_subset": [2],
+        },
+        "categorical_dataset_below_threshold": {
+            "database_label": "coxph_test_data_1",
+            "time_col": "time",
+            "outcome_col": "event",
+            "expl_vars": ["age", {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}],
+            "organisation_subset": [1, 2, 3],
+            "expected_failure": True,
+            "failure_reason": (
+                "The male category does not exceed the sample-size threshold on "
+                "every node of the demo network's split; the run fails closed."
+            ),
+            "expected_error_type": [
+                CollectResultsError,
+                PrivacyThresholdViolation,
+                AlgorithmError,
+            ],
+        },
         "standard_dataset_below_threshold": {
             "database_label": "coxph_test_data_3",
             "time_col": "time",
@@ -175,6 +199,8 @@ class TestCoxPHAlgorithmIntegration:
         "config_name",
         [
             "standard_dataset",
+            "categorical_dataset",
+            "categorical_dataset_below_threshold",
             "standard_dataset_below_threshold",
             "standard_dataset_incorrect_input",
             "rare_dataset",
@@ -615,6 +641,33 @@ def _apply_stratification_filter(df: pd.DataFrame, variables_to_stratify: Dict[s
     return out
 
 
+def _encode_expl_vars(df: pd.DataFrame, expl_vars: list) -> tuple:
+    """Encode expl_vars entries into model-term columns (test-side reference).
+
+    A plain name stays a column; a categorical entry adds one 0/1 column per
+    non-reference label; a scored entry maps its column to the scores.
+    Returns the encoded frame and the model terms, in order.
+    """
+    out = df.copy()
+    terms = []
+    for entry in expl_vars:
+        if isinstance(entry, str):
+            terms.append(entry)
+            continue
+        name, spec = next(iter(entry.items()))
+        if "categories" in spec:
+            for label, codes in spec["categories"].items():
+                if label == spec["reference"]:
+                    continue
+                term = f"{name}[{label}]"
+                out[term] = out[name].isin(codes).astype(float)
+                terms.append(term)
+        else:
+            out[name] = out[name].map(spec["scores"]).astype(float)
+            terms.append(name)
+    return out, terms
+
+
 def determine_model_acceptance(
     federated_result: Dict[str, Any],
     database_label: str,
@@ -675,6 +728,8 @@ def determine_model_acceptance(
     assert dataset_file.exists(), f"Test dataset not found: {dataset_file}"
 
     df = pd.read_csv(dataset_file)
+    expl_vars = kwargs["expl_vars"]
+    df, terms = _encode_expl_vars(df, expl_vars)
 
     # A stratified run analyses only the rows inside the requested
     # subpopulation; the reference is built on the same rows (filtered per
@@ -683,7 +738,6 @@ def determine_model_acceptance(
 
     time_col = kwargs["time_col"]
     outcome_col = kwargs["outcome_col"]
-    expl_vars = kwargs["expl_vars"]
     selected_orgs = kwargs["organization_ids"]
 
     # Extract federated coefficients from the result
@@ -696,7 +750,7 @@ def determine_model_acceptance(
     assert "converged" in federated_result, "converged should be present"
     assert "n_iterations" in federated_result, "n_iterations should be present"
 
-    for var in expl_vars:
+    for var in terms:
         assert var in fed_df.index, f"{var} missing from federated result"
 
         fed_coef = fed_df.loc[var, "Coef"]
@@ -735,7 +789,7 @@ def determine_model_acceptance(
 
     matches = 0
     for cand in candidates:
-        central_df = cand[[time_col, outcome_col] + expl_vars].copy()
+        central_df = cand[[time_col, outcome_col] + terms].copy()
         central_df[outcome_col] = central_df[outcome_col].astype(bool)
 
         cph = CoxPHFitter()
@@ -746,7 +800,7 @@ def determine_model_acceptance(
 
         ok = True
         details = []
-        for var in expl_vars:
+        for var in terms:
             central_coef = cph.params_[var]
             central_se = cph.standard_errors_[var]
             if abs(fed_df.loc[var, "Coef"] - central_coef) > 0.05:

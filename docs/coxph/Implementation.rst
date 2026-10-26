@@ -39,11 +39,12 @@ Round 1: summed statistics and event times
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``central`` dispatches ``compute_summed_z`` to every selected organisation.
 Each data station first prepares its data through the shared guard chain
-(parent-task check, input validation, dropping incomplete rows, sample-size
-threshold) and bins and tail-censors the time column; see ``Privacy.rst``.
-Over its event cases it then returns the sum and the sum of squares of each
-explanatory variable, together with the per-time event counts (small counts
-are merged into the following time) and its privacy settings.
+(parent-task check, covariate encoding and input validation, dropping
+incomplete rows, sample-size threshold, category threshold) and bins and
+tail-censors the time column; see ``Privacy.rst``. Over its event cases it
+then returns the sum and the sum of squares of each explanatory variable,
+together with the per-time event counts (small counts are merged into the
+following time) and its privacy settings.
 
 ``central`` requires a result from every organisation it dispatched to: a
 data station that fails, for example with ``PrivacyThresholdViolation``,
@@ -58,6 +59,25 @@ results ``central`` builds:
 - the covariate centre and scale (see `Standardisation`_);
 - the ``privacy_guards`` summary of the guards that were active on the data
   stations.
+
+Categorical and scored covariates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``expl_vars`` entries may be plain column names or single-entry mappings to
+a categorical or scored spec. Before validation, each node encodes them
+(``encode_covariates`` in ``privacy_guards.py``): a categorical variable
+maps each value to its category label and writes one float column
+``<name>[<label>]`` per non-reference category (1.0/0.0); a scored
+variable maps each value to its score in the column named after the
+variable. Codes compare through ``code_key``: a number and the text that
+reads as one are the same code. Listed ``missing`` codes and unlisted
+codes become NaN in all of the variable's columns, so those rows are
+dropped with the other incomplete rows; the variables that held unlisted
+codes are reported and fail the run after the thresholds. The source
+columns are kept. The model terms — one per plain or scored variable, one
+per non-reference category — replace the variable names in everything
+downstream: the partials' ``sum``/``sum_squares`` keys, the standardisation
+vectors, the result's ``model`` index and the order of ``covariance``.
 
 Newton–Raphson rounds
 ~~~~~~~~~~~~~~~~~~~~~
