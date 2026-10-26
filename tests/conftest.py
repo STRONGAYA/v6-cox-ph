@@ -15,9 +15,22 @@ import json
 import platform
 import re
 import subprocess
+import requests
 
 from vantage6.client import UserClient as Client
 from pathlib import Path
+
+# The STRONG AYA RDF test store: a disposable GraphDB holding the
+# consumer's tests/data/rdf/ turtle files, for consumers that test RDF
+# data access. The image is digest-pinned; the container name and the
+# host port belong to the test suite alone — never the developer's own
+# Flyover store (which listens on 7200).
+RDF_STORE_IMAGE = (
+    "ghcr.io/maastrichtu-cds/flyover-graphdb" "@sha256:31ce8d36ba9b6bc8b2ed59732dc403f8d4ee8bc818de860d79029980b01fb614"
+)
+RDF_STORE_CONTAINER = "v6-coxph-rdf-test"
+RDF_STORE_PORT = 7201
+RDF_STORE_REPOSITORY = "userRepo"
 
 # Environment variables that indicate a continuous integration environment;
 # 'CI' is set by GitHub Actions and most other providers.
@@ -320,9 +333,77 @@ def extra_node_config_file(algorithm_image):
 
 
 @pytest.fixture(scope="session")
-def vantage6_network_session(docker_client, extra_node_config_file):
+def rdf_store(docker_client):
+    """Start a disposable GraphDB holding the STRONG AYA RDF test data.
+
+    Optional: a consumer without RDF test data — any of the turtle files
+    under ``tests/data/rdf/`` missing — gets ``None`` and nothing is
+    started, so CSV-only consumers are unaffected. The container is
+    removed at teardown only when this fixture started it; a developer's
+    own store is never stopped or removed.
+    """
+    rdf_directory = Path(__file__).parent / "data" / "rdf"
+    if not all((rdf_directory / f"{name}.ttl").is_file() for name in ("ontology", "data", "annotation")):
+        yield None
+        return
+
+    base_url = f"http://localhost:{RDF_STORE_PORT}"
+    started = False
+    try:
+        container = docker_client.containers.get(RDF_STORE_CONTAINER)
+        if container.status != "running":
+            container.start()
+    except docker.errors.NotFound:
+        try:
+            container = docker_client.containers.run(
+                RDF_STORE_IMAGE,
+                name=RDF_STORE_CONTAINER,
+                detach=True,
+                ports={"7200/tcp": ("127.0.0.1", RDF_STORE_PORT)},
+                environment={"GDB_HEAP_SIZE": "2g"},
+            )
+        except docker.errors.DockerException as e:
+            _skip_or_fail(f"Could not start the RDF store: {e}")
+        started = True
+    try:
+        deadline = time.time() + 240
+        while True:
+            try:
+                if requests.get(f"{base_url}/rest/repositories", timeout=5).ok:
+                    break
+            except requests.RequestException:
+                pass
+            if time.time() > deadline:
+                _skip_or_fail("The RDF store did not start within 240 seconds")
+            time.sleep(5)
+        repository = f"{base_url}/repositories/{RDF_STORE_REPOSITORY}"
+        if int(requests.get(f"{repository}/size", timeout=60).text) == 0:
+            for name in ("ontology", "data", "annotation"):
+                with open(rdf_directory / f"{name}.ttl", "rb") as turtle:
+                    response = requests.post(
+                        f"{repository}/rdf-graphs/service?graph=http://{name}.local/",
+                        data=turtle.read(),
+                        headers={"Content-Type": "application/x-turtle"},
+                        timeout=300,
+                    )
+                if not response.ok:
+                    _skip_or_fail(f"Could not load {name}.ttl into the RDF store: {response.status_code}")
+        yield {"endpoint": repository, "container": RDF_STORE_CONTAINER}
+    finally:
+        if started:
+            container.remove(force=True)
+
+
+@pytest.fixture(scope="session")
+def vantage6_network_session(docker_client, extra_node_config_file, rdf_store):
     """Set up the Vantage6 developer network for the entire test session."""
     from tests.integration.test_vantage6_integration import cleanup_vantage6_network
+
+    # The RDF store must be up before the network starts: the node links
+    # the container at start-up through docker_services. A consumer
+    # without RDF test data gets None here and starts nothing.
+    if rdf_store is not None:
+        print(f"RDF store available at {rdf_store['endpoint']}")
 
     network_info = {"status": "not_started", "created_containers": set()}
 
@@ -357,7 +438,10 @@ def vantage6_network_session(docker_client, extra_node_config_file):
         server_config_path = data_directory / "additional_vantage6_server_config.yaml"
         store_config_path = data_directory / "additional_vantage6_store_config.yaml"
 
-        datasets = DATASETS
+        # The RDF dataset is appended here rather than in DATASETS (the
+        # consumer's edit point); the missing-file warning below already
+        # skips consumers without rdf_store.csv.
+        datasets = DATASETS + [("rdf_store", data_directory / "rdf_store.csv")]
 
         # Create and start a demo network with extra node config
         print("Creating demo network: algorithm-ci-test.")
