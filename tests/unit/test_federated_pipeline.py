@@ -1612,6 +1612,18 @@ class TestCentralInputValidation:
         with pytest.raises(UserInputError, match="Too many explanatory variables"):
             _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=expl_vars)
 
+    def test_too_many_model_terms_rejected(self):
+        """COXPH_MAX_COVARIATES counts model terms, not entries.
+
+        11 three-category entries give 22 model terms, above the cap of 20,
+        although only 11 entries were requested.
+        """
+        expl_vars = [
+            {f"v{i}": {"reference": "a", "categories": {"a": ["a"], "b": ["b"], "c": ["c"]}}} for i in range(11)
+        ]
+        with pytest.raises(UserInputError, match="Too many explanatory variables"):
+            _run_central_with_kwargs(self._datasets(), [1, 2], expl_vars=expl_vars)
+
     def test_event_time_grid_cap_rejected(self, monkeypatch, guards_off):
         """A pooled event-time grid beyond COXPH_MAX_GRID_POINTS is rejected.
 
@@ -2009,3 +2021,139 @@ class TestSuppressionConsistency:
             if key in ("warnings", "privacy_guards"):
                 continue
             assert suppressed[key] == explicit[key], f"result key {key!r} differs"
+
+
+SEX_CATEGORICAL = {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}
+SEX_SCORED = {"sex": {"scores": {"M": 0, "F": 1}}}
+
+
+def _csv_datasets():
+    """The CSV test data of nodes 1 and 2, as the mock collaboration holds them."""
+    df1, df2, _ = _load_datasets()
+    return [
+        [{"database": df1, "db_type": "csv"}],
+        [{"database": df2, "db_type": "csv"}],
+    ]
+
+
+def _datasets_with_dummy():
+    """The CSV test data with a precomputed 0/1 female column."""
+    df1, df2, _ = _load_datasets()
+    for df in (df1, df2):
+        df["sex_female"] = (df["sex"] == "F").astype(float)
+    return [
+        [{"database": df1, "db_type": "csv"}],
+        [{"database": df2, "db_type": "csv"}],
+    ]
+
+
+@pytest.mark.unit
+class TestCategoricalCovariates:
+    """Categorical and scored covariates equal their precomputed encodings.
+
+    In the full CSVs the male events number 14 on node 1 and 10 on node 2,
+    so at the default threshold of 10 node 2 fails the category threshold
+    (a ready-made "at the threshold" case) while a threshold of 9 passes.
+    Node 3 already fails the native threshold.
+    """
+
+    @pytest.fixture
+    def threshold_9(self, monkeypatch, guards_off):
+        """Threshold 9: node 2's male category (10 events) passes it."""
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "9")
+
+    @staticmethod
+    def _assert_models_equal(result, reference, term, ref_term):
+        """The two runs agree to 1e-9 on every model field."""
+        model = pd.DataFrame(result["model"]).T
+        ref_model = pd.DataFrame(reference["model"]).T
+        assert list(model.index) == ["age", term]
+        assert list(ref_model.index) == ["age", ref_term]
+        for column in ("Coef", "Exp(coef)", "SE", "lower_CI", "upper_CI", "Z", "p-value"):
+            np.testing.assert_allclose(
+                model[column].to_numpy(dtype=float),
+                ref_model[column].to_numpy(dtype=float),
+                atol=1e-9,
+                err_msg=f"{column} differs from the precomputed column",
+            )
+        np.testing.assert_allclose(result["covariance"], reference["covariance"], atol=1e-9)
+        assert result["log_likelihood"] == pytest.approx(reference["log_likelihood"], abs=1e-9)
+        assert result["n_events"] == reference["n_events"]
+
+    def test_categorical_equals_precomputed_dummy(self, threshold_9):
+        """The categorical sex covariate equals a run on a precomputed 0/1 column."""
+        result = _run_central(_csv_datasets(), [1, 2], expl_vars=["age", SEX_CATEGORICAL])
+        assert result["converged"] is True
+        reference = _run_central(_datasets_with_dummy(), [1, 2], expl_vars=["age", "sex_female"])
+        self._assert_models_equal(result, reference, "sex[F]", "sex_female")
+
+    def test_scored_equals_precomputed_numeric(self, threshold_9):
+        """A scored variable equals a run on its precomputed numeric column."""
+        result = _run_central(_csv_datasets(), [1, 2], expl_vars=["age", SEX_SCORED])
+        assert result["converged"] is True
+        reference = _run_central(_datasets_with_dummy(), [1, 2], expl_vars=["age", "sex_female"])
+        self._assert_models_equal(result, reference, "sex", "sex_female")
+
+    def test_profile_label_equals_profile_value(self, threshold_9):
+        """The profile {'sex': 'F'} equals the profile with the 0/1 column at 1."""
+        client = MockAlgorithmClient(datasets=_csv_datasets(), module="v6-cox-ph", organization_ids=[1, 2])
+        task = client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": ["age", SEX_CATEGORICAL],
+                    "organization_ids": [1, 2],
+                    "covariate_profiles": [{"sex": "F"}],
+                },
+            },
+            organizations=[1],
+        )
+        result = client.wait_for_results(task_id=task["id"])[0]
+
+        ref_client = MockAlgorithmClient(datasets=_datasets_with_dummy(), module="v6-cox-ph", organization_ids=[1, 2])
+        ref_task = ref_client.task.create(
+            input_={
+                "method": "central",
+                "kwargs": {
+                    "time_col": "time",
+                    "outcome_col": "event",
+                    "expl_vars": ["age", "sex_female"],
+                    "organization_ids": [1, 2],
+                    "covariate_profiles": [{"sex_female": 1.0}],
+                },
+            },
+            organizations=[1],
+        )
+        reference = ref_client.wait_for_results(task_id=ref_task["id"])[0]
+
+        assert result["survival_curves"] == reference["survival_curves"]
+        assert result["baseline_cumulative_hazard"] == reference["baseline_cumulative_hazard"]
+
+    def test_lifelines_with_dummy(self, threshold_9):
+        """The categorical fit matches lifelines with a dummy column."""
+        result = _run_central(_csv_datasets(), [1, 2], expl_vars=["age", SEX_CATEGORICAL])
+        df1, df2, _ = _load_datasets()
+        pooled = pd.concat([df1, df2])
+        pooled["sex_female"] = (pooled["sex"] == "F").astype(float)
+        ref = _lifelines_reference(pooled, ["age", "sex_female"])
+        model = pd.DataFrame(result["model"]).T
+        for var, ref_var in (("age", "age"), ("sex[F]", "sex_female")):
+            assert (
+                abs(model.loc[var, "Coef"] - ref["coef"][ref_var]) <= 2e-3
+            ), f"coef mismatch {var}: fed={model.loc[var, 'Coef']}, ref={ref['coef'][ref_var]}"
+            assert (
+                abs(model.loc[var, "SE"] - ref["se"][ref_var]) <= 1e-3
+            ), f"SE mismatch {var}: fed={model.loc[var, 'SE']}, ref={ref['se'][ref_var]}"
+
+    def test_category_at_the_threshold_fails(self, guards_off):
+        """At the default threshold 10, node 2's male category (10 events) fails."""
+        with pytest.raises(PrivacyThresholdViolation):
+            _run_central(_csv_datasets(), [1, 2], expl_vars=["age", SEX_CATEGORICAL])
+
+    def test_category_above_the_threshold_passes(self, threshold_9):
+        """At threshold 9 the same configuration passes and converges."""
+        result = _run_central(_csv_datasets(), [1, 2], expl_vars=["age", SEX_CATEGORICAL])
+        assert result["converged"] is True
+        assert list(pd.DataFrame(result["model"]).T.index) == ["age", "sex[F]"]

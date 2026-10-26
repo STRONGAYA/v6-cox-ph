@@ -8,11 +8,12 @@ The partial functions run on each data station and share only aggregated
 quantities with the central aggregator. Several guards protect against the
 main leakage channels of the federated design. All guards are implemented in
 ``v6-cox-ph/privacy_guards.py`` and applied in the same order in every
-partial: parent-task check, settings load, explanatory-variable validation
-(``compute_summed_z`` and ``perform_iteration``), NaN row dropping,
-sample-size threshold, iteration-input validation (``perform_iteration``
-only), time-column preparation (binning, tail censoring), and the risk-set
-guards (``perform_iteration`` only). On top of these mandatory guards,
+partial: parent-task check, settings load, covariate encoding and
+explanatory-variable validation (``compute_summed_z`` and
+``perform_iteration``), NaN row dropping, sample-size threshold, category
+threshold, iteration-input validation (``perform_iteration`` only),
+time-column preparation (binning, tail censoring), and the risk-set guards
+(``perform_iteration`` only). On top of these mandatory guards,
 the node's privacy level adds the reconstruction row bound, small-count
 suppression of the shared event counts, an absolute floor on the size of a
 released risk set and rounding of the released aggregates (see
@@ -76,6 +77,36 @@ rows. At the presets that is 150 rows at ``standard`` (``max(10 x 5,
 3 x 50)``) and 300 rows at ``strict`` (``max(20 x 5, 3 x 100)``);
 ``minimal`` has no floor and is unchanged. Nodes below the bound are
 refused the same fail-closed way as below-threshold nodes.
+
+Categorical covariates
+~~~~~~~~~~~~~~~~~~~~~~
+
+A categorical covariate is encoded on the node into one 0/1 column per
+non-reference category (``sex[F]`` for a variable ``sex`` with reference
+``M``). Those columns are ordinary numeric covariates from there on, but
+their aggregates carry category information: the ``sum`` of a 0/1 column
+over the event cases is the node's number of events in that category, and
+its ``agg1`` column is the number at risk in it at each event time. A
+category that is small on a node is therefore visible in the released
+aggregates even though no row leaves the node.
+
+Every category of every categorical covariate — the reference category
+included — must have strictly more rows and more events than
+``SAMPLE_SIZE_THRESHOLD`` on each node, the same comparison the
+sample-size threshold uses (``check_category_sizes``); otherwise the node
+raises ``PrivacyThresholdViolation`` and the run fails closed. An empty
+category fails as well: a zero is a disclosure too. The check is needed
+with many-level variables, where a rare level would otherwise slip
+through the node-wide threshold; researchers group rare codes into a
+shared category. Scored (ordinal) variables are numeric covariates and
+get no category check.
+
+A code the spec does not list is treated as missing: the row is dropped
+with the other incomplete rows. When every threshold still passes, the
+run then fails with ``UserInputError`` naming the variables — but only
+after every threshold passed. Raised earlier, the error would tell a
+researcher whether a below-threshold node holds a code. The error names
+the variables, never the codes found.
 
 Time binning
 ~~~~~~~~~~~~
@@ -313,16 +344,17 @@ The parent-task guard fails closed: a client without a decodable
 container token (that is not a ``MockAlgorithmClient``) raises
 ``AlgorithmError`` rather than silently skipping the check.
 
-Rows with NaN in ``time_col``, ``outcome_col`` or any explanatory
-variable are dropped before the sample-size threshold is checked, so
-thresholds apply to the analysed rows. Explanatory variables are
-validated on the node: each must be a column, must not overlap
-``time_col``/``outcome_col``, and must be numeric. The input model
-``CoxPHInput`` rejects duplicate explanatory variables, a ``time_col``
-equal to ``outcome_col``, and explanatory variables naming the time or
-outcome columns. Central validates ``organization_ids`` against the
-collaboration and rejects unknown identifiers with a ``UserInputError``
-before dispatching any sub-task.
+Rows with NaN in ``time_col``, ``outcome_col`` or any model term are
+dropped before the sample-size threshold is checked, so thresholds apply
+to the analysed rows. Explanatory variables are validated on the node:
+categorical and scored entries are encoded into numeric model-term
+columns first, each source column must exist, must not overlap
+``time_col``/``outcome_col``, and every model term must be numeric. The
+input model ``CoxPHInput`` rejects duplicate explanatory variables, a
+``time_col`` equal to ``outcome_col``, and explanatory variables naming
+the time or outcome columns. Central validates ``organization_ids``
+against the collaboration and rejects unknown identifiers with a
+``UserInputError`` before dispatching any sub-task.
 
 Guard-effect summary
 ~~~~~~~~~~~~~~~~~~~~

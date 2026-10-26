@@ -3,7 +3,9 @@ Unit tests for the privacy guards module.
 
 Covers settings parsing, the sample-size threshold, the parent-task guard,
 and iteration-input validation. The time-binning / tail-censoring / jump-guard
-functions are tested here as well (added in a later step).
+functions are tested here as well (added in a later step). The categorical
+covariate encoding, the category threshold and the unlisted-code error are
+tested here too.
 """
 
 from importlib import import_module
@@ -15,6 +17,7 @@ import jwt
 
 from vantage6.algorithm.tools.exceptions import (
     AlgorithmError,
+    PrivacyThresholdViolation,
     PrivacyViolation,
     UserInputError,
 )
@@ -23,14 +26,17 @@ from vantage6.algorithm.tools.exceptions import (
 # miscellaneous.py), so it must be imported through the installed package,
 # never with a sys.path hack + bare-name import.
 privacy_guards = import_module("v6-cox-ph.privacy_guards")
+miscellaneous = import_module("v6-cox-ph.miscellaneous")
 
 DEFAULT_MIN_RISK_SET_CHANGE = privacy_guards.DEFAULT_MIN_RISK_SET_CHANGE
 DEFAULT_SAMPLE_SIZE_THRESHOLD = privacy_guards.DEFAULT_SAMPLE_SIZE_THRESHOLD
 PrivacySettings = privacy_guards.PrivacySettings
 ResourceCaps = privacy_guards.ResourceCaps
 bin_times = privacy_guards.bin_times
+check_category_sizes = privacy_guards.check_category_sizes
 check_sample_size = privacy_guards.check_sample_size
 drop_incomplete_rows = privacy_guards.drop_incomplete_rows
+encode_covariates = privacy_guards.encode_covariates
 ensure_spawned_by_central = privacy_guards.ensure_spawned_by_central
 event_time_counts = privacy_guards.event_time_counts
 guarded_risk_set_aggregates = privacy_guards.guarded_risk_set_aggregates
@@ -42,12 +48,14 @@ merged_time_map = privacy_guards.merged_time_map
 prepare_node_data = privacy_guards.prepare_node_data
 prepare_time_column = privacy_guards.prepare_time_column
 quantise_wire_aggregates = privacy_guards.quantise_wire_aggregates
+resolve_expl_vars = privacy_guards.resolve_expl_vars
 round_released_aggregates = privacy_guards.round_released_aggregates
 suppress_small_time_counts = privacy_guards.suppress_small_time_counts
 tail_cutoff = privacy_guards.tail_cutoff
 validate_expl_vars = privacy_guards.validate_expl_vars
 validate_iteration_input = privacy_guards.validate_iteration_input
 validate_survival_columns = privacy_guards.validate_survival_columns
+code_key = miscellaneous.code_key
 from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
 
 
@@ -577,13 +585,15 @@ class TestPrepareNodeData:
     def node_df(self):
         # 200 rows: above the default privacy level's admission bound
         # (max(10 x k=5, 3 x R=50) = 150 rows) so the threshold does not
-        # trip in these guard-order tests.
+        # trip in these guard-order tests. The sex column gives the
+        # categorical guard-order test categories above the threshold.
         return pd.DataFrame(
             {
                 "time": [float(i) for i in range(1, 201)],
                 "event": [1] * 100 + [0] * 100,
                 "age": [50.0] * 200,
                 "treatment": [0, 1] * 100,
+                "sex": ["M", "F"] * 100,
             }
         )
 
@@ -609,11 +619,13 @@ class TestPrepareNodeData:
         for name in [
             "ensure_spawned_by_central",
             "load_privacy_settings",
+            "encode_covariates",
             "validate_expl_vars",
             "drop_incomplete_rows",
             "validate_survival_columns",
             "select_rows",
             "check_sample_size",
+            "check_category_sizes",
         ]:
             original = getattr(privacy_guards, name)
 
@@ -630,25 +642,45 @@ class TestPrepareNodeData:
     def test_guard_order_with_expl_vars(self, client, node_df, default_env, monkeypatch):
         """All guards run, in the documented order."""
         calls = self._record_guard_calls(monkeypatch)
-        df, settings, threshold_met = prepare_node_data(
-            client, node_df, "time", "event", ["age", "treatment"], need_outcome=True
-        )
+        covariates = resolve_expl_vars(["age", "treatment"])
+        df, settings, threshold_met = prepare_node_data(client, node_df, "time", "event", covariates, need_outcome=True)
         assert calls == [
             "ensure_spawned_by_central",
             "load_privacy_settings",
+            "encode_covariates",
             "validate_expl_vars",
             "drop_incomplete_rows",
             "validate_survival_columns",
             "select_rows",
             "check_sample_size",
+            "check_category_sizes",
         ]
         assert threshold_met is True
         assert len(df) == 200
 
-    def test_guard_order_without_expl_vars(self, client, node_df, default_env, monkeypatch):
-        """Without expl_vars, validate_expl_vars is skipped; order is stable."""
+    def test_guard_order_with_categorical(self, client, node_df, default_env, monkeypatch):
+        """A categorical covariate runs the same order; the category threshold passes."""
         calls = self._record_guard_calls(monkeypatch)
-        _, _, threshold_met = prepare_node_data(client, node_df, "time", "event", [], need_outcome=True)
+        covariates = resolve_expl_vars(["age", {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+        df, settings, threshold_met = prepare_node_data(client, node_df, "time", "event", covariates, need_outcome=True)
+        assert calls == [
+            "ensure_spawned_by_central",
+            "load_privacy_settings",
+            "encode_covariates",
+            "validate_expl_vars",
+            "drop_incomplete_rows",
+            "validate_survival_columns",
+            "select_rows",
+            "check_sample_size",
+            "check_category_sizes",
+        ]
+        assert threshold_met is True
+        assert "sex[F]" in df.columns
+
+    def test_guard_order_without_expl_vars(self, client, node_df, default_env, monkeypatch):
+        """Without covariates, encode_covariates and validate_expl_vars are skipped."""
+        calls = self._record_guard_calls(monkeypatch)
+        _, _, threshold_met = prepare_node_data(client, node_df, "time", "event", None, need_outcome=True)
         assert calls == [
             "ensure_spawned_by_central",
             "load_privacy_settings",
@@ -656,6 +688,7 @@ class TestPrepareNodeData:
             "validate_survival_columns",
             "select_rows",
             "check_sample_size",
+            "check_category_sizes",
         ]
         assert threshold_met is True
 
@@ -666,19 +699,19 @@ class TestPrepareNodeData:
             "select_rows",
             lambda df: df.iloc[:5],
         )
-        _, _, threshold_met = prepare_node_data(
-            client, node_df, "time", "event", ["age", "treatment"], need_outcome=True
-        )
+        covariates = resolve_expl_vars(["age", "treatment"])
+        _, _, threshold_met = prepare_node_data(client, node_df, "time", "event", covariates, need_outcome=True)
         assert threshold_met is False
 
     def test_need_outcome_false_checks_rows_only(self, client, default_env, monkeypatch):
         """need_outcome=False checks rows only (perform_iteration today)."""
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
         df = pd.DataFrame({"time": [1.0] * 200, "age": [50.0] * 200})
-        _, _, threshold_met = prepare_node_data(client, df, "time", None, ["age"], need_outcome=False)
+        covariates = resolve_expl_vars(["age"])
+        _, _, threshold_met = prepare_node_data(client, df, "time", None, covariates, need_outcome=False)
         assert threshold_met is True
         df_small = pd.DataFrame({"time": [1.0] * 5, "age": [50.0] * 5})
-        _, _, threshold_met = prepare_node_data(client, df_small, "time", None, ["age"], need_outcome=False)
+        _, _, threshold_met = prepare_node_data(client, df_small, "time", None, covariates, need_outcome=False)
         assert threshold_met is False
 
     def test_nan_rows_dropped_before_threshold(self, client, default_env, monkeypatch):
@@ -703,7 +736,8 @@ class TestPrepareNodeData:
         # NaN onto an event row to make events 12, which must fail (>12).
         df.loc[0:11, "age"] = np.nan
         df.loc[12, "age"] = np.nan  # row 12 is an event row
-        _, _, threshold_met = prepare_node_data(client, df, "time", "event", ["age", "treatment"], need_outcome=True)
+        covariates = resolve_expl_vars(["age", "treatment"])
+        _, _, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
         assert threshold_met is False
 
 
@@ -1237,31 +1271,325 @@ class TestMinRiskSetFloor:
 
 @pytest.mark.unit
 class TestValidateExplVars:
-    """Tests for validate_expl_vars."""
+    """Tests for validate_expl_vars (source columns first, then term columns)."""
 
     def test_valid_vars(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50], "tx": [1]})
-        validate_expl_vars(df, ["age", "tx"], "time", "event")
+        validate_expl_vars(df, resolve_expl_vars(["age", "tx"]), "time", "event")
 
     def test_missing_column(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
         with pytest.raises(UserInputError, match="not found"):
-            validate_expl_vars(df, ["age", "missing"], "time", "event")
+            validate_expl_vars(df, resolve_expl_vars(["age", "missing"]), "time", "event")
+
+    def test_missing_categorical_source_column_reports_its_own_name(self):
+        df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
+        covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+        with pytest.raises(UserInputError, match="'sex' not found"):
+            validate_expl_vars(df, covariates, "time", "event")
 
     def test_overlaps_time_col(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
         with pytest.raises(UserInputError, match="must not equal time_col"):
-            validate_expl_vars(df, ["time"], "time", "event")
+            validate_expl_vars(df, resolve_expl_vars(["time"]), "time", "event")
 
     def test_overlaps_outcome_col(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50]})
         with pytest.raises(UserInputError, match="must not equal outcome_col"):
-            validate_expl_vars(df, ["event"], "time", "event")
+            validate_expl_vars(df, resolve_expl_vars(["event"]), "time", "event")
 
     def test_non_numeric_column(self):
         df = pd.DataFrame({"time": [1.0], "event": [1], "name": ["alice"]})
         with pytest.raises(UserInputError, match="must be numeric"):
-            validate_expl_vars(df, ["name"], "time", "event")
+            validate_expl_vars(df, resolve_expl_vars(["name"]), "time", "event")
+
+    def test_non_numeric_term_column(self):
+        """A categorical term column that is not numeric is refused."""
+        df = pd.DataFrame({"time": [1.0], "event": [1], "sex": ["M"], "sex[F]": ["no"]})
+        covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+        with pytest.raises(UserInputError, match="'sex\\[F\\]' must be numeric"):
+            validate_expl_vars(df, covariates, "time", "event")
+
+
+@pytest.mark.unit
+class TestResolveExplVars:
+    """Tests for resolve_expl_vars (the node-side re-validation)."""
+
+    def test_plain_names(self):
+        resolved = resolve_expl_vars(["age", "treatment"])
+        assert resolved.terms == ["age", "treatment"]
+
+    def test_categorical_and_scored(self):
+        resolved = resolve_expl_vars(
+            [
+                "age",
+                {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}},
+                {"stage": {"scores": {"I": 1, "II": 2}}},
+            ]
+        )
+        assert resolved.terms == ["age", "sex[F]", "stage"]
+
+    def test_malformed_spec_raises_user_input_error(self):
+        with pytest.raises(UserInputError, match="Invalid explanatory variables"):
+            resolve_expl_vars([{"sex": {"categories": {"M": ["M"], "F": ["F"]}}}])  # no reference
+
+    def test_not_a_list(self):
+        with pytest.raises(UserInputError, match="Invalid explanatory variables"):
+            resolve_expl_vars("age")
+
+
+@pytest.mark.unit
+class TestEncodeCovariates:
+    """Tests for encode_covariates (the node-side encoding step)."""
+
+    @pytest.fixture
+    def sex_covariates(self):
+        return resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+
+    def test_categorical_encoding(self, sex_covariates):
+        df = pd.DataFrame({"sex": ["M", "F", "M", "F"], "age": [1.0, 2.0, 3.0, 4.0]})
+        out, unlisted = encode_covariates(df, sex_covariates)
+        assert unlisted == []
+        assert out["sex"].tolist() == ["M", "F", "M", "F"]  # the source column is kept
+        assert out["sex[F]"].tolist() == [0.0, 1.0, 0.0, 1.0]
+        assert pd.api.types.is_float_dtype(out["sex[F]"])
+
+    def test_numbers_given_as_numbers_or_text(self):
+        covariates = resolve_expl_vars([{"grp": {"reference": "0", "categories": {"0": [0], "1": ["1"]}}}])
+        df = pd.DataFrame({"grp": [0, 1, "1", "0"]})
+        out, unlisted = encode_covariates(df, covariates)
+        assert unlisted == []
+        assert out["grp[1]"].tolist() == [0.0, 1.0, 1.0, 0.0]
+
+    def test_missing_codes_become_nan(self):
+        covariates = resolve_expl_vars(
+            [{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}, "missing": ["unknown"]}}]
+        )
+        df = pd.DataFrame({"sex": ["M", "unknown", "F"]})
+        out, unlisted = encode_covariates(df, covariates)
+        assert unlisted == []
+        assert out["sex[F]"].iloc[0] == 0.0
+        assert pd.isna(out["sex[F]"].iloc[1])
+        assert out["sex[F]"].iloc[2] == 1.0
+
+    def test_unlisted_codes_flagged_and_nan(self, sex_covariates):
+        df = pd.DataFrame({"sex": ["M", "F", "X"]})
+        out, unlisted = encode_covariates(df, sex_covariates)
+        assert unlisted == ["sex"]
+        assert pd.isna(out["sex[F]"].iloc[2])
+
+    def test_scored_encoding(self):
+        covariates = resolve_expl_vars([{"stage": {"scores": {"I": 1, "II": 2}, "missing": ["unknown"]}}])
+        df = pd.DataFrame({"stage": ["I", "II", "unknown", "III"]})
+        out, unlisted = encode_covariates(df, covariates)
+        assert unlisted == ["stage"]
+        assert out["stage"].iloc[0] == 1.0
+        assert out["stage"].iloc[1] == 2.0
+        assert pd.isna(out["stage"].iloc[2])
+        assert pd.isna(out["stage"].iloc[3])
+
+    def test_custom_key_is_used(self):
+        """A custom key parameter is used (a test key that lowercases)."""
+
+        def lower_key(value):
+            key_value = code_key(value)
+            return key_value.lower() if isinstance(key_value, str) else key_value
+
+        covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["m"], "F": ["f"]}}}])
+        df = pd.DataFrame({"sex": ["M", "F", "m", "f"]})
+        out, unlisted = encode_covariates(df, covariates, key=lower_key)
+        assert unlisted == []
+        assert out["sex[F]"].tolist() == [0.0, 1.0, 0.0, 1.0]
+
+    def test_colliding_codes_under_custom_key_raise(self):
+        """Two codes that collide under a custom key are a spec error on the node."""
+
+        def lower_key(value):
+            key_value = code_key(value)
+            return key_value.lower() if isinstance(key_value, str) else key_value
+
+        # "M" and "m" do not collide under code_key, so the spec resolves;
+        # under the lowercasing key they do.
+        covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["m"]}}}])
+        df = pd.DataFrame({"sex": ["M", "F"]})
+        with pytest.raises(UserInputError, match="are the same"):
+            encode_covariates(df, covariates, key=lower_key)
+
+    def test_missing_source_column_left_for_validate(self, sex_covariates):
+        df = pd.DataFrame({"age": [1.0]})
+        out, unlisted = encode_covariates(df, sex_covariates)
+        assert unlisted == []
+        assert "sex[F]" not in out.columns
+        with pytest.raises(UserInputError, match="not found"):
+            validate_expl_vars(out, sex_covariates, "time", "event")
+
+    def test_plain_names_untouched(self):
+        """The encoder handles only categories and scores entries."""
+        covariates = resolve_expl_vars(["age"])
+        df = pd.DataFrame({"age": ["not", "numeric"]})
+        out, unlisted = encode_covariates(df, covariates)
+        assert out["age"].tolist() == ["not", "numeric"]
+        assert unlisted == []
+
+    def test_input_not_modified(self, sex_covariates):
+        df = pd.DataFrame({"sex": ["M", "F"]})
+        original = df.copy()
+        encode_covariates(df, sex_covariates)
+        pd.testing.assert_frame_equal(df, original)
+
+
+@pytest.mark.unit
+class TestCheckCategorySizes:
+    """Tests for check_category_sizes (the per-category threshold)."""
+
+    @pytest.fixture
+    def settings(self):
+        return PrivacySettings(
+            sample_size_threshold=10,
+            time_bin_width=None,
+            min_risk_set_change=5,
+            reconstruction_row_factor=1,
+        )
+
+    @pytest.fixture
+    def covariates(self):
+        return resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+
+    def _frame(self, sexes, events, covariates):
+        df = pd.DataFrame(
+            {
+                "time": [float(i + 1) for i in range(len(sexes))],
+                "event": events,
+                "sex": sexes,
+            }
+        )
+        encoded, _ = encode_covariates(df, covariates)
+        return encoded
+
+    def test_all_categories_large_enough(self, settings, covariates):
+        # 15 M (12 events) and 15 F (12 events): both above threshold 10.
+        df = self._frame(["M"] * 15 + ["F"] * 15, [1] * 12 + [0] * 3 + [1] * 12 + [0] * 3, covariates)
+        check_category_sizes(df, "event", covariates, settings)
+
+    def test_rows_at_threshold_fail(self, settings, covariates):
+        # M has exactly 10 rows (threshold 10): not more -> fail.
+        df = self._frame(["M"] * 10 + ["F"] * 20, [1] * 10 + [1] * 15 + [0] * 5, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'M'"):
+            check_category_sizes(df, "event", covariates, settings)
+
+    def test_events_at_threshold_fail(self, settings, covariates):
+        # M has 15 rows but exactly 10 events -> fail (events side).
+        df = self._frame(["M"] * 15 + ["F"] * 15, [1] * 10 + [0] * 5 + [1] * 12 + [0] * 3, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'M'"):
+            check_category_sizes(df, "event", covariates, settings)
+
+    def test_reference_category_checked(self, settings, covariates):
+        # The reference (M) has 15 rows but 10 events -> fail.
+        df = self._frame(["M"] * 15 + ["F"] * 15, [1] * 10 + [0] * 5 + [1] * 12 + [0] * 3, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'M'"):
+            check_category_sizes(df, "event", covariates, settings)
+
+    def test_non_reference_category_checked(self, settings, covariates):
+        # F has 15 rows but 10 events -> fail.
+        df = self._frame(["M"] * 15 + ["F"] * 15, [1] * 12 + [0] * 3 + [1] * 10 + [0] * 5, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'F'"):
+            check_category_sizes(df, "event", covariates, settings)
+
+    def test_empty_category_fails(self, settings):
+        # A label no row holds: a zero is a disclosure as well. The other
+        # categories pass, so the empty one is the failure.
+        covariates = resolve_expl_vars(
+            [{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"], "X": ["X"]}}}]
+        )
+        df = self._frame(["M"] * 11 + ["F"] * 11, [1] * 22, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'X'"):
+            check_category_sizes(df, "event", covariates, settings)
+
+    def test_message_names_threshold_variable_label_not_count(self, settings, covariates):
+        # M has 7 rows (below threshold 10): the message names the threshold,
+        # the variable and the label, never the count.
+        df = self._frame(["M"] * 7 + ["F"] * 23, [1] * 7 + [1] * 16 + [0] * 7, covariates)
+        with pytest.raises(PrivacyThresholdViolation) as exc_info:
+            check_category_sizes(df, "event", covariates, settings)
+        message = str(exc_info.value)
+        assert "10" in message  # the configured threshold
+        assert "sex" in message
+        assert "'M'" in message
+        assert "7" not in message  # never the count
+
+    def test_no_categorical_covariates_is_a_noop(self, settings):
+        covariates = resolve_expl_vars(["age"])
+        df = pd.DataFrame({"time": [1.0], "event": [1], "age": [50.0]})
+        check_category_sizes(df, "event", covariates, settings)
+        check_category_sizes(df, "event", None, settings)
+
+
+@pytest.mark.unit
+class TestUnlistedCodeError:
+    """The unlisted-code UserInputError comes only after every threshold."""
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def covariates(self):
+        return resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+
+    @pytest.fixture
+    def env(self, monkeypatch):
+        # Minimal level (no admission bound beyond factor * k) and threshold 10.
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
+
+    def test_unlisted_code_raises_after_thresholds(self, client, covariates, env):
+        # 22 M (11 events) and 22 F (11 events); one censored F row holds an
+        # unlisted code. Every threshold passes, so the unlisted-code error
+        # fires.
+        sexes = ["M"] * 22 + ["F"] * 22
+        events = [1] * 11 + [0] * 11 + [1] * 11 + [0] * 11
+        df = pd.DataFrame({"time": [float(i + 1) for i in range(44)], "event": events, "sex": sexes})
+        df.loc[43, "sex"] = "X"  # a censored F row
+        with pytest.raises(UserInputError, match="does not list"):
+            prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+
+    def test_below_threshold_node_raises_no_unlisted_error(self, client, covariates, env):
+        """A node below the threshold is refused without the unlisted-code error.
+
+        Raised earlier, the error would tell a researcher whether a
+        below-threshold node holds a code.
+        """
+        df = pd.DataFrame({"time": [1.0, 2.0, 3.0], "event": [1, 1, 0], "sex": ["M", "X", "F"]})
+        _, _, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        assert threshold_met is False
+
+    def test_category_below_threshold_beats_unlisted_code(self, client, covariates, env):
+        """A category below the threshold raises PrivacyThresholdViolation first."""
+        # 30 rows, 15 events; M has 5 rows (below threshold) and one row holds
+        # an unlisted code.
+        df = pd.DataFrame(
+            {
+                "time": [float(i + 1) for i in range(30)],
+                "event": [1] * 15 + [0] * 15,
+                "sex": ["M"] * 5 + ["F"] * 24 + ["X"],
+            }
+        )
+        with pytest.raises(PrivacyThresholdViolation):
+            prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+
+    def test_all_codes_listed_passes(self, client, covariates, env):
+        sexes = ["M"] * 22 + ["F"] * 22
+        events = [1] * 11 + [0] * 11 + [1] * 11 + [0] * 11
+        df = pd.DataFrame({"time": [float(i + 1) for i in range(44)], "event": events, "sex": sexes})
+        df_out, settings, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        assert threshold_met is True
+        assert "sex[F]" in df_out.columns
 
 
 @pytest.mark.unit

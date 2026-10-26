@@ -25,6 +25,7 @@ from .privacy_guards import (
     prepare_node_data,
     prepare_time_column,
     quantise_wire_aggregates,
+    resolve_expl_vars,
     round_released_aggregates,
     suppress_small_time_counts,
     validate_iteration_input,
@@ -54,7 +55,10 @@ def compute_summed_z(
     outcome_col : str
         The name of the column containing the outcome data.
     expl_vars : list
-        A list of explanatory variables to be used in the computation.
+        The explanatory variables: plain column names, or single-entry
+        mappings of a column name to a categorical or scored spec. The node
+        re-validates the spec and encodes the categorical and scored
+        entries into numeric model-term columns.
 
     Returns
     -------
@@ -64,7 +68,10 @@ def compute_summed_z(
     try:
         info("Computing summed Z statistics")
 
-        df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
+        covariates = resolve_expl_vars(expl_vars)
+        df, settings, threshold_met = prepare_node_data(
+            client, df, time_col, outcome_col, covariates, need_outcome=True
+        )
 
         if not threshold_met:
             raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
@@ -72,10 +79,10 @@ def compute_summed_z(
         df = prepare_time_column(df, time_col, settings, outcome_col)
 
         events = df[df[outcome_col] == 1]
-        z_sum = events[expl_vars].sum().to_dict()
+        z_sum = events[covariates.terms].sum().to_dict()
         # Sum of squares over the event cases: with z_sum this yields the pooled
         # covariate centre and spread over events without another round-trip.
-        sum_squares = events[expl_vars].pow(2).sum().to_dict()
+        sum_squares = events[covariates.terms].pow(2).sum().to_dict()
 
         # Also return per-time event counts from the same NaN-dropped,
         # censored DataFrame so that central can build aggregated_time_events
@@ -152,7 +159,10 @@ def perform_iteration(
         missing outcome are dropped so that tail censoring uses the same
         rows as ``compute_summed_z``.
     expl_vars : list
-        A list of explanatory variables to be used in the computation.
+        The explanatory variables: plain column names, or single-entry
+        mappings of a column name to a categorical or scored spec. The node
+        re-validates the spec and encodes the categorical and scored
+        entries into numeric model-term columns.
     beta : list
         The current estimate of the beta coefficients (standardised space),
         as it arrives on the wire (a JSON list).
@@ -171,7 +181,10 @@ def perform_iteration(
     try:
         info("Computing aggregates for the derivation of the partial likelihood")
 
-        df, settings, threshold_met = prepare_node_data(client, df, time_col, outcome_col, expl_vars, need_outcome=True)
+        covariates = resolve_expl_vars(expl_vars)
+        df, settings, threshold_met = prepare_node_data(
+            client, df, time_col, outcome_col, covariates, need_outcome=True
+        )
 
         # A node that passed compute_summed_z passes this check as well (the same
         # rows are analysed); the threshold here is defence in depth.
@@ -179,7 +192,7 @@ def perform_iteration(
             raise PrivacyThresholdViolation("Sample size threshold not met: refusing to share aggregates.")
 
         beta_arr, centre_arr, scale_arr, unique_time_events = validate_iteration_input(
-            beta, centre, scale, unique_time_events, expl_vars, settings
+            beta, centre, scale, unique_time_events, covariates.terms, settings
         )
 
         # Move the event rows' times up to their suppressed (merged) time so
@@ -187,7 +200,7 @@ def perform_iteration(
         # times payload; censored rows keep their time.
         df = prepare_time_column(df, time_col, settings, outcome_col, move_event_times=True)
 
-        X_all = (df[expl_vars].to_numpy(dtype=float) - centre_arr) / scale_arr
+        X_all = (df[covariates.terms].to_numpy(dtype=float) - centre_arr) / scale_arr
 
         agg1, agg2, agg3 = guarded_risk_set_aggregates(
             df[time_col],
