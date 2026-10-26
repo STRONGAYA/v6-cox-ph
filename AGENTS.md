@@ -210,15 +210,19 @@ deliberately runs glibc and unlocked to test the declared range.
   node. The result dicts of the partials are built from the Pydantic
   result models, so their keys and nesting are pinned in one place.
 - **Every partial prepares its data through the shared**
-  ``prepare_node_data(client, df, time_col, outcome_col, expl_vars, *,
-  need_outcome)`` (in ``privacy_guards.py``), which runs the guards in
-  order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
-  ``validate_expl_vars`` (when ``expl_vars`` are given) →
+  ``prepare_node_data(client, df, time_col, outcome_col, covariates, *,
+  need_outcome)`` (in ``privacy_guards.py``; ``covariates`` is the resolved
+  ``ResolvedCovariates`` from ``resolve_expl_vars``), which runs the guards
+  in order: ``ensure_spawned_by_central`` → ``load_privacy_settings`` →
+  ``encode_covariates`` (when covariates are given) →
+  ``validate_expl_vars`` (when covariates are given) →
   ``drop_incomplete_rows`` → ``validate_survival_columns`` →
   ``select_rows`` (the marked hook for project row selection) →
-  ``check_sample_size``. Do not reorder or skip any of them; the unit
-  tests assert the order. ``validate_iteration_input``
-  (``perform_iteration`` only) and ``prepare_time_column`` run afterwards.
+  ``check_sample_size`` → ``check_category_sizes`` (only when the threshold
+  was met) → the unlisted-code ``UserInputError`` (only when every threshold
+  passed). Do not reorder or skip any of them; the unit tests assert the
+  order. ``validate_iteration_input`` (``perform_iteration`` only) and
+  ``prepare_time_column`` run afterwards.
   ``perform_iteration`` builds its aggregates with the vectorised
   ``guarded_risk_set_aggregates`` (``searchsorted``/``bincount``/reverse
   cumsum; the jump guard comes from the bucket counts) — the previous mask
@@ -250,7 +254,7 @@ deliberately runs glibc and unlocked to test the declared range.
 - The parent-task guard fails closed: if the task lookup fails or the token
   is missing (and the client is not a ``MockAlgorithmClient``), raise
   ``AlgorithmError``, never proceed.
-- Rows with NaN in ``time_col``, ``outcome_col`` or any ``expl_var`` are
+- Rows with NaN in ``time_col``, ``outcome_col`` or any model term are
   dropped before the sample-size threshold is checked.
 
 ## Coding conventions
