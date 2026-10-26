@@ -1437,6 +1437,28 @@ class TestEncodeCovariates:
         encode_covariates(df, sex_covariates)
         pd.testing.assert_frame_equal(df, original)
 
+    def test_term_colliding_with_existing_column_raises(self):
+        # A term that names an existing data column (here a bracketed time
+        # column) is refused instead of silently overwriting it.
+        covariates = resolve_expl_vars(
+            [{"grp": {"reference": "base", "categories": {"base": ["base"], "rare": ["rare"]}}}]
+        )
+        df = pd.DataFrame({"grp": ["base", "rare"], "grp[rare]": [1.0, 2.0]})
+        with pytest.raises(UserInputError, match="collides with an existing data column"):
+            encode_covariates(df, covariates)
+
+    def test_term_colliding_with_bystander_column_raises(self):
+        covariates = resolve_expl_vars([{"x": {"reference": "0", "categories": {"0": ["0"], "1": ["1"]}}}])
+        df = pd.DataFrame({"x": [0, 1], "x[1]": [5.0, 6.0]})
+        with pytest.raises(UserInputError, match="collides with an existing data column"):
+            encode_covariates(df, covariates)
+
+    def test_no_collision_when_columns_are_new(self, sex_covariates):
+        # The ordinary case: the term column does not exist yet.
+        df = pd.DataFrame({"sex": ["M", "F"]})
+        out = encode_covariates(df, sex_covariates)
+        assert out["sex[F]"].tolist() == [0.0, 1.0]
+
 
 @pytest.mark.unit
 class TestCheckCategorySizes:

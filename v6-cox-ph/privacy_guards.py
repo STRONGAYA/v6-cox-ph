@@ -585,8 +585,10 @@ def encode_covariates(
     the variable. Listed ``missing`` codes and unlisted codes become NaN in
     all of the variable's columns, so those rows drop with the other
     incomplete rows (identically in every partial); the source columns are
-    kept. A missing source column is left for ``validate_expl_vars``. Plain
-    names are untouched: the encoder handles only ``categories`` and
+    kept. A model term that would overwrite an existing data column (the
+    time or outcome column, or an unrelated column of the same name) is
+    refused. A missing source column is left for ``validate_expl_vars``.
+    Plain names are untouched: the encoder handles only ``categories`` and
     ``scores`` entries.
 
     Returns
@@ -598,9 +600,12 @@ def encode_covariates(
     ------
     UserInputError
         When two listed codes collide under ``key`` (a spec error that
-        depends on the request only, never on data).
+        depends on the request only, never on data), or when a model term
+        would overwrite an existing data column (the time or outcome
+        column, or an unrelated column whose name matches the term).
     """
     out = df.copy()
+    existing_columns = set(out.columns)
     for entry in covariates.categorical:
         if entry.name not in out.columns:
             continue
@@ -613,6 +618,11 @@ def encode_covariates(
             if label == entry.reference:
                 continue
             term = f"{entry.name}[{label}]"
+            if term in existing_columns:
+                raise UserInputError(
+                    f"Model term '{term}' of explanatory variable '{entry.name}' collides with an "
+                    f"existing data column; rename the category label or the column."
+                )
             out[term] = (labels == label).astype(float)
             out.loc[labels.isna(), term] = np.nan
     for scored_entry in covariates.scored:
