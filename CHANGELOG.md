@@ -65,6 +65,18 @@ plain column name stays valid). Both are recorded in
   never describes a below-threshold subpopulation, and without naming the
   codes found. ``outcome_col`` is validated with Pydantic at ``central``
   entry and re-validated on the node; the provenance block echoes it.
+- STRONG AYA categorical covariates: the categorical and scored
+  covariates of 2.2.0 work on RDF nodes. Codes compare through
+  ``covariate_key``: a prefixed name matches its full IRI, and
+  ``ncit:C54031`` (missing or unspecified) is always missing for
+  covariates, so a missing value is dropped before every threshold and
+  never reported as an unlisted code. Only the plain explanatory
+  variables are converted to floats; a categorical or scored entry's
+  codes are terms, which the encoding maps after stratification. The
+  category threshold of 2.2.0 applies on RDF nodes too, after the
+  native sample-size threshold and before the STRONG AYA sample-size
+  threshold. A spec that lists the same code once as a prefixed name
+  and once as its full IRI is refused when the code map is built.
 - The STRONG AYA libraries are bumped to ``vantage6-strongaya-general``
   v1.0.5 and ``vantage6-strongaya-rdf`` v1.1.0. The previous
   ``v6-tools-rdf`` pin joined the variables of a SPARQL collection by

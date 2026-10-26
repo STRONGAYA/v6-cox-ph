@@ -142,6 +142,40 @@ covariate profile names a categorical variable by one of its labels
 (``{"sex": "F"}``); central expands the label to the 1/0 values of that
 variable's terms before computing the curves.
 
+On STRONG AYA stations the variables are named by their class in the
+semantic map and coded with ontology terms, so the codes of a categorical
+or scored spec are terms as well. Codes compare through the term key: a
+prefixed name matches its full IRI, and ``ncit:C54031`` (missing or
+unspecified) is always missing for covariates. Biological sex
+(``ncit:C28421``) and the clinical T stage (``ncit:C25728``) look like:
+
+.. code-block:: python
+
+  expl_vars = [
+      "ncit:C156420",  # age at diagnosis, numeric as text
+      {"ncit:C28421": {  # biological sex: one 0/1 column per non-reference category
+          "reference": "male",
+          "categories": {"male": ["ncit:C20197"], "female": ["ncit:C16576"]},
+      }},
+      {"ncit:C25728": {  # clinical T stage: one numeric column
+          "scores": {"ncit:C48719": 0, "ncit:C48720": 1, "ncit:C48724": 2,
+                     "ncit:C48728": 3, "ncit:C48732": 4},
+          "missing": ["ncit:C48737"],  # Tx as missing
+      }},
+  ]
+
+The model terms are ``["ncit:C156420", "ncit:C28421[female]",
+"ncit:C25728"]``. A spec that lists the same code once as a prefixed name
+and once as its full IRI is refused: the two spellings are the same code.
+
+Stratifying on a categorical covariate empties the categories outside the
+stratum: the encoder runs after the stratification filter, so a run
+stratified to females holds no male rows, and the male category — the
+reference included — fails the category threshold with
+``PrivacyThresholdViolation``. Stratify on a categorical variable only
+when every category of the covariate you keep is large enough inside the
+stratum, or stratify on a different variable.
+
 Output fields
 -------------
 

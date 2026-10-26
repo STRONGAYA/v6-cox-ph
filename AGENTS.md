@@ -571,6 +571,19 @@ block 3 above, not here.
   earlier would tell a researcher whether a below-threshold subpopulation
   holds a code. Never move that check before the thresholds and never echo
   the codes found.
+- Categorical covariates (STRONG AYA layer on the phase1 feature): codes
+  compare through ``covariate_key`` — a prefixed name matches its full IRI,
+  and ``ncit:C54031`` (missing or unspecified) is always missing for
+  covariates, so a missing value is never reported as an unlisted code. In
+  the guard order, ``coerce_covariates`` converts the plain names only (a
+  categorical or scored entry's codes are terms, not numbers),
+  ``encode_covariates`` runs with ``covariate_key`` after stratification
+  (the encoder keeps the source column the filter uses), and
+  ``check_category_sizes`` runs after ``check_sample_size`` and before
+  ``apply_sample_size_threshold``. A spec that lists the same code once as
+  a prefixed name and once as its full IRI collides under ``covariate_key``
+  and is refused when the code map is built — a spec error that depends on
+  the request only, so it may be raised before the thresholds.
 - The STRONG AYA guards are in addition to the vanilla guards, never
   instead of them; ``perform_iteration`` runs them too, through the same
   shared ``prepare_node_data``.

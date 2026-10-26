@@ -63,6 +63,8 @@ validate_expl_vars = privacy_guards.validate_expl_vars
 validate_iteration_input = privacy_guards.validate_iteration_input
 validate_survival_columns = privacy_guards.validate_survival_columns
 code_key = miscellaneous.code_key
+covariate_key = miscellaneous.covariate_key
+build_code_map = miscellaneous.build_code_map
 from tests.unit.reference_risk_sets import guarded_risk_set_masks  # noqa: E402
 
 NCIT = "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#"
@@ -1263,6 +1265,40 @@ class TestCovariateConversion:
         assert out["treatment"].tolist() == [0.0, 1.0, 0.0]
         assert df["age"].tolist() == ["50", "61.5", f"{NCIT}C54031"], "the input frame must not be modified"
 
+    def test_coerce_covariates_converts_plain_names_only(self):
+        """A categorical or scored entry's codes are terms, not numbers.
+
+        coerce_covariates receives the plain names only: converting a
+        categorical or scored entry would flag every one of its codes as
+        not a number.
+        """
+        covariates = resolve_expl_vars(
+            [
+                "age",
+                {
+                    "ncit:C28421": {
+                        "reference": "male",
+                        "categories": {"male": ["ncit:C20197"], "female": ["ncit:C16576"]},
+                    }
+                },
+                {"ncit:C25728": {"scores": {"ncit:C48719": 0, "ncit:C48720": 1}}},
+            ]
+        )
+        assert covariates.plain == ["age"]
+        df = pd.DataFrame(
+            {
+                "age": ["50", "61.5", f"{NCIT}C54031"],
+                "ncit:C28421": [f"{NCIT}C16576", f"{NCIT}C20197", f"{NCIT}C54031"],
+                "ncit:C25728": ["ncit:C48719", "ncit:C48720", "ncit:C48737"],
+            }
+        )
+        out, invalid = coerce_covariates(df, covariates.plain)
+        assert invalid == []
+        np.testing.assert_array_equal(out["age"].to_numpy(), [50.0, 61.5, np.nan])
+        assert out["ncit:C28421"].tolist() == [f"{NCIT}C16576", f"{NCIT}C20197", f"{NCIT}C54031"]
+        assert out["ncit:C25728"].tolist() == ["ncit:C48719", "ncit:C48720", "ncit:C48737"]
+        assert df["age"].tolist() == ["50", "61.5", f"{NCIT}C54031"], "the input frame must not be modified"
+
     def _df(self, ages):
         n = len(ages)
         return pd.DataFrame(
@@ -1382,6 +1418,39 @@ class TestRdfStratification:
         assert stratification == {"ncit:C28421": ["ncit:C16576", 1.0]}
         assert df["ncit:C28421"].iloc[0] == f"{NCIT}C16576", "the input frame must not be modified"
         assert out["ncit:C28421"].iloc[0] == "ncit:C16576"
+
+    def test_categorical_covariate_encodes_full_iris(self, client, minimal_env):
+        """Sex as a categorical covariate: the full-IRI values encode into the 0/1 term.
+
+        The spec names prefixed codes; the data holds full IRIs. The ten
+        rows holding the missing term are dropped before the thresholds,
+        and the run proceeds.
+        """
+        covariates = resolve_expl_vars(
+            [
+                "ncit:C156420",
+                {
+                    "ncit:C28421": {
+                        "reference": "male",
+                        "categories": {"male": ["ncit:C20197"], "female": ["ncit:C16576"]},
+                    }
+                },
+            ]
+        )
+        out, _, threshold_met = prepare_node_data(
+            client,
+            self._df(),
+            "ncit:C125201",
+            "ncit:C25717",
+            covariates,
+            need_outcome=True,
+            outcome_codes=OUTCOME_CODES,
+        )
+        assert threshold_met is True
+        assert len(out) == 290  # the ten ncit:C54031 rows are dropped
+        assert "ncit:C28421[female]" in out.columns
+        assert out["ncit:C28421[female]"].tolist() == [1.0] * 120 + [0.0] * 170
+        assert out["ncit:C28421"].tolist() == [f"{NCIT}C16576"] * 120 + [f"{NCIT}C20197"] * 170
 
 
 @pytest.mark.unit
@@ -2317,6 +2386,126 @@ class TestEncodeCovariates:
         original = df.copy()
         encode_covariates(df, sex_covariates)
         pd.testing.assert_frame_equal(df, original)
+
+
+@pytest.mark.unit
+class TestRdfCovariateKey:
+    """Covariate codes compare through covariate_key on RDF nodes (STRONG AYA).
+
+    RDF data delivers categorical values as full IRIs while a request
+    names prefixed codes; the missing term (``ncit:C54031``) is always
+    missing for covariates, and a spec that lists the same code once as a
+    prefixed name and once as its full IRI collides under the key.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
+
+        return MockAlgorithmClient(
+            datasets=[[{"database": pd.DataFrame({"x": [1]}), "db_type": "csv"}]],
+            module="v6-cox-ph",
+            organization_ids=[1],
+        )
+
+    @pytest.fixture
+    def minimal_env(self, monkeypatch):
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
+        monkeypatch.delenv("SAMPLE_SIZE_THRESHOLD", raising=False)
+        monkeypatch.delenv("COXPH_TIME_BIN_WIDTH", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_CHANGE", raising=False)
+        monkeypatch.delenv("COXPH_MIN_RISK_SET_SIZE", raising=False)
+
+    @pytest.fixture
+    def sex_covariates(self):
+        return resolve_expl_vars(
+            [{"ncit:C28421": {"reference": "male", "categories": {"male": ["ncit:C20197"], "female": ["ncit:C16576"]}}}]
+        )
+
+    def test_prefixed_codes_match_full_iris(self, sex_covariates):
+        """A spec listing prefixed names encodes data holding the full IRIs."""
+        df = pd.DataFrame({"ncit:C28421": [f"{NCIT}C20197", f"{NCIT}C16576", f"{NCIT}C20197"]})
+        out, unlisted = encode_covariates(df, sex_covariates, key=covariate_key)
+        assert unlisted == []
+        assert out["ncit:C28421"].tolist() == [f"{NCIT}C20197", f"{NCIT}C16576", f"{NCIT}C20197"]
+        assert out["ncit:C28421[female]"].tolist() == [0.0, 1.0, 0.0]
+
+    def test_full_iri_codes_match_prefixed_data(self):
+        """A spec listing full IRIs encodes data holding the prefixed names."""
+        covariates = resolve_expl_vars(
+            [
+                {
+                    "ncit:C28421": {
+                        "reference": "male",
+                        "categories": {"male": [f"{NCIT}C20197"], "female": [f"{NCIT}C16576"]},
+                    }
+                }
+            ]
+        )
+        df = pd.DataFrame({"ncit:C28421": ["ncit:C20197", "ncit:C16576", "ncit:C20197"]})
+        out, unlisted = encode_covariates(df, covariates, key=covariate_key)
+        assert unlisted == []
+        assert out["ncit:C28421[female]"].tolist() == [0.0, 1.0, 0.0]
+
+    def test_scored_codes_match_full_iris(self):
+        """A scored spec's codes compare through the key as well."""
+        covariates = resolve_expl_vars(
+            [{"ncit:C25728": {"scores": {"ncit:C48719": 0, "ncit:C48720": 1}, "missing": ["ncit:C48737"]}}]
+        )
+        df = pd.DataFrame({"ncit:C25728": [f"{NCIT}C48719", f"{NCIT}C48720", f"{NCIT}C48737"]})
+        out, unlisted = encode_covariates(df, covariates, key=covariate_key)
+        assert unlisted == []
+        assert out["ncit:C25728"].iloc[0] == 0.0
+        assert out["ncit:C25728"].iloc[1] == 1.0
+        assert pd.isna(out["ncit:C25728"].iloc[2])
+
+    def test_missing_term_is_never_an_unlisted_code(self, sex_covariates):
+        """ncit:C54031 (prefixed or full IRI) is missing, not an unlisted code."""
+        df = pd.DataFrame({"ncit:C28421": [f"{NCIT}C20197", "ncit:C54031", f"{NCIT}C54031", f"{NCIT}C16576"]})
+        out, unlisted = encode_covariates(df, sex_covariates, key=covariate_key)
+        assert unlisted == []
+        assert out["ncit:C28421[female]"].iloc[0] == 0.0
+        assert pd.isna(out["ncit:C28421[female]"].iloc[1])
+        assert pd.isna(out["ncit:C28421[female]"].iloc[2])
+        assert out["ncit:C28421[female]"].iloc[3] == 1.0
+
+    def test_prefixed_and_iri_collision_is_a_spec_error(self):
+        """The same code listed as a prefixed name and as its full IRI collides."""
+        # Under code_key (central's validation) the two spellings differ, so
+        # the spec resolves; under covariate_key they are the same code.
+        covariates = resolve_expl_vars(
+            [
+                {
+                    "ncit:C28421": {
+                        "reference": "male",
+                        "categories": {"male": ["ncit:C20197"], "female": [f"{NCIT}C16576"]},
+                        "missing": ["ncit:C16576"],
+                    }
+                }
+            ]
+        )
+        with pytest.raises(ValueError, match="are the same"):
+            build_code_map(covariates.categorical[0], covariate_key)
+        df = pd.DataFrame({"ncit:C28421": [f"{NCIT}C20197", f"{NCIT}C16576"]})
+        with pytest.raises(UserInputError, match="are the same"):
+            encode_covariates(df, covariates, key=covariate_key)
+
+    def test_collision_raised_before_the_thresholds(self, client, minimal_env):
+        """The collision depends on the request only, so it fires below the threshold too."""
+        covariates = resolve_expl_vars(
+            [
+                {
+                    "ncit:C28421": {
+                        "reference": "male",
+                        "categories": {"male": ["ncit:C20197"], "female": [f"{NCIT}C16576"]},
+                        "missing": ["ncit:C16576"],
+                    }
+                }
+            ]
+        )
+        df = pd.DataFrame({"time": [1.0, 2.0], "event": [1, 0], "ncit:C28421": [f"{NCIT}C20197", f"{NCIT}C16576"]})
+        with pytest.raises(UserInputError, match="are the same"):
+            prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
 
 
 @pytest.mark.unit

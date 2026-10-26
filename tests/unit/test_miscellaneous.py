@@ -22,6 +22,7 @@ sys.path.insert(0, str(algorithm_path))
 from miscellaneous import (  # noqa: E402
     CoxPHInput,
     code_key,
+    covariate_key,
     parse_expl_vars,
     parse_outcome_col,
     term_key,
@@ -460,6 +461,40 @@ class TestCodeKey:
         assert code_key("M") == "M"
         assert code_key(" M ") == "M"
         assert code_key("stage II") == "stage II"
+
+
+@pytest.mark.unit
+class TestCovariateKey:
+    """Covariate codes compare through covariate_key (STRONG AYA layer).
+
+    ``covariate_key`` applies ``term_key`` — a prefixed name matches its
+    full IRI — and the STRONG AYA missing term is always missing for
+    covariates.
+    """
+
+    def test_full_iri_and_prefixed_name_match(self):
+        assert covariate_key(f"{NCIT}C16576") == "ncit:C16576"
+        assert covariate_key("ncit:C16576") == "ncit:C16576"
+        assert covariate_key(f"<{NCIT}C16576>") == "ncit:C16576"
+        assert covariate_key(f"  {NCIT}C16576 ") == "ncit:C16576"
+
+    def test_missing_term_is_always_missing(self):
+        """ncit:C54031 is missing for covariates, as a prefixed name or a full IRI."""
+        assert covariate_key("ncit:C54031") is None
+        assert covariate_key(f"{NCIT}C54031") is None
+        assert covariate_key(f"<{NCIT}C54031>") is None
+
+    def test_numbers_and_numeric_strings_match(self):
+        assert covariate_key(1) == covariate_key(1.0) == covariate_key("1") == covariate_key(" 1.0 ") == 1.0
+        assert covariate_key(True) == 1.0
+
+    def test_other_strings_are_compared_stripped(self):
+        assert covariate_key("male") == "male"
+        assert covariate_key(" male ") == "male"
+
+    @pytest.mark.parametrize("value", [None, float("nan"), float("inf"), "", "   ", "<>"])
+    def test_missing_values_have_no_key(self, value):
+        assert covariate_key(value) is None
 
 
 @pytest.mark.unit

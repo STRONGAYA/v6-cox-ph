@@ -220,6 +220,20 @@ after every threshold passed. Raised earlier, the error would tell a
 researcher whether a below-threshold node holds a code. The error names
 the variables, never the codes found.
 
+On STRONG AYA (RDF) nodes the encoding compares codes through the term
+key: a code listed as a prefixed name (``ncit:C16576``) matches the full
+IRI the data holds, and vice versa. The STRONG AYA missing term
+(``ncit:C54031``, missing or unspecified) is always missing for
+covariates, as a prefixed name or a full IRI, so a missing value is
+dropped before every threshold and never reported as an unlisted code.
+The encoding runs after stratification (the encoder keeps the source
+column the filter uses), so the categories of a stratified run are
+counted inside the stratum: stratifying on a categorical covariate
+empties the categories outside the stratum, and the category threshold
+fails the run. The unlisted-code error fires only after every threshold
+— the native sample-size and category thresholds and the STRONG AYA
+sample-size threshold — and never echoes the codes found.
+
 Time binning
 ~~~~~~~~~~~~
 
