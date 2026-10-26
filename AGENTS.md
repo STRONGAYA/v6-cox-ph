@@ -530,6 +530,18 @@ block 3 above, not here.
   git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.1.0``.
 - Logging goes through ``safe_log(level, message)`` — never vantage6's
   ``info``/``warn``/``error`` and never ``print``.
+- On an RDF node (the data carries an ``endpoint`` column) the request is
+  checked against the STRONG AYA schema (``check_request_against_schema``
+  in ``privacy_guards.py``, right after ``load_privacy_settings`` and
+  before the RDF collect): only schema codes are allowed — every name must
+  be the class of a schema variable, ``time_col`` continuous,
+  ``outcome_col`` categorical and in the mapping form, a categorical or
+  standardised covariate in the ``categories``/``scores`` form, and every
+  listed code one of the variable's codes (a standardised variable's codes
+  are taken as given, because the schema lists none for it). The schema
+  comes from ``vantage6_strongaya_rdf.schema_loader`` (``load_schema``,
+  node settings ``USE_REMOTE_SCHEMA``/``SCHEMA_URL``/``SCHEMA_TAG``);
+  CSV nodes skip the check.
 - Inside ``prepare_node_data`` (block 2 order): RDF collect when the node
   carries an ``endpoint`` column, then ``mask_unnecessary_variables`` before
   the native validation, and ``apply_sample_size_threshold`` after the

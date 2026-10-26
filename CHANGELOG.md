@@ -77,6 +77,26 @@ plain column name stays valid). Both are recorded in
   native sample-size threshold and before the STRONG AYA sample-size
   threshold. A spec that lists the same code once as a prefixed name
   and once as its full IRI is refused when the code map is built.
+- STRONG AYA schema checks: on an RDF node (the data carries an
+  ``endpoint`` column) the request is checked against the STRONG AYA
+  schema right after the settings load and before the RDF collect, so a
+  request that names something other than a schema code, or uses a code
+  in the wrong form, fails before anything is computed. Only schema
+  codes are allowed: every name in ``time_col``, ``outcome_col``,
+  ``expl_vars`` and ``variables_to_stratify`` must be the class of a
+  schema variable, ``time_col`` must be continuous, ``outcome_col``
+  categorical and given in the mapping form, a categorical or
+  standardised covariate must be given in the ``categories`` or
+  ``scores`` form (the algorithm never guesses the categories or the
+  reference), and every listed code must be one of the variable's codes;
+  a standardised variable's codes are taken as given, because the schema
+  lists none for it. The check reads the request and the schema only,
+  never patient data, so it may fail before every threshold; no endpoint
+  is queried. The schema comes from the RDF library
+  (``vantage6_strongaya_rdf.schema_loader.load_schema``, node settings
+  ``USE_REMOTE_SCHEMA``/``SCHEMA_URL``/``SCHEMA_TAG``, falling back to
+  the bundled schema). CSV nodes get no schema check and keep the
+  previous behaviour.
 - The STRONG AYA libraries are bumped to ``vantage6-strongaya-general``
   v1.0.5 and ``vantage6-strongaya-rdf`` v1.1.0. The previous
   ``v6-tools-rdf`` pin joined the variables of a SPARQL collection by

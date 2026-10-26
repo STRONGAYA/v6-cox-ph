@@ -8,7 +8,8 @@ The partial functions run on each data station and share only aggregated
 quantities with the central aggregator. Several guards protect against the
 main leakage channels of the federated design. All guards are implemented in
 ``v6-cox-ph/privacy_guards.py`` and applied in the same order in every
-partial: parent-task check, settings load, RDF collection (STRONG AYA, when
+partial: parent-task check, settings load, schema check (STRONG AYA, RDF
+nodes only — see below), RDF collection (STRONG AYA, when
 the node carries an ``endpoint`` column), masking of unanalysed variables
 (STRONG AYA), time conversion to floats and plain-covariate conversion to
 floats (STRONG AYA), outcome recoding (STRONG AYA, when ``outcome_col``
@@ -90,6 +91,35 @@ partial without going through ``central``) has ``parent = None`` and is
 refused with a ``PrivacyViolation``. A failure to look up the task fails
 closed with an ``AlgorithmError``. The guard is skipped (with an info log)
 for the ``MockAlgorithmClient`` used in tests.
+
+Schema check (STRONG AYA)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On a node whose data carries an ``endpoint`` column (an RDF node), the
+request is checked against the STRONG AYA schema right after the settings
+load and before the RDF collect — before any data is read and before every
+threshold. The check reads the request and the schema only, never patient
+data: no endpoint is queried and nothing is returned, so it may fail
+before every threshold, and a refusal describes the request, never a
+subpopulation of the node's data. A CSV node (no ``endpoint`` column) gets
+no schema check.
+
+Only schema codes are allowed: every name in ``time_col``, ``outcome_col``,
+``expl_vars`` and ``variables_to_stratify`` must be the class of a schema
+variable, ``time_col`` must be continuous, ``outcome_col`` must be
+categorical and given in the mapping form, a categorical or standardised
+explanatory variable must be given in the ``categories`` or ``scores`` form
+(the algorithm never guesses the categories or the reference), and every
+listed code must be one of the variable's codes. ``Usage.rst`` lists the
+rules in full. Each failure is a ``UserInputError`` naming the variable
+and the rule broken, never data.
+
+The schema comes from the RDF library (``vantage6_strongaya_rdf``), which
+only the partials import; which version a node checks against is a node
+setting (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``, ``SCHEMA_TAG``), so each
+station checks against the schema its own data was annotated with. Without
+the settings the schema bundled with the library is used. A schema that
+cannot be loaded fails the run closed (``AlgorithmError``).
 
 Sample-size threshold
 ~~~~~~~~~~~~~~~~~~~~~

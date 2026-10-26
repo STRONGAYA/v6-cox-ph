@@ -6,8 +6,10 @@ so they can be unit-tested without vantage6. All partial functions run the
 shared ``prepare_node_data`` step, in this order::
 
     ensure_spawned_by_central -> load_privacy_settings
-    -> RDF collect (STRONG AYA, only when the node carries an ``endpoint``
-    column) -> ``mask_unnecessary_variables`` (STRONG AYA)
+    -> schema check (STRONG AYA, RDF nodes only: only when the node
+    carries an ``endpoint`` column) -> RDF collect (STRONG AYA, only when
+    the node carries an ``endpoint`` column)
+    -> ``mask_unnecessary_variables`` (STRONG AYA)
     -> ``coerce_time_column`` (STRONG AYA)
     -> ``coerce_covariates`` (STRONG AYA, plain names only)
     -> ``recode_outcome`` (STRONG AYA, when ``outcome_codes`` are given)
@@ -152,6 +154,11 @@ ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
 ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
 ENV_MAX_HELD_EVENT_FRACTION = "COXPH_MAX_HELD_EVENT_FRACTION"
 ENV_RDF_COLLECT_TIMEOUT = "COXPH_RDF_COLLECT_TIMEOUT"
+# The STRONG AYA schema settings, read the way collect_sparql_data reads
+# them: which schema a node's data was annotated with.
+ENV_USE_REMOTE_SCHEMA = "USE_REMOTE_SCHEMA"
+ENV_SCHEMA_URL = "SCHEMA_URL"
+ENV_SCHEMA_TAG = "SCHEMA_TAG"
 
 # The run-local cache file for the collected RDF frame (STRONG AYA
 # query-once convention): the first partial writes it into the run's
@@ -494,6 +501,223 @@ def load_rdf_collect_timeout() -> float:
     if not timeout > 0:
         raise UserInputError(f"{ENV_RDF_COLLECT_TIMEOUT} must be a positive number of seconds.")
     return timeout
+
+
+def load_request_schema() -> dict:
+    """Load the STRONG AYA schema the node's data was annotated with.
+
+    Reads the node's schema settings the way ``collect_sparql_data`` does
+    (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``, ``SCHEMA_TAG``) and calls the
+    RDF library's ``load_schema``; without the settings it falls back to
+    the schema bundled with the library. The import is function-local:
+    only the partials may import the RDF library, never ``central``.
+
+    Returns
+    -------
+    dict
+        The schema: ``schema['schema']['variables']`` is keyed by a slug,
+        and each variable carries its ``class`` (the code a request uses),
+        its ``dataType`` and its ``valueMapping.terms``.
+
+    Raises
+    ------
+    AlgorithmError
+        When no schema can be loaded: the run fails closed rather than
+        checking the request against no schema. The library's error text
+        (a URL, a tag) is not echoed.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+    from vantage6_strongaya_rdf.schema_loader import load_schema
+
+    use_remote = get_env_var(ENV_USE_REMOTE_SCHEMA, "false").lower() == "true"
+    schema_url = get_env_var(ENV_SCHEMA_URL, None)
+    schema_tag = get_env_var(ENV_SCHEMA_TAG, None)
+    try:
+        return load_schema(use_remote=use_remote, schema_url=schema_url, schema_tag=schema_tag, local_fallback=True)
+    except Exception:
+        raise AlgorithmError("The STRONG AYA schema could not be loaded; refusing to proceed.") from None
+
+
+def _schema_variable_index(schema: dict) -> dict:
+    """Index the schema's variables by the term key of their class.
+
+    Each entry maps the term key of a variable's ``class`` (the code a
+    request uses, for example ``ncit:C28421``) to its ``dataType`` and the
+    term keys of its codes (the ``targetClass`` values of its
+    ``valueMapping.terms``). The missing term is one of every variable's
+    codes, so it is added to each.
+    """
+    variables: dict = {}
+    if not isinstance(schema, dict):
+        return variables
+    inner = schema.get("schema")
+    if not isinstance(inner, dict):
+        return variables
+    declared = inner.get("variables")
+    if not isinstance(declared, dict):
+        return variables
+    for variable in declared.values():
+        if not isinstance(variable, dict):
+            continue
+        class_code = variable.get("class")
+        data_type = variable.get("dataType")
+        if not isinstance(class_code, str) or not isinstance(data_type, str):
+            continue
+        codes = set()
+        value_mapping = variable.get("valueMapping")
+        if isinstance(value_mapping, dict):
+            terms = value_mapping.get("terms")
+            if isinstance(terms, dict):
+                for term in terms.values():
+                    if isinstance(term, dict):
+                        key = term_key(term.get("targetClass"))
+                        if key is not None:
+                            codes.add(key)
+        codes.add(term_key(MISSING_TERM))
+        variables[term_key(class_code)] = (data_type, codes)
+    return variables
+
+
+def check_request_against_schema(
+    schema: dict,
+    time_col: str,
+    outcome_col: Optional[str],
+    outcome_codes: Optional[dict],
+    covariates: Optional[ResolvedCovariates],
+    variables_to_stratify: Optional[dict],
+) -> None:
+    """Check a request against the STRONG AYA schema (RDF nodes only).
+
+    On a STRONG AYA station only schema codes are allowed: every name in
+    the request must be the class of a schema variable, and every code
+    must be one of that variable's codes. Codes compare through the term
+    key, so a full IRI matches its prefixed name. The check reads the
+    request and the schema only, never patient data, so it may fail
+    before every threshold; no endpoint is queried and nothing is
+    returned. Each failure names the variable and the rule broken, never
+    data.
+
+    The rules:
+
+    - ``time_col`` is a ``continuous`` variable.
+    - ``outcome_col`` is a ``categorical`` variable, given in the mapping
+      form; every listed code is one of its codes.
+    - a ``continuous`` explanatory variable is a plain name; a
+      ``categorical`` or ``standardised`` one must be in the ``categories``
+      or ``scores`` form (the algorithm never guesses the categories or
+      the reference), and every listed code is one of its codes. A
+      ``standardised`` variable's codes are taken as given: the schema
+      lists none for it (only the missing term), so only their format is
+      checked, by the spec validation that ran before.
+    - ``variables_to_stratify`` holds a value list only for a categorical
+      (or standardised) variable, with its own codes, and a range only for
+      a ``continuous`` variable.
+    - the missing term (``ncit:C54031``) is one of every variable's codes,
+      so it may always be listed under ``missing``.
+
+    Raises
+    ------
+    UserInputError
+        Naming the variable and the rule broken.
+    """
+    variables = _schema_variable_index(schema)
+
+    def _lookup(name: str, what: str) -> tuple:
+        key = term_key(name)
+        if key is None or key not in variables:
+            raise UserInputError(
+                f"{what} '{name}' is not a variable of the STRONG AYA schema; on a STRONG AYA "
+                f"station every name must be the class of a schema variable"
+            )
+        return variables[key]
+
+    def _require_code(code, where: str, codes: set) -> None:
+        key = term_key(code)
+        if key is not None and key not in codes:
+            raise UserInputError(
+                f"{where} lists the code '{code}', which is not one of its codes in the STRONG AYA schema"
+            )
+
+    data_type, _ = _lookup(time_col, "Time column")
+    if data_type != "continuous":
+        raise UserInputError(
+            f"Time column '{time_col}' must be a continuous variable of the STRONG AYA "
+            f"schema; '{time_col}' is {data_type}"
+        )
+
+    if outcome_col is not None:
+        data_type, codes = _lookup(outcome_col, "Outcome column")
+        if data_type != "categorical":
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' must be a categorical variable of the "
+                f"STRONG AYA schema; '{outcome_col}' is {data_type}"
+            )
+        if outcome_codes is None:
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' must be given in the mapping form on a "
+                f"STRONG AYA station (its event, censored and missing codes)"
+            )
+        for key, listed in outcome_codes.items():
+            for code in listed:
+                _require_code(code, f"Outcome column '{outcome_col}' under '{key}'", codes)
+
+    if covariates is not None:
+        for name in covariates.plain:
+            data_type, _ = _lookup(name, "Explanatory variable")
+            if data_type == "categorical":
+                raise UserInputError(f"Explanatory variable '{name}' is categorical; give its categories and reference")
+            if data_type == "standardised":
+                raise UserInputError(
+                    f"Explanatory variable '{name}' is standardised; give its categories and reference"
+                )
+            if data_type != "continuous":
+                raise UserInputError(
+                    f"Explanatory variable '{name}' is not a continuous variable; "
+                    f"a plain covariate must be continuous"
+                )
+
+        def _check_spec_entry(entry, listed_codes: list) -> None:
+            data_type, codes = _lookup(entry.name, "Explanatory variable")
+            if data_type == "continuous":
+                raise UserInputError(
+                    f"Explanatory variable '{entry.name}' is a continuous variable; give it as a plain name"
+                )
+            if data_type not in ("categorical", "standardised"):
+                raise UserInputError(
+                    f"Explanatory variable '{entry.name}' is {data_type}; a categorical or "
+                    f"scored spec is only allowed for a categorical variable"
+                )
+            if data_type == "categorical":
+                # A standardised variable's codes are taken as given: the
+                # schema lists none for it (only the missing term).
+                for code in [*listed_codes, *entry.missing]:
+                    _require_code(code, f"Explanatory variable '{entry.name}'", codes)
+
+        for cat_entry in covariates.categorical:
+            _check_spec_entry(
+                cat_entry, [code for label_codes in cat_entry.categories.values() for code in label_codes]
+            )
+        for scored_entry in covariates.scored:
+            _check_spec_entry(scored_entry, list(scored_entry.scores))
+
+    if variables_to_stratify is not None:
+        for name, selection in variables_to_stratify.items():
+            data_type, codes = _lookup(name, "Stratification variable")
+            if isinstance(selection, dict):
+                if data_type != "continuous":
+                    raise UserInputError(
+                        f"Stratification variable '{name}' is {data_type}; a range is only "
+                        f"allowed for a continuous variable"
+                    )
+            else:
+                if data_type not in ("categorical", "standardised"):
+                    raise UserInputError(
+                        f"Stratification variable '{name}' is {data_type}; a value list is "
+                        f"only allowed for a categorical variable"
+                    )
+                if data_type == "categorical":
+                    for value in selection:
+                        _require_code(value, f"Stratification variable '{name}'", codes)
 
 
 def collect_rdf_data_bounded(df: pd.DataFrame, variables_to_analyse: list) -> pd.DataFrame:
@@ -870,8 +1094,10 @@ def prepare_node_data(
     Order (do not reorder or skip):
 
         ``ensure_spawned_by_central`` -> ``load_privacy_settings``
-        -> RDF collect (STRONG AYA, only when the node carries an
-        ``endpoint`` column) -> ``mask_unnecessary_variables`` (STRONG AYA)
+        -> schema check (STRONG AYA, RDF nodes only: only when the node
+        carries an ``endpoint`` column) -> RDF collect (STRONG AYA, only
+        when the node carries an ``endpoint`` column)
+        -> ``mask_unnecessary_variables`` (STRONG AYA)
         -> ``coerce_time_column`` (STRONG AYA)
         -> ``coerce_covariates`` (STRONG AYA, plain names only, when
         covariates are given)
@@ -935,14 +1161,26 @@ def prepare_node_data(
     Raises
     ------
     UserInputError
-        When the time column or a plain explanatory variable holds a value
-        that is not a number, ``outcome_codes`` do not list an outcome code
-        the node's data holds, or a categorical or scored covariate holds a
-        code ``expl_vars`` does not list (all raised only when the thresholds
+        When the request names something other than a schema code on an
+        RDF node (the schema check), or when the time column or a plain
+        explanatory variable holds a value that is not a number,
+        ``outcome_codes`` do not list an outcome code the node's data
+        holds, or a categorical or scored covariate holds a code
+        ``expl_vars`` does not list (all raised only when the thresholds
         passed).
     """
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
+
+    if "endpoint" in df.columns:
+        # STRONG AYA: on an RDF node only schema codes are allowed. The
+        # request is checked against the schema the node's data was
+        # annotated with, before anything is computed: the check reads the
+        # request and the schema only, never patient data, so it may fail
+        # before every threshold, and no endpoint is queried.
+        check_request_against_schema(
+            load_request_schema(), time_col, outcome_col, outcome_codes, covariates, variables_to_stratify
+        )
 
     # STRONG AYA: collect RDF data when the node carries an endpoint column,
     # then drop every column the analysis does not use (endpoint included).

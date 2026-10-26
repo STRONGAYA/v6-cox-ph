@@ -115,6 +115,47 @@ codings (for example an outcome coded 1/2, or string labels) must recode
 not in the vanilla algorithm. In this STRONG AYA layer, the outcome codes in
 ``outcome_col`` are that recoding for the outcome column.
 
+Schema codes on STRONG AYA stations
+-----------------------------------
+
+On a STRONG AYA (RDF) station only schema codes are allowed: every name in
+the request must be the class of a variable of the STRONG AYA semantic map
+(the schema the node's data was annotated with), and every code must be one
+of that variable's codes. The node checks the request against the schema
+before anything is computed — before any data is read and before every
+threshold — and refuses it with ``UserInputError`` naming the variable and
+the rule broken. A CSV node (no ``endpoint`` column) gets no schema check
+and keeps the plain behaviour described above.
+
+The rules:
+
+- ``time_col`` is a ``continuous`` variable (``ncit:C125201``, overall
+  survival in days).
+- ``outcome_col`` is a ``categorical`` variable, given in the mapping form
+  (``ncit:C25717``, survival status); every listed code is one of its codes.
+- a ``continuous`` explanatory variable is a plain name (``ncit:C156420``,
+  age at diagnosis); a ``categorical`` variable must be given in the
+  ``categories`` or ``scores`` form — a plain name fails, because the
+  algorithm never guesses the categories or the reference — and every
+  listed code is one of its codes.
+- ``variables_to_stratify`` holds a value list only for a categorical
+  variable, with its own codes, and a range only for a continuous variable.
+- the missing term ``ncit:C54031`` (missing or unspecified) is one of every
+  variable's codes, so it may always be listed under ``missing``.
+- the four ``standardised`` variables (the ICD-10 and ICD-O topography and
+  morphology variables, for example ``ncit:C4741``) follow every rule of a
+  categorical variable, with one exception: their codes are taken as given,
+  because the schema lists none for them — the ``categories`` form groups
+  ICD codes into categories.
+
+Codes compare through the term key, so a full IRI matches its prefixed
+name. The schema itself comes from the RDF library
+(``vantage6_strongaya_rdf``); which version a node checks against is a node
+setting (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``, ``SCHEMA_TAG`` — see
+`Node configuration (algorithm_env)`_ below), so each station checks
+against the schema its own data was annotated with. Without the settings
+the schema bundled with the library is used.
+
 Categorical and scored covariates
 ---------------------------------
 
@@ -277,7 +318,7 @@ Node configuration (algorithm_env)
 ----------------------------------
 
 Privacy guards are configured through node environment variables
-(``algorithm_env``):
+(``algorithm_env``); the STRONG AYA schema settings are listed as well:
 
 =================================== =========== ============ ========================
 Variable                            Type        Default      Description
@@ -317,6 +358,14 @@ Variable                            Type        Default      Description
                                                              held-event fraction (read
                                                              centrally). An empty value
                                                              disables the abort.
+``USE_REMOTE_SCHEMA``               string      ``false``    Fetch the STRONG AYA
+                                                             schema from a remote
+                                                             release instead of the
+                                                             bundled one.
+``SCHEMA_URL``                      string      (bundled)    Custom URL to fetch the
+                                                             schema from.
+``SCHEMA_TAG``                      string      (latest)     Release tag to fetch
+                                                             the schema from.
 =================================== =========== ============ ========================
 
 See ``docs/coxph/Privacy.rst`` for the privacy implications of these

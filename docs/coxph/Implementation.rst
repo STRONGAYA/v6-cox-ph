@@ -294,6 +294,21 @@ sequence, in every partial; they add no new partial and change no wire
 signature beyond the additive arguments of 2.3.0. The vanilla text above
 is unchanged.
 
+- **Schema check.** On a node whose data carries an ``endpoint`` column,
+  the request is checked against the STRONG AYA schema
+  (``check_request_against_schema``) right after ``load_privacy_settings``
+  and before the RDF collect: only schema codes are allowed — every name
+  must be the class of a schema variable, ``time_col`` must be continuous,
+  ``outcome_col`` categorical and in the mapping form, a categorical or
+  standardised covariate must be in the ``categories`` or ``scores`` form,
+  and every listed code must be one of the variable's codes (a
+  ``standardised`` variable's codes are taken as given, because the schema
+  lists none for it). The check reads the request and the schema only,
+  never patient data, so it may fail before every threshold; no endpoint is
+  queried. The schema is loaded with the RDF library's ``load_schema`` from
+  the node's settings (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``,
+  ``SCHEMA_TAG``), falling back to the schema bundled with the library; a
+  CSV node (no ``endpoint`` column) skips the check.
 - **RDF collect and cache.** When the node's data carries an ``endpoint``
   column, the variables to analyse (the time, outcome and explanatory
   columns and the stratification variables, each named once) are collected
