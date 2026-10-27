@@ -102,7 +102,10 @@ jobs:
           # an expiry date per entry; the same policy as the weekly lock
           # scan in security-scan.yml.
           IGNORES=$(grep -E '^--ignore-vuln' .pip-audit-ignore | tr '\n' ' ')
-          pip-audit $IGNORES
+          # --skip-editable: v6-cox-ph is the algorithm itself, installed
+          # editable above and not published on PyPI, so pip-audit cannot
+          # resolve it; its third-party dependencies are still audited.
+          pip-audit --skip-editable $IGNORES
 
   docker:
     runs-on: ubuntu-latest
