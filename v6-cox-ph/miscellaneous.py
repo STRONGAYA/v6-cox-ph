@@ -680,7 +680,9 @@ class CoxPHInput(BaseModel):
 
         The messages echo only the user-supplied column names. The
         model-term rules (unique terms, distinct from every entry's name)
-        are enforced by ``parse_expl_vars``.
+        are enforced by ``parse_expl_vars``; a model term must also differ
+        from the time and outcome columns, because the node encodes the
+        term into a column of that name.
         """
         if self.time_col == self.outcome_name:
             raise ValueError(f"time_col and outcome_col must be different columns, both are '{self.time_col}'")
@@ -694,7 +696,13 @@ class CoxPHInput(BaseModel):
                 f"expl_vars must not name the time or outcome column; found {clash} "
                 f"(time_col='{self.time_col}', outcome_col='{self.outcome_name}')"
             )
-        parse_expl_vars(self.expl_vars)
+        covariates = parse_expl_vars(self.expl_vars)
+        term_clash = [term for term in covariates.terms if term in (self.time_col, self.outcome_name)]
+        if term_clash:
+            raise ValueError(
+                f"Model terms must not equal the time or outcome column; found {term_clash} "
+                f"(time_col='{self.time_col}', outcome_col='{self.outcome_name}')"
+            )
         return self
 
     @model_validator(mode="after")

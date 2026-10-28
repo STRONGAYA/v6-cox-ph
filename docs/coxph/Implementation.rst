@@ -72,9 +72,8 @@ variable maps each value to its score in the column named after the
 variable. Codes compare through ``code_key``: a number and the text that
 reads as one are the same code. Listed ``missing`` codes and unlisted
 codes become NaN in all of the variable's columns, so those rows are
-dropped with the other incomplete rows; the variables that held unlisted
-codes are reported and fail the run after the thresholds. The source
-columns are kept. The model terms — one per plain or scored variable, one
+dropped with the other incomplete rows, identically in every partial. The
+source columns are kept. The model terms — one per plain or scored variable, one
 per non-reference category — replace the variable names in everything
 downstream: the partials' ``sum``/``sum_squares`` keys, the standardisation
 vectors, the result's ``model`` index and the order of ``covariance``.

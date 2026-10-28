@@ -699,6 +699,22 @@ class TestCoxPHInputCovariates:
         with pytest.raises(UserInputError, match="time or outcome column"):
             validate_coxph_input(time_col="time", outcome_col="event", expl_vars=[{"event": SEX_SPEC}])
 
+    def test_model_term_clashes_with_time_and_outcome_columns(self):
+        # A categorical term that the node would encode into a column of
+        # the time/outcome column's name is refused at central entry.
+        with pytest.raises(UserInputError, match="Model terms must not equal"):
+            validate_coxph_input(
+                time_col="grp[rare]",
+                outcome_col="event",
+                expl_vars=[{"grp": {"reference": "base", "categories": {"base": ["base"], "rare": ["rare"]}}}],
+            )
+        with pytest.raises(UserInputError, match="Model terms must not equal"):
+            validate_coxph_input(
+                time_col="time",
+                outcome_col="event[x]",
+                expl_vars=[{"event": {"reference": "a", "categories": {"a": ["0"], "x": ["1"]}}}],
+            )
+
     def test_duplicate_names_raise(self):
         with pytest.raises(UserInputError, match="duplicate variables"):
             validate_coxph_input(time_col="time", outcome_col="event", expl_vars=["age", {"age": SEX_SPEC}])

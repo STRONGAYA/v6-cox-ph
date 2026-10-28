@@ -129,7 +129,7 @@ RDF_CONFIGURATIONS = {
         # A category whose code no test patient has: the schema lists
         # transgender, non-binary and other for gender, and the test data
         # holds only male and female, so the empty category fails the
-        # category threshold.
+        # category threshold and the admission bound.
         "expl_vars": [
             AGE,
             {
@@ -140,7 +140,7 @@ RDF_CONFIGURATIONS = {
             },
         ],
         "expected_failure": True,
-        "expected_log": "does not exceed the configured sample-size threshold",
+        "expected_log": "does not meet the configured sample-size threshold",
         "expected_error_type": [PrivacyThresholdViolation, CollectResultsError, AlgorithmError],
     },
     "rdf_categorical_as_plain_name": {

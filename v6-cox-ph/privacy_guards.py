@@ -953,15 +953,15 @@ def resolve_expl_vars(expl_vars: list) -> ResolvedCovariates:
         raise UserInputError(f"Invalid explanatory variables: {e}") from None
 
 
-def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> tuple[pd.Series, bool]:
+def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> pd.Series:
     """Map a source column through a code map.
 
     Returns the mapped values (the label or score of each listed code,
-    ``None`` for a missing or unlisted code) and whether any value's key is
-    not in the map (an unlisted code).
+    ``None`` for a missing or unlisted code). Unlisted codes map to
+    ``None`` exactly like listed ``missing`` codes, so the rows drop in
+    the shared ``drop_incomplete_rows`` — no data-dependent error surface.
     """
     mapped: list = []
-    has_unlisted = False
     for value in values:
         code_key_value = key(value)
         if code_key_value is None:
@@ -970,39 +970,43 @@ def _map_codes(values: pd.Series, code_map: dict, key: Callable) -> tuple[pd.Ser
             mapped.append(code_map[code_key_value])
         else:
             mapped.append(None)
-            has_unlisted = True
-    return pd.Series(mapped, index=values.index, dtype=object), has_unlisted
+    return pd.Series(mapped, index=values.index, dtype=object)
 
 
 def encode_covariates(
     df: pd.DataFrame,
     covariates: ResolvedCovariates,
     key: Callable = code_key,
-) -> tuple[pd.DataFrame, list]:
+) -> pd.DataFrame:
     """Encode the categorical and scored covariates into numeric term columns.
 
     A categorical variable maps each value to its category label and writes
     one float column ``"<name>[<label>]"`` per non-reference label (1.0/0.0);
     a scored variable maps each value to its score in the column named after
     the variable. Listed ``missing`` codes and unlisted codes become NaN in
-    all of the variable's columns; the source columns are kept. A missing
-    source column is left for ``validate_expl_vars``. Plain names are
-    untouched: the encoder handles only ``categories`` and ``scores`` entries.
+    all of the variable's columns, so those rows drop with the other
+    incomplete rows (identically in every partial); the source columns are
+    kept. A model term that would overwrite an existing data column (the
+    time or outcome column, or an unrelated column of the same name) is
+    refused. A missing source column is left for ``validate_expl_vars``.
+    Plain names are untouched: the encoder handles only ``categories`` and
+    ``scores`` entries.
 
     Returns
     -------
-    tuple[pd.DataFrame, list]
-        The frame with the term columns and the sorted names of the source
-        columns that held at least one unlisted code.
+    pd.DataFrame
+        The frame with the term columns.
 
     Raises
     ------
     UserInputError
         When two listed codes collide under ``key`` (a spec error that
-        depends on the request only, never on data).
+        depends on the request only, never on data), or when a model term
+        would overwrite an existing data column (the time or outcome
+        column, or an unrelated column whose name matches the term).
     """
     out = df.copy()
-    unlisted: set = set()
+    existing_columns = set(out.columns)
     for entry in covariates.categorical:
         if entry.name not in out.columns:
             continue
@@ -1010,13 +1014,16 @@ def encode_covariates(
             code_map = build_code_map(entry, key)
         except ValueError as e:
             raise UserInputError(str(e)) from None
-        labels, has_unlisted = _map_codes(out[entry.name], code_map, key)
-        if has_unlisted:
-            unlisted.add(entry.name)
+        labels = _map_codes(out[entry.name], code_map, key)
         for label in entry.categories:
             if label == entry.reference:
                 continue
             term = f"{entry.name}[{label}]"
+            if term in existing_columns:
+                raise UserInputError(
+                    f"Model term '{term}' of explanatory variable '{entry.name}' collides with an "
+                    f"existing data column; rename the category label or the column."
+                )
             out[term] = (labels == label).astype(float)
             out.loc[labels.isna(), term] = np.nan
     for scored_entry in covariates.scored:
@@ -1026,11 +1033,9 @@ def encode_covariates(
             code_map = build_code_map(scored_entry, key)
         except ValueError as e:
             raise UserInputError(str(e)) from None
-        scores, has_unlisted = _map_codes(out[scored_entry.name], code_map, key)
-        if has_unlisted:
-            unlisted.add(scored_entry.name)
+        scores = _map_codes(out[scored_entry.name], code_map, key)
         out[scored_entry.name] = scores.astype(float)
-    return out, sorted(unlisted)
+    return out
 
 
 def check_category_sizes(
@@ -1044,17 +1049,29 @@ def check_category_sizes(
     Every category — the reference included — must have strictly more rows
     and more events than ``settings.sample_size_threshold`` on the analysed
     rows, the same comparison ``check_sample_size`` uses. An empty category
-    fails as well: a zero is a disclosure too. The error names the variable,
-    the category label and the configured threshold, never the count.
+    fails as well: a zero is a disclosure too.
+
+    The rows must also reach the reconstruction admission bound
+    (``_admission_bound``) — the same bound ``check_sample_size`` applies to
+    whole nodes. A category's members are jointly isolated in the released
+    risk-set sums (the 0/1 indicator term restricts S0/S1/S2 to them, and the
+    first grid point is always released), so a category that small would be
+    reconstructable member-by-member exactly as a small node is; the
+    participation threshold alone does not bound that.
+
+    The error names the variable, the category label and the configured
+    bounds, never the count.
 
     Raises
     ------
     PrivacyThresholdViolation
-        When a category does not exceed the threshold.
+        When a category does not exceed the threshold or reach the
+        admission bound.
     """
     if covariates is None:
         return
     threshold = settings.sample_size_threshold
+    admission_bound = _admission_bound(settings)
     for entry in covariates.categorical:
         if entry.name not in df.columns:
             continue  # validate_expl_vars already refused the missing column
@@ -1064,10 +1081,13 @@ def check_category_sizes(
         masks = {label: df[f"{entry.name}[{label}]"] == 1.0 for label in entry.categories if label != entry.reference}
         masks[entry.reference] = (df[term_columns] == 0.0).all(axis=1)
         for label, mask in masks.items():
-            if int(mask.sum()) <= threshold:
+            n_rows = int(mask.sum())
+            if n_rows <= threshold or n_rows < admission_bound:
                 raise PrivacyThresholdViolation(
-                    f"Category '{label}' of explanatory variable '{entry.name}' does not exceed the "
-                    f"configured sample-size threshold {threshold} (rows and events must both be greater)."
+                    f"Category '{label}' of explanatory variable '{entry.name}' does not meet the "
+                    f"configured sample-size threshold {threshold} and admission bound "
+                    f"{admission_bound} (rows and events must both exceed the threshold; "
+                    f"rows must also reach the admission bound)."
                 )
             if outcome_col is not None:
                 n_events = int((mask & (df[outcome_col] == 1)).sum())
@@ -1238,13 +1258,12 @@ def prepare_node_data(
         df, stratification = normalise_stratification(df, variables_to_stratify)
         df = apply_data_stratification(df, stratification)
 
-    unlisted_names: list = []
     if covariates is not None:
         # The encoder keeps the source column the stratification filter
         # uses, so encoding runs after stratification. Codes compare through
         # the STRONG AYA key: a prefixed name matches its full IRI, and the
         # missing term is missing.
-        df, unlisted_names = encode_covariates(df, covariates, key=covariate_key)
+        df = encode_covariates(df, covariates, key=covariate_key)
         validate_expl_vars(df, covariates, time_col, outcome_col)
 
     cols = [time_col]
@@ -1279,14 +1298,6 @@ def prepare_node_data(
         # fires on them: an error raised here would be data-dependent (it
         # would tell a researcher whether a node holds such a value), so
         # the run's outcome does not depend on the data's values.
-        if unlisted_names:
-            # Only after every threshold: raised earlier, the error would
-            # tell a researcher whether a below-threshold node holds a code.
-            raise UserInputError(
-                f"Explanatory variables {unlisted_names} hold codes that expl_vars does not list; "
-                f"add every code to a category, a score or missing."
-            )
-
     return df, settings, threshold_met
 
 
@@ -1470,6 +1481,7 @@ def guarded_risk_set_aggregates(
     X: np.ndarray,
     beta: np.ndarray,
     min_risk_set_size: Optional[int] = None,
+    restricted_groups: Optional[list] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Vectorised risk-set aggregates with the minimum-change ("jump") guard.
 
@@ -1492,6 +1504,18 @@ def guarded_risk_set_aggregates(
     guard, and the first grid point is always released whatever its
     risk-set size.
 
+    ``restricted_groups`` extends the same walk to researcher-defined
+    groups (the categories of the categorical covariates, reference
+    included). The 0/1 indicator term of a category lets a reader separate
+    the released sums into the group's members and the rest, so the walk
+    holds a grid point while any group — or its complement — has fewer
+    than ``k`` members leaving since the held point (its jump guard) or
+    fewer than the floor members at risk (its floor). Released differences
+    then involve 0 or at least ``k`` members of any category, and released
+    group risk sets hold at least the floor — the same guarantee the total
+    counts give, so category-restricted sums are no finer than the
+    whole-node sums.
+
     Complexity: O(N·p²) compute and O(N·p + T·p²) memory, instead of T×N
     boolean masks.
 
@@ -1510,6 +1534,10 @@ def guarded_risk_set_aggregates(
     min_risk_set_size : int | None
         The absolute floor on the size of a released risk set; ``None``
         disables the floor. Only effective when ``k > 1``.
+    restricted_groups : list of array-like | None
+        Boolean masks (length N), one per category of the categorical
+        covariates (reference included): the rows of each researcher-
+        defined group. ``None`` disables the group holds.
 
     Returns
     -------
@@ -1555,10 +1583,21 @@ def guarded_risk_set_aggregates(
                 s2_bucket[:, c2, c1] = s2_bucket[:, c1, c2]
     s2 = np.cumsum(s2_bucket[::-1], axis=0)[::-1]
 
+    # Per-group member counts at risk per grid point (reverse cumulative
+    # sums of the per-bucket member counts), for the group holds below.
+    group_count_r = []
+    if restricted_groups:
+        for mask in restricted_groups:
+            member = np.asarray(mask, dtype=bool)
+            sel = in_grid & member
+            g_counts = np.bincount(bucket_clipped[sel], minlength=n_times).astype(float)
+            group_count_r.append(np.cumsum(g_counts[::-1])[::-1])
+
     # Effective grid index from the counts alone (the jump guard, extended
-    # by the absolute risk-set floor). The floor is part of the same guard
-    # family, so k <= 1 disables it together with the jump guard; the first
-    # grid point is always released, whatever its risk-set size.
+    # by the absolute risk-set floor and by the category-restricted group
+    # holds). The floor is part of the same guard family, so k <= 1
+    # disables it together with the jump guard; the first grid point is
+    # always released, whatever its risk-set size.
     floor = min_risk_set_size if (k is not None and k > 1) else None
     if k is None or k <= 1:
         effective = np.arange(n_times)
@@ -1570,7 +1609,17 @@ def guarded_risk_set_aggregates(
             removed = count_r[held] - count_r[j]
             jump_holds = 0 < removed < k
             floor_holds = floor is not None and count_r[j] < floor
-            if not jump_holds and not floor_holds:
+            group_holds = False
+            for gcr in group_count_r:
+                g_removed = gcr[held] - gcr[j]
+                comp_removed = removed - g_removed
+                if 0 < g_removed < k or 0 < comp_removed < k:
+                    group_holds = True
+                    break
+                if floor is not None and (gcr[j] < floor or (count_r[j] - gcr[j]) < floor):
+                    group_holds = True
+                    break
+            if not jump_holds and not floor_holds and not group_holds:
                 held = j
             effective[j] = held
 
@@ -1680,6 +1729,25 @@ def validate_survival_columns(df: pd.DataFrame, time_col: str, outcome_col: Opti
             )
 
 
+def _admission_bound(settings: PrivacySettings) -> int:
+    """The reconstruction admission bound: the smallest group whose members
+    the released aggregates may isolate whole.
+
+    ``max(reconstruction_row_factor * k, FLOOR_ADMISSION_MULTIPLE * R)``
+    with the floor term only while the risk-set floor is in effect
+    (``COXPH_MIN_RISK_SET_CHANGE > 1``). Applied to whole nodes in
+    ``check_sample_size`` and to every category in ``check_category_sizes``:
+    a group that small would have (nearly) its whole content inside the
+    smallest released risk set, and the floor would hold nearly its whole
+    risk-set trajectory at the first grid point.
+    """
+    bound = settings.reconstruction_row_factor * settings.min_risk_set_change
+    floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
+    if floor is not None:
+        bound = max(bound, FLOOR_ADMISSION_MULTIPLE * floor)
+    return bound
+
+
 def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: PrivacySettings) -> bool:
     """Check whether the node meets the sample-size threshold.
 
@@ -1726,11 +1794,8 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
 
     # The admission bound covers both reconstruction routes; the warning
     # names the configured bound only, never the actual count.
-    reconstruction_bound = settings.reconstruction_row_factor * settings.min_risk_set_change
+    admission_bound = _admission_bound(settings)
     floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
-    admission_bound = reconstruction_bound
-    if floor is not None:
-        admission_bound = max(admission_bound, FLOOR_ADMISSION_MULTIPLE * floor)
     if n_rows < admission_bound:
         if floor is not None:
             safe_log(

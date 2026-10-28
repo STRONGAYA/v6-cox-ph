@@ -764,6 +764,10 @@ class TestPrepareNodeData:
 
     def test_guard_order_with_categorical(self, client, node_df, default_env, monkeypatch):
         """A categorical covariate runs the same order; the category threshold passes."""
+        # The minimal level keeps the admission bound at k rows: this test
+        # asserts the guard ORDER, and the 100-row categories of node_df
+        # cannot reach the standard level's bound of 150 on a 200-row node.
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         calls = self._record_guard_calls(monkeypatch)
         covariates = resolve_expl_vars(["age", {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
         df, settings, threshold_met = prepare_node_data(client, node_df, "time", "event", covariates, need_outcome=True)
@@ -876,8 +880,11 @@ class TestPrepareNodeData:
         """On an RDF node the schema check runs right after load_privacy_settings.
 
         The check is absent on CSV nodes: the expected lists of the other
-        guard-order tests do not contain it.
+        guard-order tests do not contain it. The minimal level keeps the
+        admission bound at k rows: this test asserts the guard ORDER, and
+        its categories cannot reach the standard level's bound of 150.
         """
+        monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         calls = self._record_guard_calls(monkeypatch)
         monkeypatch.setattr(privacy_guards, "load_request_schema", lambda: SMALL_SCHEMA)
         n = 200
@@ -2699,6 +2706,125 @@ class TestMinRiskSetFloor:
 
 
 @pytest.mark.unit
+class TestRestrictedGroupHolds:
+    """The risk-set hold walk extends to category-restricted groups.
+
+    The 0/1 indicator term of a categorical covariate lets a reader split
+    the released sums into a category's members and the rest, so the walk
+    holds a grid point while any group — or its complement — has fewer than
+    k members leaving since the held point (its jump guard) or fewer than
+    the floor members at risk (its floor). At beta = 0 with a single
+    covariate, agg1[t] equals the risk-set size |R(t)|, so the walk is
+    observable directly on agg1.
+    """
+
+    def _agg1(self, times, grid, k, min_risk_set_size, groups=None):
+        X = np.zeros((len(times), 1))
+        beta = np.zeros(1)
+        agg1, _, _ = guarded_risk_set_aggregates(
+            pd.Series(times), grid, k, X, beta, min_risk_set_size, restricted_groups=groups
+        )
+        return agg1
+
+    def test_group_jump_guard_holds_small_member_differences(self):
+        # 10 rows; the group holds the rows at times 1..5. Between grid 4
+        # and 10 the total walk releases (6 rows leave >= k=5) but only 2
+        # group members leave (< k) — the group jump guard holds.
+        times = [float(i) for i in range(1, 11)]
+        group = np.zeros(10, dtype=bool)
+        group[:5] = True
+        agg1 = self._agg1(times, [4.0, 10.0], k=5, min_risk_set_size=None, groups=[group])
+        np.testing.assert_array_equal(agg1, [7.0, 7.0])  # held at the first set
+        # without the groups the same walk releases the smaller set
+        agg1_plain = self._agg1(times, [4.0, 10.0], k=5, min_risk_set_size=None)
+        np.testing.assert_array_equal(agg1_plain, [7.0, 1.0])
+
+    def test_group_floor_holds_small_member_risk_sets(self):
+        # 12 rows; the group holds the rows at times 1..2. The total walk
+        # releases 11, 8, 1 (k=2); the group holds everything: its jump
+        # guard holds at grid 5 (1 member leaves < k=2) and its floor
+        # holds from there on (no members at risk < R=3).
+        times = [float(i) for i in range(1, 13)]
+        group = np.zeros(12, dtype=bool)
+        group[:2] = True
+        agg1 = self._agg1(times, [2.0, 5.0, 12.0], k=2, min_risk_set_size=3, groups=[group])
+        np.testing.assert_array_equal(agg1, [11.0, 11.0, 11.0])
+        agg1_plain = self._agg1(times, [2.0, 5.0, 12.0], k=2, min_risk_set_size=3)
+        np.testing.assert_array_equal(agg1_plain, [11.0, 8.0, 8.0])
+
+    def test_complement_jump_guard_holds_single_nonmember_differences(self):
+        # 8 rows; the group holds the rows at times 1..5. Between grid 4
+        # and 7 the total walk releases (3 rows leave >= k=2) and 2 group
+        # members leave (>= k), but exactly 1 non-member leaves — the
+        # complement's jump guard holds.
+        times = [float(i) for i in range(1, 9)]
+        group = np.zeros(8, dtype=bool)
+        group[:5] = True
+        agg1 = self._agg1(times, [4.0, 7.0], k=2, min_risk_set_size=None, groups=[group])
+        np.testing.assert_array_equal(agg1, [5.0, 5.0])
+        agg1_plain = self._agg1(times, [4.0, 7.0], k=2, min_risk_set_size=None)
+        np.testing.assert_array_equal(agg1_plain, [5.0, 2.0])
+
+    def test_complement_floor_holds_small_nonmember_risk_sets(self):
+        # 20 rows; the group holds the rows at times 1..8 and 11..18 (16
+        # members), the rest at 9, 10, 19, 20. At grid 15.5 the total
+        # risk set (5) clears the floor R=4, but only 2 non-members are at
+        # risk (< R) — the complement's floor holds alone.
+        times = [float(i) for i in range(1, 21)]
+        group = np.zeros(20, dtype=bool)
+        group[:8] = True
+        group[10:18] = True
+        agg1 = self._agg1(times, [10.5, 15.5], k=2, min_risk_set_size=4, groups=[group])
+        np.testing.assert_array_equal(agg1, [10.0, 10.0])
+        agg1_plain = self._agg1(times, [10.5, 15.5], k=2, min_risk_set_size=4)
+        np.testing.assert_array_equal(agg1_plain, [10.0, 5.0])
+
+    def test_no_groups_leaves_the_walk_unchanged(self):
+        times = [float(i) for i in range(1, 11)]
+        grid = [float(i) for i in range(1, 11)]
+        explicit = self._agg1(times, grid, 5, 8, groups=None)
+        default = self._agg1(times, grid, 5, 8)
+        np.testing.assert_array_equal(explicit, default)
+
+    def test_k1_disables_the_group_holds(self):
+        times = [float(i) for i in range(1, 11)]
+        group = np.zeros(10, dtype=bool)
+        group[:5] = True
+        with_groups = self._agg1(times, [4.0, 10.0], k=1, min_risk_set_size=8, groups=[group])
+        without = self._agg1(times, [4.0, 10.0], k=1, min_risk_set_size=8)
+        np.testing.assert_array_equal(with_groups, without)
+        np.testing.assert_array_equal(with_groups, [7.0, 1.0])  # plain risk-set sizes
+
+    def test_released_member_differences_are_zero_or_ge_k(self):
+        """End-to-end on the guard: every released interval involves 0 or
+        >= k members of the group, so no single member is isolated."""
+        rng = np.random.default_rng(7)
+        n = 60
+        times = np.sort(rng.uniform(0.5, 50.0, size=n))
+        group = np.zeros(n, dtype=bool)
+        group[rng.choice(n, size=20, replace=False)] = True
+        grid = sorted(set(np.round(times, 1)))
+        k, floor = 5, 10
+        agg1 = self._agg1(times, grid, k, floor, groups=[group])
+        # released indices: where agg1 (the risk-set size at beta=0) changes
+        released = [0] + [j for j in range(1, len(grid)) if agg1[j] != agg1[j - 1]]
+        # member counts at risk per grid point
+        member_at_risk = np.array([int((group & (times >= g)).sum()) for g in grid])
+        for a, b in zip(released, released[1:]):
+            leaving = int(member_at_risk[a] - member_at_risk[b])
+            assert leaving == 0 or leaving >= k, f"interval ({grid[a]}, {grid[b]}] isolates {leaving} members"
+        # and the guard actually engaged (the plain walk would isolate one)
+        agg1_plain = self._agg1(times, grid, k, floor)
+        released_plain = [0] + [j for j in range(1, len(grid)) if agg1_plain[j] != agg1_plain[j - 1]]
+        isolated = [
+            (a, b)
+            for a, b in zip(released_plain, released_plain[1:])
+            if 0 < int(member_at_risk[a] - member_at_risk[b]) < k
+        ]
+        assert isolated, "the test data must isolate a member without the group holds"
+
+
+@pytest.mark.unit
 class TestValidateExplVars:
     """Tests for validate_expl_vars (source columns first, then term columns)."""
 
@@ -2777,8 +2903,7 @@ class TestEncodeCovariates:
 
     def test_categorical_encoding(self, sex_covariates):
         df = pd.DataFrame({"sex": ["M", "F", "M", "F"], "age": [1.0, 2.0, 3.0, 4.0]})
-        out, unlisted = encode_covariates(df, sex_covariates)
-        assert unlisted == []
+        out = encode_covariates(df, sex_covariates)
         assert out["sex"].tolist() == ["M", "F", "M", "F"]  # the source column is kept
         assert out["sex[F]"].tolist() == [0.0, 1.0, 0.0, 1.0]
         assert pd.api.types.is_float_dtype(out["sex[F]"])
@@ -2786,8 +2911,7 @@ class TestEncodeCovariates:
     def test_numbers_given_as_numbers_or_text(self):
         covariates = resolve_expl_vars([{"grp": {"reference": "0", "categories": {"0": [0], "1": ["1"]}}}])
         df = pd.DataFrame({"grp": [0, 1, "1", "0"]})
-        out, unlisted = encode_covariates(df, covariates)
-        assert unlisted == []
+        out = encode_covariates(df, covariates)
         assert out["grp[1]"].tolist() == [0.0, 1.0, 1.0, 0.0]
 
     def test_missing_codes_become_nan(self):
@@ -2795,23 +2919,24 @@ class TestEncodeCovariates:
             [{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}, "missing": ["unknown"]}}]
         )
         df = pd.DataFrame({"sex": ["M", "unknown", "F"]})
-        out, unlisted = encode_covariates(df, covariates)
-        assert unlisted == []
+        out = encode_covariates(df, covariates)
         assert out["sex[F]"].iloc[0] == 0.0
         assert pd.isna(out["sex[F]"].iloc[1])
         assert out["sex[F]"].iloc[2] == 1.0
 
-    def test_unlisted_codes_flagged_and_nan(self, sex_covariates):
+    def test_unlisted_codes_become_nan(self, sex_covariates):
+        # An unlisted code maps to NaN exactly like a listed missing code;
+        # the row drops with the other incomplete rows.
         df = pd.DataFrame({"sex": ["M", "F", "X"]})
-        out, unlisted = encode_covariates(df, sex_covariates)
-        assert unlisted == ["sex"]
+        out = encode_covariates(df, sex_covariates)
         assert pd.isna(out["sex[F]"].iloc[2])
+        assert out["sex[F]"].iloc[0] == 0.0
+        assert out["sex[F]"].iloc[1] == 1.0
 
     def test_scored_encoding(self):
         covariates = resolve_expl_vars([{"stage": {"scores": {"I": 1, "II": 2}, "missing": ["unknown"]}}])
         df = pd.DataFrame({"stage": ["I", "II", "unknown", "III"]})
-        out, unlisted = encode_covariates(df, covariates)
-        assert unlisted == ["stage"]
+        out = encode_covariates(df, covariates)
         assert out["stage"].iloc[0] == 1.0
         assert out["stage"].iloc[1] == 2.0
         assert pd.isna(out["stage"].iloc[2])
@@ -2826,8 +2951,7 @@ class TestEncodeCovariates:
 
         covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["m"], "F": ["f"]}}}])
         df = pd.DataFrame({"sex": ["M", "F", "m", "f"]})
-        out, unlisted = encode_covariates(df, covariates, key=lower_key)
-        assert unlisted == []
+        out = encode_covariates(df, covariates, key=lower_key)
         assert out["sex[F]"].tolist() == [0.0, 1.0, 0.0, 1.0]
 
     def test_colliding_codes_under_custom_key_raise(self):
@@ -2846,8 +2970,7 @@ class TestEncodeCovariates:
 
     def test_missing_source_column_left_for_validate(self, sex_covariates):
         df = pd.DataFrame({"age": [1.0]})
-        out, unlisted = encode_covariates(df, sex_covariates)
-        assert unlisted == []
+        out = encode_covariates(df, sex_covariates)
         assert "sex[F]" not in out.columns
         with pytest.raises(UserInputError, match="not found"):
             validate_expl_vars(out, sex_covariates, "time", "event")
@@ -2856,15 +2979,36 @@ class TestEncodeCovariates:
         """The encoder handles only categories and scores entries."""
         covariates = resolve_expl_vars(["age"])
         df = pd.DataFrame({"age": ["not", "numeric"]})
-        out, unlisted = encode_covariates(df, covariates)
+        out = encode_covariates(df, covariates)
         assert out["age"].tolist() == ["not", "numeric"]
-        assert unlisted == []
 
     def test_input_not_modified(self, sex_covariates):
         df = pd.DataFrame({"sex": ["M", "F"]})
         original = df.copy()
         encode_covariates(df, sex_covariates)
         pd.testing.assert_frame_equal(df, original)
+
+    def test_term_colliding_with_existing_column_raises(self):
+        # A term that names an existing data column (here a bracketed time
+        # column) is refused instead of silently overwriting it.
+        covariates = resolve_expl_vars(
+            [{"grp": {"reference": "base", "categories": {"base": ["base"], "rare": ["rare"]}}}]
+        )
+        df = pd.DataFrame({"grp": ["base", "rare"], "grp[rare]": [1.0, 2.0]})
+        with pytest.raises(UserInputError, match="collides with an existing data column"):
+            encode_covariates(df, covariates)
+
+    def test_term_colliding_with_bystander_column_raises(self):
+        covariates = resolve_expl_vars([{"x": {"reference": "0", "categories": {"0": ["0"], "1": ["1"]}}}])
+        df = pd.DataFrame({"x": [0, 1], "x[1]": [5.0, 6.0]})
+        with pytest.raises(UserInputError, match="collides with an existing data column"):
+            encode_covariates(df, covariates)
+
+    def test_no_collision_when_columns_are_new(self, sex_covariates):
+        # The ordinary case: the term column does not exist yet.
+        df = pd.DataFrame({"sex": ["M", "F"]})
+        out = encode_covariates(df, sex_covariates)
+        assert out["sex[F]"].tolist() == [0.0, 1.0]
 
 
 @pytest.mark.unit
@@ -2904,8 +3048,7 @@ class TestRdfCovariateKey:
     def test_prefixed_codes_match_full_iris(self, sex_covariates):
         """A spec listing prefixed names encodes data holding the full IRIs."""
         df = pd.DataFrame({"ncit:C28421": [f"{NCIT}C20197", f"{NCIT}C16576", f"{NCIT}C20197"]})
-        out, unlisted = encode_covariates(df, sex_covariates, key=covariate_key)
-        assert unlisted == []
+        out = encode_covariates(df, sex_covariates, key=covariate_key)
         assert out["ncit:C28421"].tolist() == [f"{NCIT}C20197", f"{NCIT}C16576", f"{NCIT}C20197"]
         assert out["ncit:C28421[female]"].tolist() == [0.0, 1.0, 0.0]
 
@@ -2922,8 +3065,7 @@ class TestRdfCovariateKey:
             ]
         )
         df = pd.DataFrame({"ncit:C28421": ["ncit:C20197", "ncit:C16576", "ncit:C20197"]})
-        out, unlisted = encode_covariates(df, covariates, key=covariate_key)
-        assert unlisted == []
+        out = encode_covariates(df, covariates, key=covariate_key)
         assert out["ncit:C28421[female]"].tolist() == [0.0, 1.0, 0.0]
 
     def test_scored_codes_match_full_iris(self):
@@ -2932,8 +3074,7 @@ class TestRdfCovariateKey:
             [{"ncit:C25728": {"scores": {"ncit:C48719": 0, "ncit:C48720": 1}, "missing": ["ncit:C48737"]}}]
         )
         df = pd.DataFrame({"ncit:C25728": [f"{NCIT}C48719", f"{NCIT}C48720", f"{NCIT}C48737"]})
-        out, unlisted = encode_covariates(df, covariates, key=covariate_key)
-        assert unlisted == []
+        out = encode_covariates(df, covariates, key=covariate_key)
         assert out["ncit:C25728"].iloc[0] == 0.0
         assert out["ncit:C25728"].iloc[1] == 1.0
         assert pd.isna(out["ncit:C25728"].iloc[2])
@@ -2941,8 +3082,7 @@ class TestRdfCovariateKey:
     def test_missing_term_is_never_an_unlisted_code(self, sex_covariates):
         """ncit:C54031 (prefixed or full IRI) is missing, not an unlisted code."""
         df = pd.DataFrame({"ncit:C28421": [f"{NCIT}C20197", "ncit:C54031", f"{NCIT}C54031", f"{NCIT}C16576"]})
-        out, unlisted = encode_covariates(df, sex_covariates, key=covariate_key)
-        assert unlisted == []
+        out = encode_covariates(df, sex_covariates, key=covariate_key)
         assert out["ncit:C28421[female]"].iloc[0] == 0.0
         assert pd.isna(out["ncit:C28421[female]"].iloc[1])
         assert pd.isna(out["ncit:C28421[female]"].iloc[2])
@@ -3012,8 +3152,7 @@ class TestCheckCategorySizes:
                 "sex": sexes,
             }
         )
-        encoded, _ = encode_covariates(df, covariates)
-        return encoded
+        return encode_covariates(df, covariates)
 
     def test_all_categories_large_enough(self, settings, covariates):
         # 15 M (12 events) and 15 F (12 events): both above threshold 10.
@@ -3072,10 +3211,51 @@ class TestCheckCategorySizes:
         check_category_sizes(df, "event", covariates, settings)
         check_category_sizes(df, "event", None, settings)
 
+    @pytest.fixture
+    def hardened_settings(self):
+        # Standard-level-like: factor 10, floor 50 -> admission bound 150.
+        return PrivacySettings(
+            sample_size_threshold=10,
+            time_bin_width=None,
+            min_risk_set_change=5,
+            reconstruction_row_factor=10,
+            min_risk_set_size=50,
+        )
+
+    def test_category_below_admission_bound_fails(self, hardened_settings, covariates):
+        # 149 M rows (149 events) pass the threshold but not the bound 150;
+        # the F category reaches the bound so M is the refused one.
+        df = self._frame(["M"] * 149 + ["F"] * 151, [1] * 149 + [1] * 151, covariates)
+        with pytest.raises(PrivacyThresholdViolation, match="'M'"):
+            check_category_sizes(df, "event", covariates, hardened_settings)
+
+    def test_category_at_admission_bound_passes(self, hardened_settings, covariates):
+        # 150 M rows (150 events) reach the bound 150 and pass.
+        df = self._frame(["M"] * 150 + ["F"] * 150, [1] * 150 + [1] * 150, covariates)
+        check_category_sizes(df, "event", covariates, hardened_settings)
+
+    def test_admission_bound_message_names_bounds_not_count(self, hardened_settings, covariates):
+        # 149 M rows: the message names the threshold and the bound, never
+        # the count.
+        df = self._frame(["M"] * 149 + ["F"] * 151, [1] * 149 + [1] * 151, covariates)
+        with pytest.raises(PrivacyThresholdViolation) as exc_info:
+            check_category_sizes(df, "event", covariates, hardened_settings)
+        message = str(exc_info.value)
+        assert "10" in message  # the configured threshold
+        assert "150" in message  # the configured admission bound
+        assert "sex" in message
+        assert "'M'" in message
+        assert "149" not in message  # never the count
+
 
 @pytest.mark.unit
-class TestUnlistedCodeError:
-    """The unlisted-code UserInputError comes only after every threshold."""
+class TestUnlistedCodesTreatedAsMissing:
+    """Unlisted codes map to NaN and drop with the other incomplete rows.
+
+    No error fires on data values: whether a node holds an unlisted code
+    must not change the run's outcome (an error would be a per-value
+    existence oracle).
+    """
 
     @pytest.fixture
     def client(self):
@@ -3097,29 +3277,45 @@ class TestUnlistedCodeError:
         monkeypatch.setenv("COXPH_PRIVACY_LEVEL", "minimal")
         monkeypatch.setenv("SAMPLE_SIZE_THRESHOLD", "10")
 
-    def test_unlisted_code_raises_after_thresholds(self, client, covariates, env):
+    def test_unlisted_code_drops_its_row_without_error(self, client, covariates, env):
         # 22 M (11 events) and 22 F (11 events); one censored F row holds an
-        # unlisted code. Every threshold passes, so the unlisted-code error
-        # fires.
+        # unlisted code. Every threshold passes; the row drops and the run
+        # proceeds over the listed rows.
         sexes = ["M"] * 22 + ["F"] * 22
         events = [1] * 11 + [0] * 11 + [1] * 11 + [0] * 11
         df = pd.DataFrame({"time": [float(i + 1) for i in range(44)], "event": events, "sex": sexes})
         df.loc[43, "sex"] = "X"  # a censored F row
-        with pytest.raises(UserInputError, match="does not list"):
-            prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        df_out, _, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        assert threshold_met is True
+        assert len(df_out) == 43  # the unlisted-code row dropped
+        assert "sex[F]" in df_out.columns
 
-    def test_below_threshold_node_raises_no_unlisted_error(self, client, covariates, env):
-        """A node below the threshold is refused without the unlisted-code error.
+    def test_unlisted_and_missing_codes_drop_identically(self, client, env):
+        # A node holding an unlisted code and a node holding the same code
+        # listed as missing analyse the same rows.
+        covariates = resolve_expl_vars([{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}])
+        missing_covariates = resolve_expl_vars(
+            [{"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}, "missing": ["X"]}}]
+        )
+        sexes = ["M"] * 22 + ["F"] * 21 + ["X"]
+        events = [1] * 11 + [0] * 11 + [1] * 11 + [0] * 10 + [0]
+        df = pd.DataFrame({"time": [float(i + 1) for i in range(44)], "event": events, "sex": sexes})
+        out_unlisted, _, met_unlisted = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
+        out_missing, _, met_missing = prepare_node_data(
+            client, df, "time", "event", missing_covariates, need_outcome=True
+        )
+        assert met_unlisted is True and met_missing is True
+        assert len(out_unlisted) == len(out_missing) == 43
+        pd.testing.assert_frame_equal(out_unlisted, out_missing)
 
-        Raised earlier, the error would tell a researcher whether a
-        below-threshold node holds a code.
-        """
+    def test_below_threshold_node_is_refused(self, client, covariates, env):
+        """A node below the threshold is refused; no data-dependent error."""
         df = pd.DataFrame({"time": [1.0, 2.0, 3.0], "event": [1, 1, 0], "sex": ["M", "X", "F"]})
         _, _, threshold_met = prepare_node_data(client, df, "time", "event", covariates, need_outcome=True)
         assert threshold_met is False
 
-    def test_category_below_threshold_beats_unlisted_code(self, client, covariates, env):
-        """A category below the threshold raises PrivacyThresholdViolation first."""
+    def test_category_below_threshold_still_fails(self, client, covariates, env):
+        """The category threshold is unaffected by the unlisted code."""
         # 30 rows, 15 events; M has 5 rows (below threshold) and one row holds
         # an unlisted code.
         df = pd.DataFrame(
