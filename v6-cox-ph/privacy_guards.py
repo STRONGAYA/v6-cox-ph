@@ -1205,21 +1205,19 @@ def prepare_node_data(
 
     # STRONG AYA: times are numeric deltas, which RDF data delivers as text
     # (and a missing time as the missing term); convert them to floats.
-    df, invalid_times = coerce_time_column(df, time_col)
+    df, _invalid_times = coerce_time_column(df, time_col)
 
-    invalid_covariates: list = []
     if covariates is not None:
         # STRONG AYA: RDF data delivers numeric covariates as text as well;
         # only the plain names are converted — a categorical or scored
         # covariate is coded with terms, which encode_covariates maps.
-        df, invalid_covariates = coerce_covariates(df, covariates.plain)
+        df, _invalid_covariates = coerce_covariates(df, covariates.plain)
 
-    unmapped_outcome = False
     if outcome_codes is not None and outcome_col is not None:
         # STRONG AYA: RDF data codes the outcome with ontology terms (for
         # example ncit:C37987 for alive); outcome_col lists which codes mean
         # event, censored and missing.
-        df, unmapped_outcome = recode_outcome(df, outcome_col, outcome_codes)
+        df, _unmapped_outcome = recode_outcome(df, outcome_col, outcome_codes)
 
     if variables_to_stratify is not None:
         # STRONG AYA: stratification selects the subpopulation this run
@@ -1275,27 +1273,12 @@ def prepare_node_data(
         # this step must not double-raise.
         df = apply_sample_size_threshold(client, df, variables_to_analyse)
 
-        # The checks below are raised only after every threshold passed:
-        # before them, the error would tell a researcher whether a
-        # below-threshold subpopulation holds such a value. The messages
-        # name the column, never the values found.
-        if invalid_times:
-            raise UserInputError(
-                f"Time column '{time_col}' holds values that are not numbers; "
-                f"STRONG AYA times are numeric deltas (a missing time is {MISSING_TERM})."
-            )
-        if invalid_covariates:
-            raise UserInputError(
-                f"Explanatory variables {invalid_covariates} hold values that are not numbers; "
-                f"covariates must be numeric (a missing value is {MISSING_TERM}). A variable coded "
-                f"with terms (such as biological sex) cannot be a plain covariate; give it a "
-                f"categorical or scored spec in expl_vars instead."
-            )
-        if unmapped_outcome:
-            raise UserInputError(
-                f"Outcome column '{outcome_col}' holds codes that outcome_col does not list; "
-                f"add every code to 'event', 'censored' or 'missing'."
-            )
+        # Values the coercion and recode steps cannot interpret were turned
+        # into NaN above and their rows drop with the other incomplete rows,
+        # before every threshold — identically in every partial. No error
+        # fires on them: an error raised here would be data-dependent (it
+        # would tell a researcher whether a node holds such a value), so
+        # the run's outcome does not depend on the data's values.
         if unlisted_names:
             # Only after every threshold: raised earlier, the error would
             # tell a researcher whether a below-threshold node holds a code.
@@ -1336,9 +1319,9 @@ def coerce_time_column(df: pd.DataFrame, time_col: str) -> tuple[pd.DataFrame, b
     never dates, so the conversion is numeric only (``to_float_values``):
     a missing time becomes NaN and ``drop_incomplete_rows`` removes it
     before every threshold. A value that is not a number is dropped the
-    same way and reported through the returned flag, so that the caller
-    can refuse the run once the thresholds passed. A missing time column is
-    left for ``validate_survival_columns`` to report.
+    same way; the returned flag reports it for tests, and no error is
+    raised on it (an error would be a per-value oracle). A missing time
+    column is left for ``validate_survival_columns`` to report.
 
     The input is not modified; a copy is returned.
 
@@ -1362,10 +1345,10 @@ def coerce_covariates(df: pd.DataFrame, expl_vars: list) -> tuple[pd.DataFrame, 
     covariate is converted the same way (``to_float_values``): a missing
     value becomes NaN and ``drop_incomplete_rows`` removes the row before
     every threshold. A value that is not a number (such as a term of a
-    categorical variable) is dropped the same way and reported through the
-    returned list, so that the caller can refuse the run once the thresholds
-    passed. A missing covariate column is left for ``validate_expl_vars``
-    to report. Only the plain names are converted: a categorical or scored
+    categorical variable) is dropped the same way; the returned list reports
+    the names for tests, and no error is raised on them (an error would be
+    a per-value oracle). A missing covariate column is left for
+    ``validate_expl_vars`` to report. Only the plain names are converted: a categorical or scored
     covariate is coded with terms, which ``encode_covariates`` maps, and
     converting its codes would flag every one of them as not a number.
 
@@ -1453,10 +1436,10 @@ def recode_outcome(df: pd.DataFrame, outcome_col: str, outcome_codes: dict) -> t
     and codes under ``missing`` become NaN, so ``drop_incomplete_rows``
     removes them before every threshold. Codes are compared through
     ``term_key``: a prefixed name in ``outcome_col`` matches the
-    full IRI in RDF data. A code that is not listed also becomes NaN, and is
-    reported through the returned flag so that the caller can refuse the run
-    once the thresholds passed. A missing outcome column is left for
-    ``validate_survival_columns`` to report.
+    full IRI in RDF data. A code that is not listed also becomes NaN; the
+    returned flag reports it for tests, and no error is raised on it (an
+    error would be a per-value oracle). A missing outcome column is left
+    for ``validate_survival_columns`` to report.
 
     The input is not modified; a copy is returned.
 

@@ -468,18 +468,19 @@ class TestOutcomeCodesPipeline:
         )
         assert result["provenance"]["input_arguments"]["outcome_col"] == {"event": OUTCOME_CODES}
 
-    def test_unmapped_code_fails_the_run(self, guards_off):
+    def test_unmapped_code_drops_its_row_without_failing(self, guards_off):
+        # The unlisted code becomes NaN and its row drops before every
+        # threshold; no error fires on it (an error would be a per-value
+        # oracle), so the run completes over the interpretable rows.
         df1, df2, _ = _load_datasets()
         coded1 = _rdf_coded(df1)
         coded1.loc[coded1.index[0], "event"] = f"{NCIT}C99798"
-        with pytest.raises(UserInputError, match="outcome_col does not list"):
-            _run_central(
-                [[{"database": coded1, "db_type": "csv"}], [{"database": _rdf_coded(df2), "db_type": "csv"}]],
-                [1, 2],
-                outcome_col={
-                    "event": {"event": ["ncit:C99799"], "censored": ["ncit:C37987"], "missing": ["ncit:C54031"]}
-                },
-            )
+        result = _run_central(
+            [[{"database": coded1, "db_type": "csv"}], [{"database": _rdf_coded(df2), "db_type": "csv"}]],
+            [1, 2],
+            outcome_col={"event": {"event": ["ncit:C99799"], "censored": ["ncit:C37987"], "missing": ["ncit:C54031"]}},
+        )
+        assert result["converged"] is True
 
     def test_invalid_codes_are_rejected_at_central(self, guards_off):
         df1, df2, _ = _load_datasets()

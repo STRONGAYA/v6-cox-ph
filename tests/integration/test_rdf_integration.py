@@ -11,9 +11,12 @@ catches values that the collection attributes to the wrong patient.
 
 The scenarios cover the outcome codes on one node and on three nodes, the
 stratification on a coded variable and on the covariate itself, and a
-categorical covariate, and they exercise the refusals: an unlisted outcome
-code, a category whose code no test patient has, a categorical variable
-given as a plain name, and a stratification that leaves too few rows.
+categorical covariate, and they exercise the refusals: a category whose
+code no test patient has, a categorical variable given as a plain name,
+and a stratification that leaves too few rows. An outcome code the
+request does not list no longer refuses the run: the unlisted code's rows
+drop like any incomplete row and the fit completes over the listed codes'
+patients.
 """
 
 import sys
@@ -96,10 +99,13 @@ RDF_CONFIGURATIONS = {
     "rdf_unlisted_outcome_code": {
         "organization_ids": [1],
         "expl_vars": [AGE],
+        # The request lists a censored code no test patient has, so the
+        # patients coded alive (ncit:C37987) are unlisted: their rows drop
+        # like any incomplete row and the run completes over the listed
+        # codes' patients (the dead, ncit:C99799) — no error fires on the
+        # unlisted code.
         "outcome_col": {STATUS: {"event": ["ncit:C99799"], "censored": ["ncit:C141463"]}},
-        "expected_failure": True,
-        "expected_log": "holds codes that outcome_col does not list",
-        "expected_error_type": [UserInputError, CollectResultsError, AlgorithmError],
+        "listed_outcome_codes": ["ncit:C99799", "ncit:C141463"],
     },
     "rdf_categorical_covariate": {
         "organization_ids": [1],
@@ -183,18 +189,23 @@ def rdf_patients(rdf_store) -> pd.DataFrame:
             "event": values[STATUS].map({f"{NCIT}C99799": 1.0, f"{NCIT}C37987": 0.0}),
             "age": pd.to_numeric(values[AGE], errors="coerce"),
             "sex": values[SEX].str.replace(NCIT, "ncit:"),
+            "status_term": values[STATUS].str.replace(NCIT, "ncit:"),
         }
     )
 
 
-def _reference_rows(patients: pd.DataFrame, variables_to_stratify, reference_expl_vars) -> pd.DataFrame:
+def _reference_rows(
+    patients: pd.DataFrame, variables_to_stratify, reference_expl_vars, listed_outcome_codes=None
+) -> pd.DataFrame:
     """The rows the node analyses, as plain numbers, with the reference's columns.
 
     The stratification selects the subpopulation the node analyses, and the
     rows with a missing time, outcome or covariate are dropped, as the node
-    drops them. A categorical covariate (the reference's "sex_female" and
-    "sex_intersex" columns) adds one 0/1 column per non-reference category
-    and drops the rows whose sex is the missing term.
+    drops them. When ``listed_outcome_codes`` is given, the rows whose
+    outcome code the request does not list drop the same way. A categorical
+    covariate (the reference's "sex_female" and "sex_intersex" columns) adds
+    one 0/1 column per non-reference category and drops the rows whose sex
+    is the missing term.
     """
     rows = patients
     for variable, selection in (variables_to_stratify or {}).items():
@@ -203,6 +214,8 @@ def _reference_rows(patients: pd.DataFrame, variables_to_stratify, reference_exp
             rows = rows[rows[column].between(selection["start"], selection["end"])]
         else:
             rows = rows[rows[column].isin(selection)]
+    if listed_outcome_codes is not None:
+        rows = rows[rows["status_term"].isin(listed_outcome_codes)]
     rows = rows.dropna(subset=["time", "event", "age"])
     out = pd.DataFrame({"time": rows["time"], "event": rows["event"], "age": rows["age"], "sex": rows["sex"]})
     if "sex_female" in reference_expl_vars:
@@ -286,7 +299,12 @@ class TestCoxPHRdfIntegration:
 
         result = extract_coxph_result(client, task)
         reference_expl_vars = config.get("reference_expl_vars", ["age"])
-        rows = _reference_rows(rdf_patients, config.get("variables_to_stratify"), reference_expl_vars)
+        rows = _reference_rows(
+            rdf_patients,
+            config.get("variables_to_stratify"),
+            reference_expl_vars,
+            config.get("listed_outcome_codes"),
+        )
         reference = _reference_fit(
             rows,
             reference_expl_vars,

@@ -1237,20 +1237,23 @@ class TestOutcomeCodes:
             )
             assert threshold_met is expected, f"mapped events {n_events}: expected {expected}"
 
-    def test_unmapped_code_above_threshold_raises_without_echoing_it(self, client, minimal_env):
+    def test_unmapped_code_above_threshold_drops_its_row_without_error(self, client, minimal_env):
+        # The unlisted code becomes NaN and its row drops before every
+        # threshold; no error fires on it (an error would be a per-value
+        # oracle).
         outcomes = [f"{NCIT}C99799"] * 100 + [f"{NCIT}C37987"] * 99 + [f"{NCIT}C99798"]
         codes = {"event": ["ncit:C99799"], "censored": ["ncit:C37987"]}
-        with pytest.raises(UserInputError, match="outcome_col does not list") as excinfo:
-            prepare_node_data(
-                client,
-                self._df(outcomes),
-                "time",
-                "event",
-                resolve_expl_vars(["age", "treatment"]),
-                need_outcome=True,
-                outcome_codes=codes,
-            )
-        assert "C99798" not in str(excinfo.value)
+        df_out, _, threshold_met = prepare_node_data(
+            client,
+            self._df(outcomes),
+            "time",
+            "event",
+            resolve_expl_vars(["age", "treatment"]),
+            need_outcome=True,
+            outcome_codes=codes,
+        )
+        assert threshold_met is True
+        assert len(df_out) == 199  # the unmapped-code row dropped
 
     def test_unmapped_code_below_threshold_reports_the_threshold(self, client, minimal_env):
         """Below the threshold the unmapped code is not reported: no oracle on small subpopulations."""
@@ -1355,13 +1358,15 @@ class TestTimeConversion:
         assert out["time"].dtype == float
         assert out["time"].tolist() == [float(i) for i in range(1, 191)]
 
-    def test_time_that_is_not_a_number_above_threshold_raises_without_echoing_it(self, client, minimal_env):
+    def test_time_that_is_not_a_number_drops_its_row_without_error(self, client, minimal_env):
+        # The value becomes NaN and its row drops before every threshold;
+        # no error fires on it (an error would be a per-value oracle).
         times = [str(i) for i in range(1, 200)] + ["2020-01-01"]
-        with pytest.raises(UserInputError, match="not numbers") as excinfo:
-            prepare_node_data(
-                client, self._df(times), "time", "event", resolve_expl_vars(["age", "treatment"]), need_outcome=True
-            )
-        assert "2020" not in str(excinfo.value)
+        df_out, _, threshold_met = prepare_node_data(
+            client, self._df(times), "time", "event", resolve_expl_vars(["age", "treatment"]), need_outcome=True
+        )
+        assert threshold_met is True
+        assert len(df_out) == 199  # the uninterpretable-time row dropped
 
     def test_time_that_is_not_a_number_below_threshold_reports_the_threshold(self, client, minimal_env):
         """Below the threshold the bad time is not reported: no oracle on small subpopulations."""
@@ -1464,14 +1469,15 @@ class TestCovariateConversion:
         assert out["age"].dtype == float
         assert out["age"].tolist() == [float(20 + i % 40) for i in range(190)]
 
-    def test_covariate_that_is_not_a_number_above_threshold_raises_without_echoing_it(self, client, minimal_env):
+    def test_covariate_that_is_not_a_number_drops_its_row_without_error(self, client, minimal_env):
+        # The value becomes NaN and its row drops before every threshold;
+        # no error fires on it (an error would be a per-value oracle).
         ages = [str(20 + i % 40) for i in range(199)] + [f"{NCIT}C16576"]
-        with pytest.raises(UserInputError, match="not numbers") as excinfo:
-            prepare_node_data(
-                client, self._df(ages), "time", "event", resolve_expl_vars(["age", "treatment"]), need_outcome=True
-            )
-        assert "'age'" in str(excinfo.value)
-        assert "C16576" not in str(excinfo.value)
+        df_out, _, threshold_met = prepare_node_data(
+            client, self._df(ages), "time", "event", resolve_expl_vars(["age", "treatment"]), need_outcome=True
+        )
+        assert threshold_met is True
+        assert len(df_out) == 199  # the uninterpretable-covariate row dropped
 
     def test_covariate_that_is_not_a_number_below_threshold_reports_the_threshold(self, client, minimal_env):
         """Below the threshold the bad covariate is not reported: no oracle on small subpopulations."""
