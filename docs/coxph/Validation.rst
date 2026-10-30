@@ -84,7 +84,7 @@ event times x 10 covariates, ``k=5``):
 Implementation             Time (s)      Peak memory
 =========================  ============  =============
 Mask-based (reference)     89.3          716.8 MB
-Vectorised (current)        0.12          28.2 MB
+Vectorised (current)       0.12          28.2 MB
 =========================  ============  =============
 
 Guard bias study
