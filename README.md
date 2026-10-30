@@ -1,86 +1,100 @@
+# v6-cox-ph — STRONG AYA
 
-# coxph
+A federated Cox proportional hazards model (Breslow ties) for
+[vantage6](https://vantage6.ai) 4.15, with the STRONG AYA layer. The model is
+fitted by Newton–Raphson across the data stations: only aggregated quantities
+leave a node, and every node checks a sample-size threshold and further
+privacy guards before it shares anything.
 
-Federated algorithm for a coxph model in Vantage6 v4
+On top of the vanilla algorithm, the STRONG AYA layer adds:
 
-Please refer to the Wiki for more information on how to use this algorithm.
+- **RDF data stations**: data is collected from the station's RDF endpoint
+  with [v6-tools-rdf](https://github.com/STRONGAYA/v6-tools-rdf), and the
+  request is checked against the STRONG AYA semantic map before anything is
+  computed;
+- **outcome codes**: `outcome_col` can map the outcome column to the ontology
+  terms that mean an event, censored or missing;
+- **stratification**: `variables_to_stratify` restricts the analysis to a
+  subpopulation, and the sample-size thresholds apply to the stratified rows;
+- **STRONG AYA logging (`safe_log`) and privacy measures** from
+  [v6-tools-general](https://github.com/STRONGAYA/v6-tools-general).
 
-This algorithm is designed to be run with the [vantage6](https://vantage6.ai)
-infrastructure for distributed analysis and learning.
+CSV stations get no schema check; the rest applies to every station.
 
-The base code for this algorithm has been created via the
-[v6-algorithm-template](https://github.com/vantage6/v6-algorithm-template)
-template generator.
+## Documentation
 
-### Dockerizing your algorithm
+The full documentation (usage, privacy, implementation and validation) is in
+the [repository wiki](../../wiki). The wiki is published from `docs/` on the
+default branch, and every page states the release or development version it
+describes. The documentation of this branch is in [`docs/coxph`](docs/coxph).
 
-To finally run your algorithm on the vantage6 infrastructure, you need to
-create a Docker image of your algorithm.
+## Quick start
 
-#### Automatically
+Call `central`; it dispatches the node-side partials itself and returns the
+fitted model as JSON. On an RDF station every name and code must come from
+the STRONG AYA semantic map:
 
-The easiest way to create a Docker image is to use the GitHub Actions pipeline to
-automatically build and push the Docker image. All that you need to do is push a
-git tag. The ``release.yaml`` workflow publishes the image as
-``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the branch
-that contains the tagged commit (e.g. ``standard-coxph``).
-
-#### Manually
-
-A Docker image can be created by executing the following command in the root of your
-algorithm directory:
-
-```bash
-docker build -t [my_docker_image_name] .
+```python
+task = client.task.create(
+    collaboration=1,
+    organizations=[1],  # the organisation that runs central
+    name="Cox proportional hazards",
+    image="ghcr.io/strongaya/v6-cox-ph-<branch>:<tag>",
+    input_={
+        "method": "central",
+        "kwargs": {
+            "time_col": "ncit:C125201",  # overall survival in days
+            "outcome_col": {
+                "ncit:C25717": {  # survival status
+                    "event": ["ncit:C99799", "ncit:C99798"],
+                    "censored": ["ncit:C37987", "ncit:C141463"],
+                    "missing": ["ncit:C54031"],
+                }
+            },
+            "expl_vars": ["ncit:C156420"],  # age at diagnosis
+            "variables_to_stratify": {"ncit:C28421": ["ncit:C16576"]},  # females only
+            "organization_ids": [2, 3],  # the data organisations only
+        },
+    },
+    databases=[{"label": "default"}],
+)
+result = client.wait_for_results(task_id=task["id"])
 ```
 
-where you should provide a sensible value for the Docker image name. The
-`docker build` command will create a Docker image that contains your algorithm.
-You can create an additional tag for it by running
+Select the data organisations explicitly in `organization_ids`: a run that
+includes the data-less aggregator organisation fails closed. The *Usage* page
+of the wiki describes every argument, the schema rules and the output fields.
+
+## Node configuration
+
+Data-station managers tune the privacy guards through the node's
+`algorithm_env`, for example `SAMPLE_SIZE_THRESHOLD` (default 10) and the
+`COXPH_PRIVACY_LEVEL` preset (`minimal`, `standard` or `strict`), and choose
+the schema version their data is checked against (`USE_REMOTE_SCHEMA`,
+`SCHEMA_URL`, `SCHEMA_TAG`). The *Usage* and *Privacy* pages of the wiki list
+every setting with its default.
+
+## Development
+
+Python 3.10 or later (the image runs Python 3.12). The STRONG AYA libraries
+are git dependencies pinned in `pyproject.toml`:
 
 ```bash
-docker tag [my_docker_image_name] [another_image_name]
+pip install -e .[dev,lint]
+pytest -m unit                # no Docker needed
+pytest tests/integration      # needs Docker and the v6 CLI; includes the RDF tests
 ```
 
-This way, you can e.g. do
-`docker tag local_average_algorithm harbor2.vantage6.ai/algorithms/average` to
-make the algorithm available on a remote Docker registry (in this case
-`harbor2.vantage6.ai`).
+The lint, type-check and Docker commands that CI runs are listed in
+[`AGENTS.md`](AGENTS.md).
 
-Finally, you need to push the image to the Docker registry. This can be done
-by running
+## Releases
 
-```bash
-docker push [my_docker_image_name]
-```
+Releases are git tags and follow semantic versioning; see
+[`CHANGELOG.md`](CHANGELOG.md). A tag publishes the image
+`ghcr.io/strongaya/v6-cox-ph-<branch>:<tag>`, where `<branch>` is the branch
+whose tip is the tagged commit.
 
-Note that you need to be logged in to the Docker registry before you can push
-the image. You can do this by running `docker login` and providing your
-credentials. Check [this page](https://docs.docker.com/get-started/04_sharing_app/)
-For more details on sharing images on Docker Hub. If you are using a different
-Docker registry, check the documentation of that registry and be sure that you
-have sufficient permissions.
+## Licence
 
-### Node configuration (algorithm_env)
-
-Privacy guards are tuned through node environment variables:
-
-| Variable | Type | Default | Description |
-|---|---|---|---|
-| `SAMPLE_SIZE_THRESHOLD` | int | 10 | Minimum rows and events (strictly greater). |
-| `COXPH_TIME_BIN_WIDTH` | float | (disabled) | Event-time bin width; when set, times are coarsened to `floor(t/w)*w`. |
-| `COXPH_MIN_RISK_SET_CHANGE` | int | 5 | Minimum risk-set change (`k`); consecutive shared aggregates differ by 0 or `>= k`. Set to `1` to disable tail censoring and the jump guard. |
-
-See `docs/coxph/Privacy.rst` for the privacy implications.
-
-### Output fields
-
-The `central` function returns, alongside the model table (a JSON object
-indexed by variable name), a `converged` (bool) and `n_iterations` (int)
-field, the likelihood-ratio test (`log_likelihood`, `log_likelihood_null`,
-`lr_statistic`, `lr_p_value`), `n_events`, `covariance`, the Breslow
-`baseline_cumulative_hazard` and `survival_curves` (with optional
-`covariate_profiles`), an aggregate `privacy_guards` summary of the active
-node guards, and `algorithm_version`. The Wald statistic is
-`Z = Coef / SE` and its p-value is `p = 2 * Phi(-|Z|)`. See
-`docs/coxph/Usage.rst` for the full output schema.
+Apache License 2.0; see [`LICENSE`](LICENSE).

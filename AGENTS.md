@@ -246,9 +246,11 @@ tests/
   conftest.py              Docker/vantage6 fixtures, markers
 scripts/                   benchmark_risk_sets.py, bias_study.py (not
                            collected by pytest)
-docs/coxph/                Privacy.rst, Validation.rst, Usage.rst, etc.
+docs/coxph/                Privacy.rst, Validation.rst, Usage.rst, etc.;
+                           with docs/index.rst the source of the wiki
 .github/workflows/         test-suite.yml (test + lint + security + docker),
-                           security-scan.yml (weekly), release.yaml
+                           security-scan.yml (weekly), release.yaml,
+                           publish-wiki.yml (docs/ to the wiki)
 .github/dependabot.yml     pip, Docker and action updates
 ```
 
@@ -474,8 +476,15 @@ deliberately runs glibc and unlocked to test the declared range.
   hatch for a tag that is no longer a branch tip.
 - Update ``docs/coxph`` and ``algorithm_store.json`` whenever a signature or
   output field changes.
+- The wiki is generated from ``docs/`` (``index.rst`` becomes *Home*, every
+  ``docs/coxph`` page keeps its name): edit ``docs/``, never the wiki, whose
+  web edits are overwritten. Keep the docs to plain reStructuredText that
+  pandoc converts (``code-block`` works; Sphinx roles such as ``:ref:`` and
+  ``:doc:`` do not) and refer to another page as ``Privacy.rst``, which the
+  conversion turns into a wiki link. The README stays a short overview that
+  links to the wiki.
 - CI lives in ``.github/workflows`` and runs with ``permissions:
-  contents: read``:
+  contents: read`` (only the wiki job has ``contents: write``):
   - ``test-suite.yml`` (on pushes to the default branch, every pull request
     and manual dispatch) runs the ``test`` matrix (Python 3.10/3.12 ×
     vantage6 4.14/4.15), ``lint``, ``security`` (Bandit ``-ll`` and
@@ -490,6 +499,14 @@ deliberately runs glibc and unlocked to test the declared range.
     ``ignore-unfixed``) on the latest released image; failures open a
     ``security-scan`` issue. Suppressions are never replaced by lowering a
     severity threshold.
+  - ``publish-wiki.yml`` (on pushes to ``standard-coxph`` or ``main``, on
+    tags and on manual dispatch) converts ``docs/`` with pandoc and mirrors
+    it to the wiki. It publishes only the tip of the default branch, which
+    it reads from the repository, so the file works unchanged in a fork: a
+    version tag at that tip publishes the release, any other push the
+    development version, and a banner on every page states which. A tag
+    elsewhere leaves the wiki unchanged. The wiki must exist (one page
+    created in the web interface) before the first run.
   - ``.github/dependabot.yml`` keeps pip, Docker (base-image digest) and the
     pinned action SHAs current; actions are pinned by commit SHA.
 
@@ -608,6 +625,13 @@ block 3 above, not here.
 - CI triggers include ``phase2-strong-aya``; the image is
   ``ghcr.io/<owner>/v6-cox-ph-phase2-strong-aya:<tag>`` (branch suffix per
   the release workflow).
+- The wiki (``publish-wiki.yml``, block 3) publishes the docs of the
+  default branch only, so pushes and tags on this branch leave it
+  unchanged; this branch's docs reach the wiki when it is merged into
+  ``standard-coxph``, which then documents the STRONG AYA layer.
+- ``README.md`` is this branch's own (the STRONG AYA layer). When an
+  upstream merge changes the vanilla README, keep this branch's text and
+  carry over only what applies here.
 - The lock file is compiled against musl/Python 3.12 and includes the git
   dependencies; regenerate it after any dependency bump.
 - Versions: tags are shared by every branch of this repository, so a

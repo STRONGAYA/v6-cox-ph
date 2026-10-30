@@ -583,7 +583,7 @@ Vulnerabilities to known attacks
 
 .. _mitigated-warning:
 
-** Reconstruction — mitigated. **
+**Reconstruction — mitigated.**
 The partials no longer return row-level data or exact per-event-time sums
 that allow record reconstruction by differencing. Per-event-time risk-set
 sums are shared, but the jump guard, the size floor and tail censoring
@@ -598,14 +598,14 @@ solving that system but cannot eliminate it. Differential privacy on the
 released aggregates, or secure aggregation, is the complete fix and is
 planned for a future release.
 
-** Differencing — mitigated. **
+**Differencing — mitigated.**
 The risk-set jump guard prevents an aggregator from differencing consecutive
 shared aggregates to isolate fewer than ``k`` records. **Residual risk:**
 a data-station manager who changes the dataset between tasks could still
 differencing across runs; data-station managers should not be allowed to
 run tasks directly.
 
-** Deep Leakage from Gradients (DLG) — mitigated. **
+**Deep Leakage from Gradients (DLG) — mitigated.**
 The shared ``S0/S1/S2`` aggregates are sums over risk sets of at least
 ``k`` individuals, not per-record gradients. DLG-style reconstruction from
 these aggregates would recover groups rather than individuals. The central
@@ -613,16 +613,16 @@ aggregator should nonetheless be treated as a trusted party until
 differential privacy or secure aggregation is in place (see the residual
 risk under Reconstruction above).
 
-** Generative Adversarial Networks (GAN) — low risk. **
+**Generative Adversarial Networks (GAN) — low risk.**
 Synthetic data can statistically reproduce the data underlying the model,
 but without the sensitive attributes an adversary cannot assess the
 authenticity of recovered records.
 
-** Model Inversion — low risk. **
+**Model Inversion — low risk.**
 Model predictions can be used to infer an individual's outcome, but without
 the sensitive information the adversary cannot verify the inference.
 
-** Watermark Attack — to be determined. **
+**Watermark Attack — to be determined.**
 
 Choosing thresholds per analysis type
 -------------------------------------
