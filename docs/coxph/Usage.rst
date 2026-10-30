@@ -416,7 +416,7 @@ first, especially the part about the
       organizations=[1],
       name='Cox proportional hazards',
       description='Cox proportional hazards model',
-      image='ghcr.io/maastrichtu-cds/v6-coxph:latest',
+      image='ghcr.io/strongaya/v6-coxph:latest',
       input=input_,
       data_format='json'
   )
