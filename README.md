@@ -1,86 +1,78 @@
+# v6-cox-ph
 
-# coxph
+A federated Cox proportional hazards model (Breslow ties) for
+[vantage6](https://vantage6.ai) 4.14–4.15. The model is fitted by
+Newton–Raphson across the data stations: only aggregated quantities leave a
+node, and every node checks a sample-size threshold and further privacy
+guards before it shares anything.
 
-Federated algorithm for a coxph model in Vantage6 v4
+This is the vanilla algorithm. Project-specific features (row selection,
+recoding, other data sources) belong in a fork or a stacked branch; see
+*Building on this algorithm* in [`AGENTS.md`](AGENTS.md).
 
-Please refer to the Wiki for more information on how to use this algorithm.
+## Documentation
 
-This algorithm is designed to be run with the [vantage6](https://vantage6.ai)
-infrastructure for distributed analysis and learning.
+The full documentation (usage, privacy, implementation and validation) is in
+the [repository wiki](../../wiki). The wiki is published from `docs/` on the
+default branch, and every page states the release or development version it
+describes. The documentation of this branch is in [`docs/coxph`](docs/coxph).
 
-The base code for this algorithm has been created via the
-[v6-algorithm-template](https://github.com/vantage6/v6-algorithm-template)
-template generator.
+## Quick start
 
-### Dockerizing your algorithm
+Call `central`; it dispatches the node-side partials itself and returns the
+fitted model as JSON.
 
-To finally run your algorithm on the vantage6 infrastructure, you need to
-create a Docker image of your algorithm.
-
-#### Automatically
-
-The easiest way to create a Docker image is to use the GitHub Actions pipeline to
-automatically build and push the Docker image. All that you need to do is push a
-git tag. The ``release.yaml`` workflow publishes the image as
-``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the branch
-that contains the tagged commit (e.g. ``standard-coxph``).
-
-#### Manually
-
-A Docker image can be created by executing the following command in the root of your
-algorithm directory:
-
-```bash
-docker build -t [my_docker_image_name] .
+```python
+task = client.task.create(
+    collaboration=1,
+    organizations=[1],  # the organisation that runs central
+    name="Cox proportional hazards",
+    image="ghcr.io/<owner>/<repository>-<branch>:<tag>",
+    input_={
+        "method": "central",
+        "kwargs": {
+            "time_col": "overall_survival_in_days",
+            "outcome_col": "event_overall_survival",  # 1 = event, 0 = censored
+            "expl_vars": ["age", {"sex": {"reference": "M", "categories": {"M": ["M"], "F": ["F"]}}}],
+            "organization_ids": [2, 3],  # the data stations to include
+        },
+    },
+    databases=[{"label": "default"}],
+)
+result = client.wait_for_results(task_id=task["id"])
 ```
 
-where you should provide a sensible value for the Docker image name. The
-`docker build` command will create a Docker image that contains your algorithm.
-You can create an additional tag for it by running
+The input arguments, the output fields and the survival curves are described
+on the *Usage* page of the wiki.
+
+## Node configuration
+
+Data-station managers tune the privacy guards through the node's
+`algorithm_env`, for example `SAMPLE_SIZE_THRESHOLD` (default 10) and the
+`COXPH_PRIVACY_LEVEL` preset (`minimal`, `standard` or `strict`). The *Privacy*
+page of the wiki lists every setting with its default and what it protects
+against.
+
+## Development
+
+Python 3.10 or later (the image runs Python 3.12):
 
 ```bash
-docker tag [my_docker_image_name] [another_image_name]
+pip install -e .[dev,lint]
+pytest -m unit                # no Docker needed
+pytest tests/integration      # needs Docker and the v6 CLI
 ```
 
-This way, you can e.g. do
-`docker tag local_average_algorithm harbor2.vantage6.ai/algorithms/average` to
-make the algorithm available on a remote Docker registry (in this case
-`harbor2.vantage6.ai`).
+The lint, type-check and Docker commands that CI runs are listed in
+[`AGENTS.md`](AGENTS.md).
 
-Finally, you need to push the image to the Docker registry. This can be done
-by running
+## Releases
 
-```bash
-docker push [my_docker_image_name]
-```
+Releases are git tags and follow semantic versioning; see
+[`CHANGELOG.md`](CHANGELOG.md). A tag publishes the image
+`ghcr.io/<owner>/<repository>-<branch>:<tag>`, where `<branch>` is the branch
+whose tip is the tagged commit.
 
-Note that you need to be logged in to the Docker registry before you can push
-the image. You can do this by running `docker login` and providing your
-credentials. Check [this page](https://docs.docker.com/get-started/04_sharing_app/)
-For more details on sharing images on Docker Hub. If you are using a different
-Docker registry, check the documentation of that registry and be sure that you
-have sufficient permissions.
+## Licence
 
-### Node configuration (algorithm_env)
-
-Privacy guards are tuned through node environment variables:
-
-| Variable | Type | Default | Description |
-|---|---|---|---|
-| `SAMPLE_SIZE_THRESHOLD` | int | 10 | Minimum rows and events (strictly greater). |
-| `COXPH_TIME_BIN_WIDTH` | float | (disabled) | Event-time bin width; when set, times are coarsened to `floor(t/w)*w`. |
-| `COXPH_MIN_RISK_SET_CHANGE` | int | 5 | Minimum risk-set change (`k`); consecutive shared aggregates differ by 0 or `>= k`. Set to `1` to disable tail censoring and the jump guard. |
-
-See `docs/coxph/Privacy.rst` for the privacy implications.
-
-### Output fields
-
-The `central` function returns, alongside the model table (a JSON object
-indexed by variable name), a `converged` (bool) and `n_iterations` (int)
-field, the likelihood-ratio test (`log_likelihood`, `log_likelihood_null`,
-`lr_statistic`, `lr_p_value`), `n_events`, `covariance`, the Breslow
-`baseline_cumulative_hazard` and `survival_curves` (with optional
-`covariate_profiles`), an aggregate `privacy_guards` summary of the active
-node guards, and `algorithm_version`. The Wald statistic is
-`Z = Coef / SE` and its p-value is `p = 2 * Phi(-|Z|)`. See
-`docs/coxph/Usage.rst` for the full output schema.
+Apache License 2.0; see [`LICENSE`](LICENSE).
