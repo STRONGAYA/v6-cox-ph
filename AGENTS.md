@@ -625,6 +625,13 @@ block 3 above, not here.
 - CI triggers include ``phase2-strong-aya``; the image is
   ``ghcr.io/<owner>/v6-cox-ph-phase2-strong-aya:<tag>`` (branch suffix per
   the release workflow).
+- The wiki (``publish-wiki.yml``, block 3) publishes the docs of the
+  default branch only, so pushes and tags on this branch leave it
+  unchanged; this branch's docs reach the wiki when it is merged into
+  ``standard-coxph``, which then documents the STRONG AYA layer.
+- ``README.md`` is this branch's own (the STRONG AYA layer). When an
+  upstream merge changes the vanilla README, keep this branch's text and
+  carry over only what applies here.
 - The lock file is compiled against musl/Python 3.12 and includes the git
   dependencies; regenerate it after any dependency bump.
 - Versions: tags are shared by every branch of this repository, so a
