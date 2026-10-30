@@ -1,0 +1,191 @@
+@prefix agg: <http://jena.apache.org/ARQ/function/aggregate#> .
+@prefix : <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sail: <http://www.openrdf.org/config/sail#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix geof: <http://www.opengis.net/def/function/geosparql/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix fn: <http://www.w3.org/2005/xpath-functions> .
+@prefix spif: <http://spinrdf.org/spif#> .
+@prefix path: <http://www.ontotext.com/path#> .
+@prefix array: <http://www.w3.org/2005/xpath-functions/array> .
+@prefix apf: <http://jena.apache.org/ARQ/property#> .
+@prefix rep: <http://www.openrdf.org/config/repository#> .
+@prefix map: <http://www.w3.org/2005/xpath-functions/map> .
+@prefix sr: <http://www.openrdf.org/config/repository/sail#> .
+@prefix wgs: <http://www.w3.org/2003/01/geo/wgs84_pos#> .
+@prefix gn: <http://www.geonames.org/ontology#> .
+@prefix afn: <http://jena.apache.org/ARQ/function#> .
+@prefix list: <http://jena.apache.org/ARQ/list#> .
+@prefix dbo: <http://um-cds/ontologies/databaseontology/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ofn: <http://www.ontotext.com/sparql/functions/> .
+@prefix geoext: <http://rdf.useekm.com/ext#> .
+@prefix graphdb: <http://www.ontotext.com/config/graphdb#> .
+@prefix math: <http://www.w3.org/2005/xpath-functions/math> .
+@prefix omgeo: <http://www.ontotext.com/owlim/geo#> .
+@prefix db: <http://data.local/rdf/ontology/> .
+
+dbo:ColumnCell a owl:Class, owl:Class .
+
+dbo:table a owl:AnnotationProperty, owl:AnnotationProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell;
+  :range dbo:TableRow, dbo:TableRow .
+
+dbo:column a owl:AnnotationProperty, owl:AnnotationProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell .
+
+dbo:fk_refers_to a owl:ObjectProperty, owl:ObjectProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell;
+  :range dbo:PrimaryKey, dbo:PrimaryKey;
+  :label "foreign key refers to", "foreign key refers to" .
+
+dbo:PrimaryKey a owl:Class, owl:Class;
+  :subClassOf dbo:ColumnCell, dbo:ColumnCell .
+
+dbo:ForeignKey a owl:Class, owl:Class;
+  :subClassOf dbo:ColumnCell, dbo:ColumnCell .
+
+dbo:has_target_column a owl:AnnotationProperty, owl:AnnotationProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell .
+
+dbo:TableRow a owl:Class, owl:Class .
+
+dbo:has_value a owl:ObjectProperty, owl:ObjectProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell;
+  :range dbo:Cell, dbo:Cell .
+
+dbo:Cell a owl:Class, owl:Class .
+
+dbo:catalog a owl:AnnotationProperty, owl:AnnotationProperty;
+  :domain dbo:TableRow, dbo:TableRow .
+
+dbo:has_unit a owl:AnnotationProperty, owl:AnnotationProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell .
+
+dbo:schema a owl:AnnotationProperty, owl:AnnotationProperty;
+  :domain dbo:TableRow, dbo:TableRow .
+
+dbo:has_cell a owl:DatatypeProperty, owl:DatatypeProperty;
+  :domain dbo:ColumnCell, dbo:ColumnCell .
+
+dbo:has_column a owl:ObjectProperty, owl:ObjectProperty;
+  :domain dbo:TableRow, dbo:TableRow;
+  :range dbo:ColumnCell, dbo:ColumnCell .
+
+db:data_2.GenderPPM a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.GenderPPM";
+  dbo:table db:data_2;
+  dbo:column "GenderPPM" .
+
+db:data_2 a owl:Class;
+  :subClassOf dbo:TableRow;
+  :label "data_2";
+  dbo:table "data_2" .
+
+db:data_2.HADSFrightenedFeelingQ3Score a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.HADSFrightenedFeelingQ3Score";
+  dbo:table db:data_2;
+  dbo:column "HADSFrightenedFeelingQ3Score" .
+
+db:data_2.HADSWorryingThoughtsQ5Score a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.HADSWorryingThoughtsQ5Score";
+  dbo:table db:data_2;
+  dbo:column "HADSWorryingThoughtsQ5Score" .
+
+db:data_2.HADSFeelTenseQ1Score a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.HADSFeelTenseQ1Score";
+  dbo:table db:data_2;
+  dbo:column "HADSFeelTenseQ1Score" .
+
+db:data_2.DaysSinceDiagnosis a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.DaysSinceDiagnosis";
+  dbo:table db:data_2;
+  dbo:column "DaysSinceDiagnosis" .
+
+db:data_2.HADSFeelCheerfulQ6Score a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.HADSFeelCheerfulQ6Score";
+  dbo:table db:data_2;
+  dbo:column "HADSFeelCheerfulQ6Score" .
+
+db:data_2.PatientID a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  owl:equivalentClass "['Variable type: identifier', 'Variable description: Identifier', 'Variable comment: No comment provided']",
+    "['Variable type: identifier', 'Variable description: Identifier', 'Variable comment: No comment provided']";
+  :label "data_2.PatientID";
+  dbo:table db:data_2;
+  dbo:column "PatientID" .
+
+db:data_2.HADSEnjoySameThingsQ2Score a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.HADSEnjoySameThingsQ2Score";
+  dbo:table db:data_2;
+  dbo:column "HADSEnjoySameThingsQ2Score" .
+
+db:data_2.HADSLaughingOftenQ4Score a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_2.HADSLaughingOftenQ4Score";
+  dbo:table db:data_2;
+  dbo:column "HADSLaughingOftenQ4Score" .
+
+db:data_1.PatientID a owl:Class;
+  owl:equivalentClass "['Variable type: identifier', 'Variable description: Identifier', 'Variable comment: No comment provided']",
+    "['Variable type: identifier', 'Variable description: Identifier', 'Variable comment: No comment provided']";
+  :subClassOf dbo:ColumnCell;
+  :label "data_1.PatientID";
+  dbo:table db:data_1;
+  dbo:column "PatientID" .
+
+db:data_1.VitalStatus a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_1.VitalStatus";
+  dbo:table db:data_1;
+  dbo:column "VitalStatus" .
+
+db:data_1 a owl:Class;
+  :subClassOf dbo:TableRow;
+  :label "data_1";
+  dbo:table "data_1" .
+
+db:data_1.ICD03Morphology a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  owl:equivalentClass "['Variable type: standardised', 'Variable description: Tumour morphology icd o', 'Variable comment: No comment provided']";
+  :label "data_1.ICD03Morphology";
+  dbo:table db:data_1;
+  dbo:column "ICD03Morphology" .
+
+db:data_1.GenderAtDiagnosis a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_1.GenderAtDiagnosis";
+  dbo:table db:data_1;
+  dbo:column "GenderAtDiagnosis" .
+
+db:data_1.SurvivalDays a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_1.SurvivalDays";
+  dbo:table db:data_1;
+  dbo:column "SurvivalDays" .
+
+db:data_1.AgeAtDiagnosis a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_1.AgeAtDiagnosis";
+  dbo:table db:data_1;
+  dbo:column "AgeAtDiagnosis" .
+
+db:data_1.ICD03Topography a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  owl:equivalentClass "['Variable type: standardised', 'Variable description: Tumour topography or location icd o', 'Variable comment: No comment provided']";
+  :label "data_1.ICD03Topography";
+  dbo:table db:data_1;
+  dbo:column "ICD03Topography" .
+
+db:data_1.YearOfDiagnosis a owl:Class;
+  :subClassOf dbo:ColumnCell;
+  :label "data_1.YearOfDiagnosis";
+  dbo:table db:data_1;
+  dbo:column "YearOfDiagnosis" .
