@@ -21,7 +21,9 @@ create a Docker image of your algorithm.
 
 The easiest way to create a Docker image is to use the GitHub Actions pipeline to
 automatically build and push the Docker image. All that you need to do is push a
-commit to the ``main`` branch.
+git tag. The ``release.yaml`` workflow publishes the image as
+``ghcr.io/<owner>/<repository>-<branch>:<tag>``, where ``<branch>`` is the branch
+that contains the tagged commit (e.g. ``standard-coxph``).
 
 #### Manually
 
@@ -58,3 +60,27 @@ credentials. Check [this page](https://docs.docker.com/get-started/04_sharing_ap
 For more details on sharing images on Docker Hub. If you are using a different
 Docker registry, check the documentation of that registry and be sure that you
 have sufficient permissions.
+
+### Node configuration (algorithm_env)
+
+Privacy guards are tuned through node environment variables:
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `SAMPLE_SIZE_THRESHOLD` | int | 10 | Minimum rows and events (strictly greater). |
+| `COXPH_TIME_BIN_WIDTH` | float | (disabled) | Event-time bin width; when set, times are coarsened to `floor(t/w)*w`. |
+| `COXPH_MIN_RISK_SET_CHANGE` | int | 5 | Minimum risk-set change (`k`); consecutive shared aggregates differ by 0 or `>= k`. Set to `1` to disable tail censoring and the jump guard. |
+
+See `docs/coxph/Privacy.rst` for the privacy implications.
+
+### Output fields
+
+The `central` function returns, alongside the model table (a JSON object
+indexed by variable name), a `converged` (bool) and `n_iterations` (int)
+field, the likelihood-ratio test (`log_likelihood`, `log_likelihood_null`,
+`lr_statistic`, `lr_p_value`), `n_events`, `covariance`, the Breslow
+`baseline_cumulative_hazard` and `survival_curves` (with optional
+`covariate_profiles`), an aggregate `privacy_guards` summary of the active
+node guards, and `algorithm_version`. The Wald statistic is
+`Z = Coef / SE` and its p-value is `p = 2 * Phi(-|Z|)`. See
+`docs/coxph/Usage.rst` for the full output schema.
