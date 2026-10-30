@@ -15,10 +15,52 @@ import subprocess
 import docker
 import time
 import re
+import shutil
 
 import concurrent.futures
 
+from pathlib import Path
 from typing import Dict, Any, List, Tuple
+
+# The demo network this suite creates and tears down. Only this network's
+# own files are ever removed — never another network's, and never a
+# developer's own configuration.
+NETWORK_NAME = "algorithm-ci-test"
+
+
+def _remove_network_leftovers(network_name):
+    """Remove a demo network's own leftovers after a failed CLI removal.
+
+    ``v6 dev remove-demo-network`` can fail (or answer that the configuration
+    does not exist in the user folders) while leaving the network's own
+    entries behind in the vantage6 user folders; the next run then fails with
+    'Node configuration file already exists'. Only entries belonging to
+    ``network_name`` itself are removed.
+    """
+    config_root = Path.home() / ".config" / "vantage6"
+    data_root = Path.home() / ".local" / "share" / "vantage6"
+
+    # (parent directory, glob pattern) pairs; a pattern without wildcards
+    # matches exactly that entry.
+    targets = [
+        (config_root / "node", f"{network_name}_node_*.yaml"),
+        (config_root / "server", network_name),
+        (config_root / "dev", network_name),
+        (data_root / "node", f"{network_name}_node_*"),
+    ]
+
+    for parent, pattern in targets:
+        if not parent.is_dir():
+            continue
+        for path in sorted(parent.glob(pattern)):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                print(f"Removed leftover of network {network_name}: {path}")
+            except OSError as e:
+                print(f"Failed to remove leftover {path}: {e}")
 
 
 def cleanup_vantage6_network(
@@ -30,6 +72,7 @@ def cleanup_vantage6_network(
     try:
         # First, use CLI clean-up to gracefully stop the network
         def cli_cleanup():
+            remove_succeeded = False
             try:
                 print("Attempting graceful CLI cleanup...")
                 stop_result = subprocess.run(
@@ -53,9 +96,18 @@ def cleanup_vantage6_network(
 
                 if remove_result.returncode == 0:
                     print("CLI remove successful")
+                    remove_succeeded = True
+                else:
+                    print(f"CLI remove failed (exit code {remove_result.returncode})")
 
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
                 print(f"CLI cleanup failed: {e}")
+
+            if not remove_succeeded:
+                # The CLI removal failed; it can leave the network's own
+                # entries behind in the vantage6 user folders, which makes the
+                # next run fail with 'Node configuration file already exists'.
+                _remove_network_leftovers(NETWORK_NAME)
 
         # Try CLI clean-up first
         cli_cleanup()
@@ -127,7 +179,8 @@ def cleanup_vantage6_network(
         if containers_to_cleanup:
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(cleanup_container, cid) for cid in containers_to_cleanup]
-                results = [f.result() for f in concurrent.futures.as_completed(futures, timeout=60)]  # noqa: F841
+                for f in concurrent.futures.as_completed(futures, timeout=60):
+                    f.result()  # drain the cleanup results
 
         return True
 

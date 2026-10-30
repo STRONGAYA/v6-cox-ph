@@ -13,6 +13,12 @@ algorithm_env:
   COXPH_MIN_RISK_SET_CHANGE: 1
   COXPH_PRIVACY_LEVEL: minimal
   SAMPLE_SIZE_THRESHOLD: 5
+  # STRONG AYA: the RDF library replaces this term with a missing value.
+  MISSING_DATA_NOTATION: http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#C54031
+# STRONG AYA RDF tests: the disposable GraphDB of the rdf_store fixture,
+# linked into the algorithm network as "coxph-rdf-store".
+docker_services:
+  coxph-rdf-store: v6-coxph-rdf-test
 policies:
   allowed_algorithms:
     - ^hello-world$

@@ -6,11 +6,40 @@ Input arguments
 The input arguments for the central function consist of:
 
 - ``time_col`` (string): the name of the column containing the time data.
-- ``outcome_col`` (string): the name of the column containing the outcome data
-  (1 = event, 0 = censored).
-- ``expl_vars`` (list): the explanatory variables (predictors) of the model.
-  Each entry is either a plain column name (a numeric covariate) or a
-  single-entry mapping of a column name to a spec:
+  STRONG AYA times are numeric deltas (for example days since diagnosis,
+  ``ncit:C125201``); the node converts them to floats, so times that RDF
+  data delivers as text work, and a missing time (``ncit:C54031``) drops the
+  row.
+- ``outcome_col`` (string or object): the name of the column containing the
+  outcome data (1 = event, 0 = censored), or (STRONG AYA) an object that maps
+  the column name to its outcome codes, for data whose outcome is not coded
+  0/1. RDF data codes the outcome with ontology terms: the
+  ``survival_status`` variable of the STRONG AYA semantic map
+  (``ncit:C25717``) uses ``ncit:C37987`` (alive), ``ncit:C141463`` (presumed
+  alive), ``ncit:C99799`` (declared deceased), ``ncit:C99798`` (presumed
+  deceased) and ``ncit:C54031`` (missing or unspecified). The object lists
+  which codes mean an event and which mean censored, and optionally which
+  mean missing::
+
+      {"ncit:C25717": {"event": ["ncit:C99799", "ncit:C99798"],
+                       "censored": ["ncit:C37987", "ncit:C141463"],
+                       "missing": ["ncit:C54031"]}}
+
+  The object has exactly one key, the column name. ``event`` and
+  ``censored`` are required and non-empty; ``missing`` is optional. Whether
+  a presumed status counts is the researcher's decision and is made here.
+  Codes may be written as prefixed names (``ncit:...``) or as full IRIs;
+  numbers work too (``{"status": {"event": [2], "censored": [1]}}`` for an
+  outcome coded 1/2). A code may be listed under one key only. Rows with a
+  ``missing`` code are dropped like rows with a missing value, before the
+  sample-size thresholds. A code that the data holds but ``outcome_col``
+  does not list raises ``UserInputError`` (without naming the code) once the
+  node has passed its thresholds, so a mistyped code cannot silently drop
+  the censored rows. The result's provenance block echoes ``outcome_col``
+  with its codes.
+- ``expl_vars`` (list): the explanatory variables (predictors) of the
+  model. Each entry is either a plain column name (a numeric covariate) or
+  a single-entry mapping of a column name to a spec:
 
   - categorical: ``{"sex": {"reference": "M", "categories": {"M": ["M"],
     "F": ["F"]}}}`` gives one 0/1 model term per non-reference category,
@@ -20,27 +49,59 @@ The input arguments for the central function consist of:
     ``stage``.
 
   Codes are matched as numbers or text (``1``, ``"1"`` and ``1.0`` are the
-  same code); codes listed under ``missing``, and codes the spec does not
-  list, are treated as missing. The model terms — not the variable names —
-  index the result's ``model`` table and the order of ``covariance``.
+  same code; STRONG AYA compares them through the term key, so a prefixed
+  name matches its full IRI), and codes listed under ``missing``, or codes
+  the spec does not list, are treated as missing. A plain name must be
+  numeric: the node converts it to floats, so numbers that RDF data
+  delivers as text work (for example ``ncit:C156420``, age at diagnosis),
+  and a missing value (``ncit:C54031``) drops the row. A plain name that
+  holds terms, such as biological sex (``ncit:C28421``), is not a numeric
+  covariate: give it a categorical or scored spec instead. A plain name
+  that holds some values that are not numbers raises ``UserInputError``
+  (without naming the values) once the node has passed its thresholds; when
+  no value is a number at all, every row is dropped and the run is refused
+  by the sample-size threshold instead. The model terms — not the variable
+  names — index the result's ``model`` table and the order of
+  ``covariance``.
 - ``organization_ids`` (list): a list of organisation IDs that participate in
   the collaboration and you wish to run the algorithm on. When ``None`` all
-  organisations are used.
+  organisations are used. In a STRONG AYA collaboration, select the **data**
+  organisations explicitly: the collaboration also contains the data-less
+  aggregator organisation, whose node serves no database — a run that
+  includes it fails closed (the error names the organisations that did not
+  return a result).
 - ``covariate_profiles`` (list of objects, optional): covariate profiles for
   survival curves. Each entry maps explanatory variable names to values: a
   number for a plain or scored variable, a category label for a categorical
   variable. Variables left out are taken at the pooled event-case mean. An
   entry naming an unknown variable or an unknown label raises
   ``UserInputError``.
+- ``variables_to_stratify`` (object, optional): STRONG AYA stratification.
+  A mapping of variable names to lists of values to keep (``{"sex":
+  ["F"]}``) or ``{'start', 'end'}`` ranges (``{"age": {"start": 40, "end":
+  60}}``). The run analyses only the rows inside the requested
+  subpopulation; the sample-size thresholds apply to the stratified rows,
+  so a stratification that isolates a handful of records fails closed with
+  ``PrivacyThresholdViolation``. Variable names must be identifier-shaped
+  or prefixed names, so RDF variables can be named by their class in the
+  STRONG AYA semantic map (``{"ncit:C28421": ["ncit:C16576"]}`` selects
+  females, ``{"ncit:C156420": {"start": 18, "end": 25}}`` an age at
+  diagnosis of 18 to 25). Values may be prefixed names or full IRIs, as in
+  ``outcome_col``, and numbers that RDF data delivers as text are compared
+  as numbers. A variable that is not a column of the node's data raises
+  ``UserInputError``. The applied mapping is echoed in the result under
+  ``variables_to_stratify``.
 
 Input rules
 ------------
 
 Every node validates its data before sharing anything:
 
-- ``time_col`` must exist and be numeric, finite and non-negative.
+- ``time_col`` must exist and hold numbers (as numbers or as text) that are
+  finite and non-negative. A value that is not a number fails the run with
+  ``UserInputError`` once the node has passed its thresholds.
 - ``outcome_col`` must exist and be binary: only 0 and 1 (booleans are
-  allowed).
+  allowed), or every code must be listed in ``outcome_col``.
 - Every ``expl_var`` source column must exist; categorical and scored
   entries are encoded into numeric model-term columns on the node before
   validation, and every model term must be numeric. Rows with missing
@@ -51,7 +112,49 @@ A column that violates these rules raises ``UserInputError`` and stops the
 whole analysis; there is no silent fallback. Projects whose data uses other
 codings (for example an outcome coded 1/2, or string labels) must recode
 **before** calling the algorithm — recoding belongs in the project layer,
-not in the vanilla algorithm.
+not in the vanilla algorithm. In this STRONG AYA layer, the outcome codes in
+``outcome_col`` are that recoding for the outcome column.
+
+Schema codes on STRONG AYA stations
+-----------------------------------
+
+On a STRONG AYA (RDF) station only schema codes are allowed: every name in
+the request must be the class of a variable of the STRONG AYA semantic map
+(the schema the node's data was annotated with), and every code must be one
+of that variable's codes. The node checks the request against the schema
+before anything is computed — before any data is read and before every
+threshold — and refuses it with ``UserInputError`` naming the variable and
+the rule broken. A CSV node (no ``endpoint`` column) gets no schema check
+and keeps the plain behaviour described above.
+
+The rules:
+
+- ``time_col`` is a ``continuous`` variable (``ncit:C125201``, overall
+  survival in days).
+- ``outcome_col`` is a ``categorical`` variable, given in the mapping form
+  (``ncit:C25717``, survival status); every listed code is one of its codes.
+- a ``continuous`` explanatory variable is a plain name (``ncit:C156420``,
+  age at diagnosis); a ``categorical`` variable must be given in the
+  ``categories`` or ``scores`` form — a plain name fails, because the
+  algorithm never guesses the categories or the reference — and every
+  listed code is one of its codes.
+- ``variables_to_stratify`` holds a value list only for a categorical
+  variable, with its own codes, and a range only for a continuous variable.
+- the missing term ``ncit:C54031`` (missing or unspecified) is one of every
+  variable's codes, so it may always be listed under ``missing``.
+- the four ``standardised`` variables (the ICD-10 and ICD-O topography and
+  morphology variables, for example ``ncit:C4741``) follow every rule of a
+  categorical variable, with one exception: their codes are taken as given,
+  because the schema lists none for them — the ``categories`` form groups
+  ICD codes into categories.
+
+Codes compare through the term key, so a full IRI matches its prefixed
+name. The schema itself comes from the RDF library
+(``vantage6_strongaya_rdf``); which version a node checks against is a node
+setting (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``, ``SCHEMA_TAG`` — see
+`Node configuration (algorithm_env)`_ below), so each station checks
+against the schema its own data was annotated with. Without the settings
+the schema bundled with the library is used.
 
 Categorical and scored covariates
 ---------------------------------
@@ -79,6 +182,40 @@ and ``scale``, and the keys of the partials' ``sum``/``sum_squares``. A
 covariate profile names a categorical variable by one of its labels
 (``{"sex": "F"}``); central expands the label to the 1/0 values of that
 variable's terms before computing the curves.
+
+On STRONG AYA stations the variables are named by their class in the
+semantic map and coded with ontology terms, so the codes of a categorical
+or scored spec are terms as well. Codes compare through the term key: a
+prefixed name matches its full IRI, and ``ncit:C54031`` (missing or
+unspecified) is always missing for covariates. Biological sex
+(``ncit:C28421``) and the clinical T stage (``ncit:C25728``) look like:
+
+.. code-block:: python
+
+  expl_vars = [
+      "ncit:C156420",  # age at diagnosis, numeric as text
+      {"ncit:C28421": {  # biological sex: one 0/1 column per non-reference category
+          "reference": "male",
+          "categories": {"male": ["ncit:C20197"], "female": ["ncit:C16576"]},
+      }},
+      {"ncit:C25728": {  # clinical T stage: one numeric column
+          "scores": {"ncit:C48719": 0, "ncit:C48720": 1, "ncit:C48724": 2,
+                     "ncit:C48728": 3, "ncit:C48732": 4},
+          "missing": ["ncit:C48737"],  # Tx as missing
+      }},
+  ]
+
+The model terms are ``["ncit:C156420", "ncit:C28421[female]",
+"ncit:C25728"]``. A spec that lists the same code once as a prefixed name
+and once as its full IRI is refused: the two spellings are the same code.
+
+Stratifying on a categorical covariate empties the categories outside the
+stratum: the encoder runs after the stratification filter, so a run
+stratified to females holds no male rows, and the male category — the
+reference included — fails the category threshold with
+``PrivacyThresholdViolation``. Stratify on a categorical variable only
+when every category of the covariate you keep is large enough inside the
+stratum, or stratify on a different variable.
 
 Output fields
 -------------
@@ -181,7 +318,7 @@ Node configuration (algorithm_env)
 ----------------------------------
 
 Privacy guards are configured through node environment variables
-(``algorithm_env``):
+(``algorithm_env``); the STRONG AYA schema settings are listed as well:
 
 =================================== =========== ============ ========================
 Variable                            Type        Default      Description
@@ -221,6 +358,14 @@ Variable                            Type        Default      Description
                                                              held-event fraction (read
                                                              centrally). An empty value
                                                              disables the abort.
+``USE_REMOTE_SCHEMA``               string      ``false``    Fetch the STRONG AYA
+                                                             schema from a remote
+                                                             release instead of the
+                                                             bundled one.
+``SCHEMA_URL``                      string      (bundled)    Custom URL to fetch the
+                                                             schema from.
+``SCHEMA_TAG``                      string      (latest)     Release tag to fetch
+                                                             the schema from.
 =================================== =========== ============ ========================
 
 See ``docs/coxph/Privacy.rst`` for the privacy implications of these

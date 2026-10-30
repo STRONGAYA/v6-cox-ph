@@ -6,10 +6,25 @@ so they can be unit-tested without vantage6. All partial functions run the
 shared ``prepare_node_data`` step, in this order::
 
     ensure_spawned_by_central -> load_privacy_settings
-    -> (encode_covariates, validate_expl_vars, where covariates are used)
-    -> drop_incomplete_rows -> validate_survival_columns
-    -> select_rows (hook) -> check_sample_size
-    -> check_category_sizes (only when the threshold was met)
+    -> schema check (STRONG AYA, RDF nodes only: only when the node
+    carries an ``endpoint`` column) -> RDF collect (STRONG AYA, only when
+    the node carries an ``endpoint`` column)
+    -> ``mask_unnecessary_variables`` (STRONG AYA)
+    -> ``coerce_time_column`` (STRONG AYA)
+    -> ``coerce_covariates`` (STRONG AYA, plain names only)
+    -> ``recode_outcome`` (STRONG AYA, when ``outcome_codes`` are given)
+    -> ``validate_stratification_spec`` + ``normalise_stratification``
+    + ``apply_data_stratification`` (STRONG AYA, when
+    ``variables_to_stratify`` is given)
+    -> ``encode_covariates`` (STRONG AYA key, when covariates are given)
+    -> ``validate_expl_vars`` (when covariates are given)
+    -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
+    -> ``select_rows`` (hook) -> ``check_sample_size``
+    -> ``check_category_sizes`` (only when the threshold was met)
+    -> ``apply_sample_size_threshold`` (STRONG AYA, when the native
+    threshold passed) -> the checks after the thresholds (a time that is
+    not a number, a plain covariate that is not a number, an unlisted
+    outcome code, an unlisted covariate code)
     -> (validate_iteration_input, perform_iteration only)
     -> prepare_time_column -> (function-specific work; perform_iteration
     builds its risk sets with guarded_risk_set_aggregates)
@@ -91,6 +106,9 @@ The held-event fraction abort cap is loaded centrally too
 
 from __future__ import annotations
 
+import os
+import threading
+from pathlib import Path
 from typing import Callable, Optional, TypedDict
 
 import numpy as np
@@ -105,8 +123,22 @@ from vantage6.algorithm.tools.exceptions import (
 )
 
 from .coxph_logic import round_sig
-from .miscellaneous import ResolvedCovariates, build_code_map, code_key, format_validation_error
-from vantage6.algorithm.tools.util import info, warn
+from .miscellaneous import (
+    MISSING_TERM,
+    ResolvedCovariates,
+    build_code_map,
+    code_key,
+    covariate_key,
+    format_validation_error,
+    parse_outcome_col,
+    term_key,
+    validate_stratification_spec,
+)
+from vantage6_strongaya_general.miscellaneous import apply_data_stratification, safe_log
+from vantage6_strongaya_general.privacy_measures import (
+    apply_sample_size_threshold,
+    mask_unnecessary_variables,
+)
 
 # Environment variable names
 ENV_SAMPLE_SIZE_THRESHOLD = "SAMPLE_SIZE_THRESHOLD"
@@ -121,6 +153,21 @@ ENV_MAX_COVARIATES = "COXPH_MAX_COVARIATES"
 ENV_MAX_GRID_POINTS = "COXPH_MAX_GRID_POINTS"
 ENV_CURVE_TIME_SIG_FIGS = "COXPH_CURVE_TIME_SIG_FIGS"
 ENV_MAX_HELD_EVENT_FRACTION = "COXPH_MAX_HELD_EVENT_FRACTION"
+ENV_RDF_COLLECT_TIMEOUT = "COXPH_RDF_COLLECT_TIMEOUT"
+# The STRONG AYA schema settings, read the way collect_sparql_data reads
+# them: which schema a node's data was annotated with.
+ENV_USE_REMOTE_SCHEMA = "USE_REMOTE_SCHEMA"
+ENV_SCHEMA_URL = "SCHEMA_URL"
+ENV_SCHEMA_TAG = "SCHEMA_TAG"
+
+# The run-local cache file for the collected RDF frame (STRONG AYA
+# query-once convention): the first partial writes it into the run's
+# temporary volume, later partials read it. CSV, not parquet: the
+# reference STRONG AYA algorithms carry no parquet engine, and adding one
+# (pyarrow, ~100 MB installed) to the image for a path that is dormant on
+# CSV deployments is not proportionate; a small run-local table needs no
+# binary format.
+RDF_CACHE_FILENAME = "collected_rdf_data.csv"
 
 # Defaults
 DEFAULT_SAMPLE_SIZE_THRESHOLD = 10
@@ -130,6 +177,7 @@ DEFAULT_MAX_COVARIATES = 20
 DEFAULT_MAX_GRID_POINTS = 1000
 DEFAULT_CURVE_TIME_SIG_FIGS = 6
 DEFAULT_MAX_HELD_EVENT_FRACTION = 0.5
+DEFAULT_RDF_COLLECT_TIMEOUT = 60.0
 
 # The sample-size check admits a node only when it has at least this many
 # times the risk-set size floor in rows (on top of the reconstruction bound
@@ -423,6 +471,359 @@ def load_curve_time_sig_figs() -> Optional[int]:
     )
 
 
+def load_rdf_collect_timeout() -> float:
+    """Load the RDF collect timeout from the environment (node side).
+
+    Uses ``get_env_var`` like ``load_privacy_settings``. The STRONG AYA
+    collect step (``collect_sparql_data``) issues its SPARQL query
+    without a timeout; this bounds it so an unreachable or hanging
+    endpoint fails the run instead of blocking the partial.
+
+    Returns
+    -------
+    float
+        The timeout in seconds (default 60).
+
+    Raises
+    ------
+    UserInputError
+        If the value is not a positive number.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+
+    raw = get_env_var(ENV_RDF_COLLECT_TIMEOUT, default=None)
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_RDF_COLLECT_TIMEOUT
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        raise UserInputError(f"{ENV_RDF_COLLECT_TIMEOUT} must be a positive number of seconds.") from None
+    if not timeout > 0:
+        raise UserInputError(f"{ENV_RDF_COLLECT_TIMEOUT} must be a positive number of seconds.")
+    return timeout
+
+
+def load_request_schema() -> dict:
+    """Load the STRONG AYA schema the node's data was annotated with.
+
+    Reads the node's schema settings the way ``collect_sparql_data`` does
+    (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``, ``SCHEMA_TAG``) and calls the
+    RDF library's ``load_schema``; without the settings it falls back to
+    the schema bundled with the library. The import is function-local:
+    only the partials may import the RDF library, never ``central``.
+
+    Returns
+    -------
+    dict
+        The schema: ``schema['schema']['variables']`` is keyed by a slug,
+        and each variable carries its ``class`` (the code a request uses),
+        its ``dataType`` and its ``valueMapping.terms``.
+
+    Raises
+    ------
+    AlgorithmError
+        When no schema can be loaded: the run fails closed rather than
+        checking the request against no schema. The library's error text
+        (a URL, a tag) is not echoed.
+    """
+    from vantage6.algorithm.tools.util import get_env_var
+    from vantage6_strongaya_rdf.schema_loader import load_schema
+
+    use_remote = get_env_var(ENV_USE_REMOTE_SCHEMA, "false").lower() == "true"
+    schema_url = get_env_var(ENV_SCHEMA_URL, None)
+    schema_tag = get_env_var(ENV_SCHEMA_TAG, None)
+    try:
+        return load_schema(use_remote=use_remote, schema_url=schema_url, schema_tag=schema_tag, local_fallback=True)
+    except Exception:
+        raise AlgorithmError("The STRONG AYA schema could not be loaded; refusing to proceed.") from None
+
+
+def _schema_variable_index(schema: dict) -> dict:
+    """Index the schema's variables by the term key of their class.
+
+    Each entry maps the term key of a variable's ``class`` (the code a
+    request uses, for example ``ncit:C28421``) to its ``dataType`` and the
+    term keys of its codes (the ``targetClass`` values of its
+    ``valueMapping.terms``). The missing term is one of every variable's
+    codes, so it is added to each.
+    """
+    variables: dict = {}
+    if not isinstance(schema, dict):
+        return variables
+    inner = schema.get("schema")
+    if not isinstance(inner, dict):
+        return variables
+    declared = inner.get("variables")
+    if not isinstance(declared, dict):
+        return variables
+    for variable in declared.values():
+        if not isinstance(variable, dict):
+            continue
+        class_code = variable.get("class")
+        data_type = variable.get("dataType")
+        if not isinstance(class_code, str) or not isinstance(data_type, str):
+            continue
+        codes = set()
+        value_mapping = variable.get("valueMapping")
+        if isinstance(value_mapping, dict):
+            terms = value_mapping.get("terms")
+            if isinstance(terms, dict):
+                for term in terms.values():
+                    if isinstance(term, dict):
+                        key = term_key(term.get("targetClass"))
+                        if key is not None:
+                            codes.add(key)
+        codes.add(term_key(MISSING_TERM))
+        variables[term_key(class_code)] = (data_type, codes)
+    return variables
+
+
+def check_request_against_schema(
+    schema: dict,
+    time_col: str,
+    outcome_col: Optional[str],
+    outcome_codes: Optional[dict],
+    covariates: Optional[ResolvedCovariates],
+    variables_to_stratify: Optional[dict],
+) -> None:
+    """Check a request against the STRONG AYA schema (RDF nodes only).
+
+    On a STRONG AYA station only schema codes are allowed: every name in
+    the request must be the class of a schema variable, and every code
+    must be one of that variable's codes. Codes compare through the term
+    key, so a full IRI matches its prefixed name. The check reads the
+    request and the schema only, never patient data, so it may fail
+    before every threshold; no endpoint is queried and nothing is
+    returned. Each failure names the variable and the rule broken, never
+    data.
+
+    The rules:
+
+    - ``time_col`` is a ``continuous`` variable.
+    - ``outcome_col`` is a ``categorical`` variable, given in the mapping
+      form; every listed code is one of its codes.
+    - a ``continuous`` explanatory variable is a plain name; a
+      ``categorical`` or ``standardised`` one must be in the ``categories``
+      or ``scores`` form (the algorithm never guesses the categories or
+      the reference), and every listed code is one of its codes. A
+      ``standardised`` variable's codes are taken as given: the schema
+      lists none for it (only the missing term), so only their format is
+      checked, by the spec validation that ran before.
+    - ``variables_to_stratify`` holds a value list only for a categorical
+      (or standardised) variable, with its own codes, and a range only for
+      a ``continuous`` variable.
+    - the missing term (``ncit:C54031``) is one of every variable's codes,
+      so it may always be listed under ``missing``.
+
+    Raises
+    ------
+    UserInputError
+        Naming the variable and the rule broken.
+    """
+    variables = _schema_variable_index(schema)
+
+    def _lookup(name: str, what: str) -> tuple:
+        key = term_key(name)
+        if key is None or key not in variables:
+            raise UserInputError(
+                f"{what} '{name}' is not a variable of the STRONG AYA schema; on a STRONG AYA "
+                f"station every name must be the class of a schema variable"
+            )
+        return variables[key]
+
+    def _require_code(code, where: str, codes: set) -> None:
+        key = term_key(code)
+        if key is not None and key not in codes:
+            raise UserInputError(
+                f"{where} lists the code '{code}', which is not one of its codes in the STRONG AYA schema"
+            )
+
+    data_type, _ = _lookup(time_col, "Time column")
+    if data_type != "continuous":
+        raise UserInputError(
+            f"Time column '{time_col}' must be a continuous variable of the STRONG AYA "
+            f"schema; '{time_col}' is {data_type}"
+        )
+
+    if outcome_col is not None:
+        data_type, codes = _lookup(outcome_col, "Outcome column")
+        if data_type != "categorical":
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' must be a categorical variable of the "
+                f"STRONG AYA schema; '{outcome_col}' is {data_type}"
+            )
+        if outcome_codes is None:
+            raise UserInputError(
+                f"Outcome column '{outcome_col}' must be given in the mapping form on a "
+                f"STRONG AYA station (its event, censored and missing codes)"
+            )
+        for key, listed in outcome_codes.items():
+            for code in listed:
+                _require_code(code, f"Outcome column '{outcome_col}' under '{key}'", codes)
+
+    if covariates is not None:
+        for name in covariates.plain:
+            data_type, _ = _lookup(name, "Explanatory variable")
+            if data_type == "categorical":
+                raise UserInputError(f"Explanatory variable '{name}' is categorical; give its categories and reference")
+            if data_type == "standardised":
+                raise UserInputError(
+                    f"Explanatory variable '{name}' is standardised; give its categories and reference"
+                )
+            if data_type != "continuous":
+                raise UserInputError(
+                    f"Explanatory variable '{name}' is not a continuous variable; "
+                    f"a plain covariate must be continuous"
+                )
+
+        def _check_spec_entry(entry, listed_codes: list) -> None:
+            data_type, codes = _lookup(entry.name, "Explanatory variable")
+            if data_type == "continuous":
+                raise UserInputError(
+                    f"Explanatory variable '{entry.name}' is a continuous variable; give it as a plain name"
+                )
+            if data_type not in ("categorical", "standardised"):
+                raise UserInputError(
+                    f"Explanatory variable '{entry.name}' is {data_type}; a categorical or "
+                    f"scored spec is only allowed for a categorical variable"
+                )
+            if data_type == "categorical":
+                # A standardised variable's codes are taken as given: the
+                # schema lists none for it (only the missing term).
+                for code in [*listed_codes, *entry.missing]:
+                    _require_code(code, f"Explanatory variable '{entry.name}'", codes)
+
+        for cat_entry in covariates.categorical:
+            _check_spec_entry(
+                cat_entry, [code for label_codes in cat_entry.categories.values() for code in label_codes]
+            )
+        for scored_entry in covariates.scored:
+            _check_spec_entry(scored_entry, list(scored_entry.scores))
+
+    if variables_to_stratify is not None:
+        for name, selection in variables_to_stratify.items():
+            data_type, codes = _lookup(name, "Stratification variable")
+            if isinstance(selection, dict):
+                if data_type != "continuous":
+                    raise UserInputError(
+                        f"Stratification variable '{name}' is {data_type}; a range is only "
+                        f"allowed for a continuous variable"
+                    )
+            else:
+                if data_type not in ("categorical", "standardised"):
+                    raise UserInputError(
+                        f"Stratification variable '{name}' is {data_type}; a value list is "
+                        f"only allowed for a categorical variable"
+                    )
+                if data_type == "categorical":
+                    for value in selection:
+                        _require_code(value, f"Stratification variable '{name}'", codes)
+
+
+def collect_rdf_data_bounded(df: pd.DataFrame, variables_to_analyse: list) -> pd.DataFrame:
+    """Collect RDF data with a bounded timeout (STRONG AYA).
+
+    ``collect_sparql_data`` runs without a timeout of its own; an
+    unreachable or hanging endpoint would otherwise block the partial
+    until the container is killed. The collect runs in a daemon thread;
+    on timeout the run fails with an ``AlgorithmError`` naming the
+    configured timeout, never the endpoint internals.
+    """
+    from vantage6_strongaya_rdf import collect_sparql_data
+
+    timeout = load_rdf_collect_timeout()
+    endpoint = df["endpoint"].iloc[0]
+    outcome: dict = {}
+
+    def _collect():
+        try:
+            outcome["df"] = collect_sparql_data(variables_to_analyse, endpoint=endpoint)
+        except Exception as e:  # surfaced through the caller's error handling
+            outcome["error"] = e
+
+    worker = threading.Thread(target=_collect, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise AlgorithmError(
+            f"RDF data collection did not finish within the configured timeout "
+            f"({timeout:.0f}s, {ENV_RDF_COLLECT_TIMEOUT}); refusing to proceed."
+        )
+    if "error" in outcome:
+        error = outcome["error"]
+        if isinstance(error, UserInputError):
+            raise error
+        # The library wraps endpoint errors in an AlgorithmError whose
+        # message embeds the underlying error text (endpoint host, URL,
+        # connection details). The container log reaches the researcher,
+        # so the wrapper surfaces only the failure stage, never the
+        # endpoint internals.
+        raise AlgorithmError("RDF data collection failed; refusing to proceed.") from None
+    return outcome["df"]
+
+
+def _rdf_cache_path() -> Path:
+    """The run-local cache path for the collected RDF frame."""
+    from vantage6.algorithm.tools.util import get_env_var
+
+    folder = get_env_var("TEMPORARY_FOLDER", default=None)
+    if folder is None or str(folder).strip() == "":
+        raise UserInputError("TEMPORARY_FOLDER is not set; the RDF data path needs the run's temporary volume.")
+    return Path(folder) / RDF_CACHE_FILENAME
+
+
+def collect_or_load_rdf(variables_to_analyse: list, df: pd.DataFrame) -> pd.DataFrame:
+    """Collect RDF data once per run; later partials read the cache.
+
+    STRONG AYA query-once convention (strong-aya-algorithm §2): the first
+    partial queries the endpoint and caches the collected frame in the
+    run's temporary volume; later partials read the cache, so the endpoint
+    is queried exactly once per run and every partial sees the same
+    snapshot (the two-queries-per-run row-set-consistency hazard is
+    closed). Central dispatches ``compute_summed_z`` first and waits for
+    it before dispatching the iterations, so there are no concurrent
+    writers, and the cache is deliberately not deleted after a read —
+    every Newton iteration reads it; vantage6 removes the per-run volume.
+
+    A present but invalid or unreadable cache fails closed rather than
+    silently re-querying a changed endpoint. The cache is written
+    atomically (a ``*.tmp`` sibling, ``os.replace``) so a crashed write
+    never leaves a half-file. The CSV path (no ``endpoint`` column)
+    never touches the cache.
+
+    This is a correctness/performance fix (row-set consistency + endpoint
+    load), not a privacy mitigation; the cache is a plaintext-at-rest
+    surface of the SA-11 class, mitigated by the validation before use,
+    the per-partial masking after reading, and the run-scoped volume.
+    """
+    cache_path = _rdf_cache_path()
+    if cache_path.exists():
+        try:
+            cached = pd.read_csv(cache_path)
+        except Exception:
+            raise AlgorithmError("Cached RDF data could not be read; refusing to proceed.") from None
+        if not isinstance(cached, pd.DataFrame) or cached.empty:
+            raise AlgorithmError("Cached RDF data is not a usable table; refusing to proceed.")
+        missing = [name for name in variables_to_analyse if name not in cached.columns]
+        if missing:
+            raise AlgorithmError(f"Cached RDF data is missing variables {missing}; refusing to proceed.")
+        return cached
+    collected = collect_rdf_data_bounded(df, variables_to_analyse)
+    tmp_path = cache_path.with_suffix(".tmp")
+    try:
+        collected.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, cache_path)
+    except Exception:
+        # A failed write must not leave a half-file behind; the cache is
+        # absent (not corrupt), so the next partial re-queries.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        safe_log("warn", "Could not write the RDF data cache; later partials will re-query.")
+    return collected
+
+
 def load_max_held_event_fraction() -> Optional[float]:
     """Load the central abort cap on the held-event fraction.
 
@@ -482,7 +883,7 @@ def ensure_spawned_by_central(client) -> None:
     from vantage6.algorithm.tools.mock_client import MockAlgorithmClient
 
     if isinstance(client, MockAlgorithmClient):
-        info("Skipping parent-task guard: mock client detected.")
+        safe_log("info", "Skipping parent-task guard: mock client detected.")
         return
 
     token = getattr(client, "_access_token", None)
@@ -515,7 +916,7 @@ def ensure_spawned_by_central(client) -> None:
             "Partial functions may only be invoked as sub-tasks of the "
             "'central' function. Direct invocation is not permitted."
         )
-    info("Parent-task guard passed: task has a parent.")
+    safe_log("info", "Parent-task guard passed: task has a parent.")
 
 
 def select_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -705,17 +1106,35 @@ def prepare_node_data(
     covariates: Optional[ResolvedCovariates],
     *,
     need_outcome: bool,
+    variables_to_stratify: Optional[dict] = None,
+    outcome_codes: Optional[dict] = None,
 ) -> tuple[pd.DataFrame, PrivacySettings, bool]:
     """Run the shared node-side guard sequence once.
 
     Order (do not reorder or skip):
 
         ``ensure_spawned_by_central`` -> ``load_privacy_settings``
-        -> ``encode_covariates`` (when covariates are given)
+        -> schema check (STRONG AYA, RDF nodes only: only when the node
+        carries an ``endpoint`` column) -> RDF collect (STRONG AYA, only
+        when the node carries an ``endpoint`` column)
+        -> ``mask_unnecessary_variables`` (STRONG AYA)
+        -> ``coerce_time_column`` (STRONG AYA)
+        -> ``coerce_covariates`` (STRONG AYA, plain names only, when
+        covariates are given)
+        -> ``recode_outcome`` (STRONG AYA, when ``outcome_codes`` are
+        given)
+        -> ``validate_stratification_spec`` + ``normalise_stratification``
+        + ``apply_data_stratification`` (STRONG AYA, when
+        ``variables_to_stratify`` is given)
+        -> ``encode_covariates`` (STRONG AYA key, when covariates are given)
         -> ``validate_expl_vars`` (when covariates are given)
         -> ``drop_incomplete_rows`` -> ``validate_survival_columns``
         -> ``select_rows`` (hook) -> ``check_sample_size``
         -> ``check_category_sizes`` (only when the threshold was met)
+        -> ``apply_sample_size_threshold`` (STRONG AYA, when the native
+        threshold passed) -> the checks after the thresholds (a time that
+        is not a number, a plain covariate that is not a number, an
+        unlisted outcome code, an unlisted covariate code)
 
     Every partial calls this so that all aggregates central combines come
     from the same row set on each node. The threshold failure behaviour
@@ -739,18 +1158,112 @@ def prepare_node_data(
     need_outcome : bool
         Whether the sample-size threshold also counts events (rows and
         events must both exceed the threshold).
+    variables_to_stratify : dict | None
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). The rows outside the requested
+        subpopulation are removed here, after masking (the stratification
+        variables must survive it) and before every threshold, so they
+        count against the thresholds like any other removed rows.
+    outcome_codes : dict | None
+        STRONG AYA outcome codes from ``outcome_col`` (the ``event``,
+        ``censored`` and optionally ``missing`` codes), already validated by
+        ``resolve_outcome_col``. The outcome column is recoded to 1, 0 and
+        NaN after masking; rows with a missing or unlisted code are dropped
+        with the other incomplete rows, before every threshold. An unlisted
+        code fails the run, but only once the thresholds passed.
 
     Returns
     -------
     tuple[pd.DataFrame, PrivacySettings, bool]
         The prepared frame, the loaded privacy settings, and whether the
         sample-size threshold was met.
+
+    Raises
+    ------
+    UserInputError
+        When the request names something other than a schema code on an
+        RDF node (the schema check), or when the time column or a plain
+        explanatory variable holds a value that is not a number,
+        ``outcome_codes`` do not list an outcome code the node's data
+        holds, or a categorical or scored covariate holds a code
+        ``expl_vars`` does not list (all raised only when the thresholds
+        passed).
     """
     ensure_spawned_by_central(client)
     settings = load_privacy_settings()
 
+    if "endpoint" in df.columns:
+        # STRONG AYA: on an RDF node only schema codes are allowed. The
+        # request is checked against the schema the node's data was
+        # annotated with, before anything is computed: the check reads the
+        # request and the schema only, never patient data, so it may fail
+        # before every threshold, and no endpoint is queried.
+        check_request_against_schema(
+            load_request_schema(), time_col, outcome_col, outcome_codes, covariates, variables_to_stratify
+        )
+
+    # STRONG AYA: collect RDF data when the node carries an endpoint column,
+    # then drop every column the analysis does not use (endpoint included).
+    variables_to_analyse = [time_col]
+    if outcome_col is not None:
+        variables_to_analyse.append(outcome_col)
     if covariates is not None:
-        df = encode_covariates(df, covariates)
+        variables_to_analyse.extend(covariates.columns)
+    if variables_to_stratify is not None:
+        variables_to_analyse.extend(variables_to_stratify.keys())
+    # A covariate may also be a stratification variable; name it once, or
+    # the RDF collect queries it twice and its merge renames both copies.
+    variables_to_analyse = list(dict.fromkeys(variables_to_analyse))
+    if "endpoint" in df.columns:
+        # STRONG AYA: query the endpoint once per run — the first partial
+        # collects and caches the frame in the run's temporary volume,
+        # later partials read the cache (collect_or_load_rdf). The collect
+        # itself is bounded (COXPH_RDF_COLLECT_TIMEOUT) so a hanging
+        # endpoint fails the run instead of blocking the partial.
+        df = collect_or_load_rdf(variables_to_analyse, df)
+    df = mask_unnecessary_variables(df, variables_to_analyse)
+
+    # STRONG AYA: times are numeric deltas, which RDF data delivers as text
+    # (and a missing time as the missing term); convert them to floats.
+    df, _invalid_times = coerce_time_column(df, time_col)
+
+    if covariates is not None:
+        # STRONG AYA: RDF data delivers numeric covariates as text as well;
+        # only the plain names are converted — a categorical or scored
+        # covariate is coded with terms, which encode_covariates maps.
+        df, _invalid_covariates = coerce_covariates(df, covariates.plain)
+
+    if outcome_codes is not None and outcome_col is not None:
+        # STRONG AYA: RDF data codes the outcome with ontology terms (for
+        # example ncit:C37987 for alive); outcome_col lists which codes mean
+        # event, censored and missing.
+        df, _unmapped_outcome = recode_outcome(df, outcome_col, outcome_codes)
+
+    if variables_to_stratify is not None:
+        # STRONG AYA: stratification selects the subpopulation this run
+        # analyses. The spec is re-validated here (defence in depth: it
+        # arrives over the wire from central) and the stratification
+        # variables must exist — the library filter would silently keep
+        # the whole frame for a missing variable, which would fit the
+        # model on the wrong rows. The filter runs before every
+        # threshold, so the rows it removes count against them. RDF terms
+        # and numeric text are first brought into the form the request uses.
+        try:
+            validate_stratification_spec(variables_to_stratify)
+        except ValueError as e:
+            raise UserInputError(f"Invalid variables_to_stratify: {e}") from None
+        missing = [name for name in variables_to_stratify if name not in df.columns]
+        if missing:
+            raise UserInputError(f"Stratification variables not found in data columns: {missing}.")
+        df, stratification = normalise_stratification(df, variables_to_stratify)
+        df = apply_data_stratification(df, stratification)
+
+    if covariates is not None:
+        # The encoder keeps the source column the stratification filter
+        # uses, so encoding runs after stratification. Codes compare through
+        # the STRONG AYA key: a prefixed name matches its full IRI, and the
+        # missing term is missing.
+        df = encode_covariates(df, covariates, key=covariate_key)
         validate_expl_vars(df, covariates, time_col, outcome_col)
 
     cols = [time_col]
@@ -772,7 +1285,193 @@ def prepare_node_data(
         # was met: a node below it is refused for that reason alone.
         check_category_sizes(df, outcome, covariates, settings)
 
+        # STRONG AYA: an additional threshold on top of the native ones.
+        # Masks variables with too few observations and raises
+        # PrivacyThresholdViolation when the node as a whole is too small;
+        # when the native threshold already failed, the caller raises and
+        # this step must not double-raise.
+        df = apply_sample_size_threshold(client, df, variables_to_analyse)
+
+        # Values the coercion and recode steps cannot interpret were turned
+        # into NaN above and their rows drop with the other incomplete rows,
+        # before every threshold — identically in every partial. No error
+        # fires on them: an error raised here would be data-dependent (it
+        # would tell a researcher whether a node holds such a value), so
+        # the run's outcome does not depend on the data's values.
     return df, settings, threshold_met
+
+
+def to_float_values(values: pd.Series) -> tuple[pd.Series, bool]:
+    """The numeric values of a column that may arrive as text (STRONG AYA).
+
+    RDF data delivers every value as text, and a missing value as the
+    STRONG AYA missing term. Numbers and numeric text become floats; empty
+    values and the missing term (as prefixed name or full IRI) become NaN.
+    Any other value also becomes NaN, and is reported through the returned
+    flag.
+
+    Returns
+    -------
+    tuple[pd.Series, bool]
+        The values as floats and whether any value was not a number.
+    """
+    if pd.api.types.is_numeric_dtype(values):
+        return values.astype(float), False
+    keys = {value: term_key(value) for value in values.dropna().unique()}
+    invalid = any(key is not None and key != MISSING_TERM and not isinstance(key, float) for key in keys.values())
+    numbers = {value: key if isinstance(key, float) else np.nan for value, key in keys.items()}
+    return values.map(numbers).astype(float), invalid
+
+
+def coerce_time_column(df: pd.DataFrame, time_col: str) -> tuple[pd.DataFrame, bool]:
+    """Convert the time column to floats (STRONG AYA).
+
+    STRONG AYA times are numeric deltas (for example days since diagnosis),
+    never dates, so the conversion is numeric only (``to_float_values``):
+    a missing time becomes NaN and ``drop_incomplete_rows`` removes it
+    before every threshold. A value that is not a number is dropped the
+    same way; the returned flag reports it for tests, and no error is
+    raised on it (an error would be a per-value oracle). A missing time
+    column is left for ``validate_survival_columns`` to report.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, bool]
+        The frame with a float time column and whether the time column held
+        a value that is not a number.
+    """
+    if time_col not in df.columns:
+        return df, False
+    out = df.copy()
+    out[time_col], invalid = to_float_values(out[time_col])
+    return out, invalid
+
+
+def coerce_covariates(df: pd.DataFrame, expl_vars: list) -> tuple[pd.DataFrame, list]:
+    """Convert the plain explanatory variables to floats (STRONG AYA).
+
+    RDF data delivers numeric covariates as text, like times, so each plain
+    covariate is converted the same way (``to_float_values``): a missing
+    value becomes NaN and ``drop_incomplete_rows`` removes the row before
+    every threshold. A value that is not a number (such as a term of a
+    categorical variable) is dropped the same way; the returned list reports
+    the names for tests, and no error is raised on them (an error would be
+    a per-value oracle). A missing covariate column is left for
+    ``validate_expl_vars`` to report. Only the plain names are converted: a categorical or scored
+    covariate is coded with terms, which ``encode_covariates`` maps, and
+    converting its codes would flag every one of them as not a number.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, list]
+        The frame with float covariates and the names of the covariates that
+        held a value that is not a number.
+    """
+    out = df.copy()
+    invalid = []
+    for name in expl_vars:
+        if name not in out.columns:
+            continue
+        out[name], has_invalid = to_float_values(out[name])
+        if has_invalid:
+            invalid.append(name)
+    return out, invalid
+
+
+def normalise_stratification(df: pd.DataFrame, variables_to_stratify: dict) -> tuple[pd.DataFrame, dict]:
+    """Bring RDF-coded stratification columns and values into one form (STRONG AYA).
+
+    ``apply_data_stratification`` compares the values as they are, but RDF
+    data delivers terms as full IRIs and numbers as text, while a request
+    names ``ncit:C16576`` or ``40``. For a list of values, the column and the
+    listed values are both brought into their ``term_key`` form: a full IRI
+    matches its prefixed name, and ``1``, ``1.0`` and ``"1"`` match. For a
+    range, the column is converted to floats (``to_float_values``), so a
+    missing value or one that is not a number falls outside every range.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict]
+        The frame with the stratification columns in comparable form and
+        the stratification in the matching form, for
+        ``apply_data_stratification``.
+    """
+    out = df.copy()
+    stratification: dict = {}
+    for name, selection in variables_to_stratify.items():
+        if isinstance(selection, dict):
+            out[name], _ = to_float_values(out[name])
+            stratification[name] = selection
+        else:
+            values = out[name]
+            out[name] = values.map({value: term_key(value) for value in values.dropna().unique()})
+            keys = (term_key(value) for value in selection)
+            stratification[name] = [key for key in keys if key is not None]
+    return out, stratification
+
+
+def resolve_outcome_col(outcome_col) -> tuple[str, Optional[dict]]:
+    """Validate ``outcome_col`` on the node and split it (STRONG AYA).
+
+    ``outcome_col`` arrives over the wire from central as a column name or
+    a mapping of the column name to its outcome codes; it is re-validated
+    here (defence in depth) with ``parse_outcome_col``.
+
+    Returns
+    -------
+    tuple[str, dict | None]
+        The column name and the outcome codes, or ``None`` for a column
+        coded 0/1.
+
+    Raises
+    ------
+    UserInputError
+        When ``outcome_col`` is malformed.
+    """
+    try:
+        return parse_outcome_col(outcome_col)
+    except ValueError as e:
+        raise UserInputError(f"Invalid outcome_col: {e}") from None
+
+
+def recode_outcome(df: pd.DataFrame, outcome_col: str, outcome_codes: dict) -> tuple[pd.DataFrame, bool]:
+    """Recode the outcome column with validated outcome codes (STRONG AYA).
+
+    Codes listed under ``event`` become 1, codes under ``censored`` become 0
+    and codes under ``missing`` become NaN, so ``drop_incomplete_rows``
+    removes them before every threshold. Codes are compared through
+    ``term_key``: a prefixed name in ``outcome_col`` matches the
+    full IRI in RDF data. A code that is not listed also becomes NaN; the
+    returned flag reports it for tests, and no error is raised on it (an
+    error would be a per-value oracle). A missing outcome column is left
+    for ``validate_survival_columns`` to report.
+
+    The input is not modified; a copy is returned.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, bool]
+        The recoded frame and whether the outcome column held a code that
+        is not listed.
+    """
+    if outcome_col not in df.columns:
+        return df, False
+    codes: dict = {term_key(code): 1.0 for code in outcome_codes["event"]}
+    codes.update({term_key(code): 0.0 for code in outcome_codes["censored"]})
+    codes.update({term_key(code): np.nan for code in outcome_codes.get("missing", [])})
+
+    out = df.copy()
+    values = out[outcome_col]
+    terms = values.map({value: term_key(value) for value in values.dropna().unique()})
+    unmapped = terms.notna() & ~terms.isin(list(codes))
+    out[outcome_col] = terms.map(codes).astype(float)
+    return out, bool(unmapped.any())
 
 
 def guarded_risk_set_aggregates(
@@ -1090,7 +1789,7 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     threshold = settings.sample_size_threshold
     n_rows = len(df)
     if n_rows <= threshold:
-        warn(f"Sample size threshold not met: row count does not exceed {threshold}.")
+        safe_log("warn", f"Sample size threshold not met: row count does not exceed {threshold}.")
         return False
 
     # The admission bound covers both reconstruction routes; the warning
@@ -1099,13 +1798,15 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
     floor = settings.min_risk_set_size if settings.min_risk_set_change > 1 else None
     if n_rows < admission_bound:
         if floor is not None:
-            warn(
+            safe_log(
+                "warn",
                 f"Sample size threshold not met: row count does not meet the admission bound "
                 f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change}, "
                 f"{FLOOR_ADMISSION_MULTIPLE} x R={floor}: at least {admission_bound} rows).",
             )
         else:
-            warn(
+            safe_log(
+                "warn",
                 f"Sample size threshold not met: row count does not meet the reconstruction bound "
                 f"({settings.reconstruction_row_factor} x k={settings.min_risk_set_change}).",
             )
@@ -1116,7 +1817,7 @@ def check_sample_size(df: pd.DataFrame, outcome_col: Optional[str], settings: Pr
             raise UserInputError(f"Outcome column '{outcome_col}' not found in data columns.")
         n_events = int((df[outcome_col] == 1).sum())
         if n_events <= threshold:
-            warn(f"Sample size threshold not met: event count does not exceed " f"{threshold}.")
+            safe_log("warn", f"Sample size threshold not met: event count does not exceed " f"{threshold}.")
             return False
 
     return True

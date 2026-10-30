@@ -1,3 +1,184 @@
+<!-- BEGIN block1 vantage6-general (copied verbatim; edit at the source, never here) -->
+<!-- v6-agents v3 (2026-10-26). Block 1 of an algorithm repository's AGENTS.md.
+     Copied verbatim from the conventions repository; do not edit here. -->
+
+## 1. vantage6 general rules
+
+Handbook: the ``vantage6-federated-algorithm`` skill. This block is the rule
+sheet; it applies to every federated algorithm on vantage6 4.x.
+
+### Structure
+- Central–partial pattern. ``central`` orchestrates and never touches data;
+  partials run on nodes and return **aggregates only**.
+- ``central.py`` and ``partial.py`` are recipes; maths lives in dedicated
+  modules; guards in a pure-function guard module; Pydantic models in
+  ``miscellaneous.py``/``models.py``.
+- Package directory ``v6-<algorithm-name>`` is hyphenated on purpose and
+  matches ``pyproject.toml`` and the Dockerfile ``PKG_NAME``. Relative imports
+  inside the package; tests import with
+  ``importlib.import_module("v6-<name>.<module>")``.
+- ``algorithm_store.json`` is the wire contract; partial kwargs must match it;
+  one database per partial (``@data(1)``).
+
+### Validation
+- Pydantic v2 at the three boundaries: user input at ``central`` entry
+  (``UserInputError``), kwargs at partial entry (``UserInputError``), partial
+  results on reception (``AlgorithmError`` naming the organisation).
+- Results are JSON-serialisable and include ``algorithm_version``.
+- Raise vantage6 exception types only: ``UserInputError``,
+  ``PrivacyThresholdViolation``, ``PrivacyViolation``, ``AlgorithmError``.
+
+### Privacy (non-negotiable for node-side code)
+- Only aggregates leave a node; return the minimum the aggregator uses.
+- Parent-task guard **fails closed**: missing/undecodable token or failed
+  lookup ⇒ ``AlgorithmError``; no parent ⇒ ``PrivacyViolation``; the only
+  exemption is ``isinstance(client, MockAlgorithmClient)``.
+- Drop rows with missing values in every analysed column **before** any
+  threshold; thresholds count rows (and events where applicable).
+- **Same rows in every partial**: one shared ``prepare_node_data`` with a
+  single marked hook; a unit test asserts the guard order.
+- **Never log data values or counts.** Name the threshold, not the number.
+- Never loosen thresholds or tolerances to make tests pass.
+- No new partial without guard, threshold, shared preparation and a
+  ``Privacy.rst`` entry.
+- Privacy settings come from node ``algorithm_env`` via ``get_env_var``,
+  validated at load and documented with defaults and constraints.
+
+### Testing
+- Markers ``unit``/``integration``/``slow``/``vantage6``/``docker``,
+  ``--strict-markers``.
+- Unit: assert numbers; guards in every branch; both sides of every
+  threshold; ``MockAlgorithmClient`` pipeline vs a centralised reference at
+  tight tolerance; guard-order test; injected-missing-values test.
+- Integration: real ``client.task.create``; full method × configuration
+  matrix; empirical validation on the rows each node actually received;
+  specific exception types asserted; thresholds just above/below;
+  ``_skip_or_fail`` (skip locally, fail in CI).
+- Exactness tests may disable estimate-perturbing guards via their env var;
+  a separate test asserts the privacy property with defaults on.
+- ``tests/conftest.py`` and ``tests/integration/test_vantage6_integration.py``
+  are copies from the conventions repository's ``test-infra/``; change only
+  dataset names and ``variables_config`` locally; fix the shared files at
+  their source.
+
+### CI, Docker, releases
+- ``test-suite.yml``: ``test`` (3.10 and 3.12 × supported vantage6),
+  ``lint`` (Black via ``[tool.black]``, flake8 120, mypy via symlink),
+  ``security`` (Bandit ``-ll`` + pip-audit, able to fail), ``docker``
+  (build + import smoke test); ``permissions: contents: read``; Dependabot.
+- ``security-scan.yml``: weekly cron + dispatch; pip-audit on the lock
+  file, Bandit, Trivy/Grype on the **released image**; fails on
+  HIGH/CRITICAL with a fix; opens a ``security-scan`` issue; suppressions
+  committed with justification and expiry.
+- Dockerfile: Alpine two-stage, ``PYTHON_VERSION`` build arg (3.12),
+  digest-pinned base, ``requirements-lock.txt`` as constraints, no ``USER``.
+- Semver; a breaking wire-contract change (one that breaks an existing
+  request or result) is a major bump and its commit message starts with
+  ``BREAKING(wire):``; an additive change — a new optional argument, a
+  widened argument type that keeps the old form valid, a new result key —
+  is a minor bump; store/central/docs in the same commit. Releases by tag;
+  image ``ghcr.io/<owner>/<repo>-<branch>:<tag>`` with the branch whose tip
+  is the tag.
+
+### Security audits
+- Handbook: the ``vantage6-security-audit`` skill. An audit is
+  **mandatory** before a major release and after any wire-contract change.
+- Audit artefacts (reports, findings, mitigation plans, evidence) are
+  **confidential until released**: they live in the audit vault — a private
+  store outside every code repository — never in this repository, the image,
+  issues, PRs, commit messages or the CHANGELOG.
+- Belt and braces: ``.gitignore``/``.dockerignore`` ignore
+  ``security-audit/``, ``*-audit/`` and ``F-[0-9][0-9][0-9]*.md``; CI
+  fails if any tracked file contains the audit header marker defined in
+  the ``vantage6-security-audit`` skill.
+- Mitigations are developed on a private fork and merged at release; the
+  *released* gate needs the four sign-offs in the audit skill.
+
+### Upstream and fork
+- Upstream improvements first, free of project code; project layer on top,
+  stacked in git. Upstream → fork by ``git merge`` only, never by copying
+  commits. Fork → upstream never. Repository-specific material at the end
+  of files.
+
+### House style
+- UK English in prose; vantage6 identifiers keep US spelling
+  (``organization_ids``). Black 120 / py310. Formatting-only commits
+  separate. No headers in ``__init__.py`` unless asked.
+
+### Do not
+- Return, log or echo row-level values or counts.
+- Reorder, skip or weaken the guard sequence.
+- Change a wire signature without store, central and docs in one commit.
+- Edit blocks 1–3 of this file locally; change them at their source.
+- Copy upstream commits by hand.
+- Commit real records or configuration with secrets.
+<!-- END block1 vantage6-general -->
+
+<!-- BEGIN block2 strong-aya-layer (copied verbatim; edit at the source, never here) -->
+<!-- strong-aya-agents v2 (2026-10-03). Block 2 of a STRONG AYA algorithm
+     repository's AGENTS.md. Copied verbatim from the conventions repository;
+     do not edit here. Requires block 1 (vantage6 general rules) above it. -->
+
+## 2. STRONG AYA layer rules
+
+Handbook: the ``strong-aya-algorithm`` skill. Everything in block 1 still
+applies; this block adds the STRONG AYA libraries, data standard and
+placement rules.
+
+### Libraries (infrastructure only — no algorithm maths)
+- ``vantage6_strongaya_general.miscellaneous``: ``safe_log(level, msg)``
+  (replaces ``info``/``warn``/``error``/``print`` everywhere),
+  ``collect_organisation_ids``, ``check_partial_result_presence``,
+  ``apply_data_stratification``, ``set_datatypes``, ``VariableDetails``,
+  ``StratificationDetails``.
+- ``vantage6_strongaya_general.privacy_measures``:
+  ``mask_unnecessary_variables``, ``apply_sample_size_threshold`` — **not**
+  from ``miscellaneous``.
+- ``vantage6_strongaya_rdf.collect_sparql_data`` — **partials only**, never in
+  ``central.py``; pattern ``if "endpoint" in df.columns: df =
+  collect_sparql_data(variables_to_analyse, endpoint=df["endpoint"].iloc[0])``.
+- Dependencies pinned to tags:
+  ``vantage6-strongaya-general @ git+https://github.com/STRONGAYA/v6-tools-general.git@vX``,
+  ``vantage6-strongaya-rdf @ git+https://github.com/STRONGAYA/v6-tools-rdf.git@vY``;
+  regenerate ``requirements-lock.txt`` after a bump.
+
+### Where the STRONG AYA steps go
+Inside the algorithm's ``prepare_node_data`` hook, in this order, **in every
+partial**:
+1. RDF collect if ``endpoint`` present
+2. ``mask_unnecessary_variables(df, variables_to_analyse)``
+3. ``set_datatypes`` — only with ``Dict[str, VariableDetails]``; never a bare
+   list
+4. ``apply_data_stratification`` (if the algorithm supports it)
+5. *(native validation, NaN drop and native threshold run here)*
+6. ``apply_sample_size_threshold(client, df, variables_to_analyse)``
+
+The STRONG AYA guards are **in addition to** the algorithm's native guards,
+never instead of them. ``safe_log`` obeys the no-values-no-counts rule.
+
+### Data standard
+- Variables are addressed by STRONG AYA names and typed via
+  ``VariableDetails`` (``numerical``/``categorical``, inliers); stratification
+  via ``StratificationDetails``. Validate the ``variables_to_*`` structures
+  with Pydantic at ``central`` entry.
+
+### Tests
+- Integration matrix includes organisation selection, stratification,
+  inlier and parameter-galore scenarios where the algorithm supports them;
+  narrow-stratification and single-record attacks must raise
+  ``PrivacyThresholdViolation``/``CollectResultsError``.
+- Test infrastructure comes from the conventions repository ``test-infra/``
+  (block 1 rule); ``STRONGAYA/v6-descriptive-statistics`` is the worked
+  example of the full method × configuration matrix.
+
+### Do not
+- Import ``vantage6_strongaya_rdf`` in ``central.py``.
+- Call ``apply_sample_size_threshold`` in some partials but not others.
+- Introduce ``safe_log`` or STRONG AYA dependencies into upstream
+  (block 3) code.
+<!-- END block2 strong-aya-layer -->
+
+<!-- BEGIN block3 upstream AGENTS.md (merged verbatim; edit upstream, never here) -->
 # AGENTS.md — v6-cox-ph
 
 A guide for coding agents (Junie, Mistral Vibe, Claude Code, Copilot, …)
@@ -320,3 +501,127 @@ deliberately runs glibc and unlocked to test the declared range.
 - Do not add ``__init__.py`` author/license headers unless asked.
 - Do not rename the ``v6-cox-ph`` package directory — the hyphen is part of
   the vantage6 module contract.
+<!-- END block3 upstream AGENTS.md -->
+
+## 4. v6-cox-ph STRONG AYA specifics
+
+### What this repository is
+
+The STRONG AYA layer on top of the vanilla federated Cox-PH model
+(``v6-cox-ph``). Branch ``phase2-strong-aya`` carries only the project
+layer: the STRONG AYA libraries, the data-access and privacy steps at the
+shared ``prepare_node_data`` hook, and this repository's conventions. The
+algorithm itself is owned by the upstream vanilla repository
+(``MaastrichtU-CDS/v6-coxph``); every algorithmic question is answered by
+block 3 above, not here.
+
+### STRONG AYA layer
+
+- This branch supports vantage6 4.15 only, unlike block 3's 4.14–4.15
+  range: ``vantage6-strongaya-general`` v1.0.5 pins
+  ``vantage6-algorithm-tools==4.15`` exactly, so vantage6 4.14 can no
+  longer be installed next to this package. ``pyproject.toml`` declares
+  ``vantage6-algorithm-tools>=4.15,<4.16`` and the CI test matrix runs
+  4.15 only.
+- Dependencies (pinned to git tags; regenerate ``requirements-lock.txt``
+  after a bump): ``vantage6-strongaya-general @
+  git+https://github.com/STRONGAYA/v6-tools-general.git@v1.0.5`` and
+  ``vantage6-strongaya-rdf @
+  git+https://github.com/STRONGAYA/v6-tools-rdf.git@v1.1.0``.
+- Logging goes through ``safe_log(level, message)`` — never vantage6's
+  ``info``/``warn``/``error`` and never ``print``.
+- On an RDF node (the data carries an ``endpoint`` column) the request is
+  checked against the STRONG AYA schema (``check_request_against_schema``
+  in ``privacy_guards.py``, right after ``load_privacy_settings`` and
+  before the RDF collect): only schema codes are allowed — every name must
+  be the class of a schema variable, ``time_col`` continuous,
+  ``outcome_col`` categorical and in the mapping form, a categorical or
+  standardised covariate in the ``categories``/``scores`` form, and every
+  listed code one of the variable's codes (a standardised variable's codes
+  are taken as given, because the schema lists none for it). The schema
+  comes from ``vantage6_strongaya_rdf.schema_loader`` (``load_schema``,
+  node settings ``USE_REMOTE_SCHEMA``/``SCHEMA_URL``/``SCHEMA_TAG``);
+  CSV nodes skip the check.
+- Inside ``prepare_node_data`` (block 2 order): RDF collect when the node
+  carries an ``endpoint`` column, then ``mask_unnecessary_variables`` before
+  the native validation, and ``apply_sample_size_threshold`` after the
+  native ``check_sample_size`` — only when the native threshold passed; a
+  node below the native threshold raises ``PrivacyThresholdViolation``
+  from the caller and the STRONG AYA threshold must not double-raise.
+- Stratification (``variables_to_stratify``, STRONG AYA data standard) is
+  supported: ``apply_data_stratification`` runs after masking and before
+  every threshold, so the rows the filter removes count against them. The
+  spec is validated with Pydantic at ``central`` entry
+  (``CoxPHInput.variables_to_stratify``) and re-validated on the node;
+  stratification variable names must be identifier-shaped or prefixed
+  names such as ``ncit:C28421`` (they are interpolated between backticks
+  into a dataframe query; never allow a backtick), and a missing
+  stratification variable raises ``UserInputError`` instead of the library
+  filter's silent no-op. ``normalise_stratification`` brings RDF terms and
+  numeric text into the form of the request before the library filter
+  runs; keep the filter itself the library's ``apply_data_stratification``.
+- Times (STRONG AYA data standard) are numeric deltas, never dates:
+  ``coerce_time_column`` converts the time column to floats right after
+  masking (text from RDF data, ``ncit:C54031`` for a missing time), and
+  ``coerce_covariates`` does the same for ``expl_vars``. A value that is not
+  a number is dropped before the thresholds and fails the run with
+  ``UserInputError`` only after them, like an unlisted outcome code.
+  ``variables_to_analyse`` names each variable once (a covariate may also be
+  a stratification variable; the RDF collect would otherwise query it twice
+  and its merge would rename both copies).
+- Outcome codes (STRONG AYA data standard): RDF data codes the outcome with
+  ontology terms (``survival_status``, ``ncit:C25717``), so ``outcome_col``
+  is either a column name (coded 0/1) or a mapping of one column name to
+  its ``event``, ``censored`` and optional ``missing`` codes — no separate
+  parameter. ``central`` forwards ``outcome_col`` unchanged; each partial
+  splits it with ``resolve_outcome_col`` and ``recode_outcome`` maps the
+  codes to 1, 0 and NaN after masking and before stratification. Codes
+  compare through ``term_key`` (a prefixed name matches its full
+  IRI). Missing and unlisted codes become NaN and are dropped before every
+  threshold; an unlisted code then fails the run with
+  ``UserInputError``, but only **after** the thresholds passed — raising it
+  earlier would tell a researcher whether a below-threshold subpopulation
+  holds a code. Never move that check before the thresholds and never echo
+  the codes found.
+- Categorical covariates (STRONG AYA layer on the phase1 feature): codes
+  compare through ``covariate_key`` — a prefixed name matches its full IRI,
+  and ``ncit:C54031`` (missing or unspecified) is always missing for
+  covariates, so a missing value is never reported as an unlisted code. In
+  the guard order, ``coerce_covariates`` converts the plain names only (a
+  categorical or scored entry's codes are terms, not numbers),
+  ``encode_covariates`` runs with ``covariate_key`` after stratification
+  (the encoder keeps the source column the filter uses), and
+  ``check_category_sizes`` runs after ``check_sample_size`` and before
+  ``apply_sample_size_threshold``. A spec that lists the same code once as
+  a prefixed name and once as its full IRI collides under ``covariate_key``
+  and is refused when the code map is built — a spec error that depends on
+  the request only, so it may be raised before the thresholds.
+- The STRONG AYA guards are in addition to the vanilla guards, never
+  instead of them; ``perform_iteration`` runs them too, through the same
+  shared ``prepare_node_data``.
+
+### Branches, CI and releases
+
+- Upstream → this branch by ``git merge`` only (upstream improvements land
+  in the vanilla repository first, then merge down); project code never
+  flows back to vanilla.
+- CI triggers include ``phase2-strong-aya``; the image is
+  ``ghcr.io/<owner>/v6-cox-ph-phase2-strong-aya:<tag>`` (branch suffix per
+  the release workflow).
+- The lock file is compiled against musl/Python 3.12 and includes the git
+  dependencies; regenerate it after any dependency bump.
+- Versions: tags are shared by every branch of this repository, so a
+  release of this branch takes the next version number no other branch
+  uses (phase1: 2.1.0, then 2.2.0 with categorical covariates; this
+  branch: 2.3.0). An additive wire change — a new optional argument, an
+  argument that also accepts a mapping while a plain name stays valid, a
+  new result key — is a minor bump without ``BREAKING(wire):``; a change
+  that breaks an existing request or result stays a major bump.
+
+### Do not
+
+- Import ``vantage6_strongaya_rdf`` or any STRONG AYA library in
+  ``central.py``.
+- Loosen the vanilla guards, thresholds or tolerances to make tests pass.
+- Copy upstream commits by hand; merge them.
+- Commit plan documents, canary data or configuration with secrets.

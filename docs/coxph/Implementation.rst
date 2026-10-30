@@ -282,3 +282,81 @@ covariates with the centre and scale it receives and returns, for every
 point of the pooled event-time grid, the risk-set sums ``S0``, ``S1`` and
 ``S2`` at the ``beta`` it receives, after the risk-set guards, rounding and
 float32 quantisation.
+
+STRONG AYA layer
+----------------
+
+This branch layers the STRONG AYA data standard on top of the vanilla
+algorithm above. The steps below run inside the shared
+``prepare_node_data`` hook in ``privacy_guards.py``, around the vanilla
+sequence, in every partial; they add no new partial and change no wire
+signature beyond the additive arguments of 2.3.0. The vanilla text above
+is unchanged.
+
+- **Schema check.** On a node whose data carries an ``endpoint`` column,
+  the request is checked against the STRONG AYA schema
+  (``check_request_against_schema``) right after ``load_privacy_settings``
+  and before the RDF collect: only schema codes are allowed — every name
+  must be the class of a schema variable, ``time_col`` must be continuous,
+  ``outcome_col`` categorical and in the mapping form, a categorical or
+  standardised covariate must be in the ``categories`` or ``scores`` form,
+  and every listed code must be one of the variable's codes (a
+  ``standardised`` variable's codes are taken as given, because the schema
+  lists none for it). The check reads the request and the schema only,
+  never patient data, so it may fail before every threshold; no endpoint is
+  queried. The schema is loaded with the RDF library's ``load_schema`` from
+  the node's settings (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``,
+  ``SCHEMA_TAG``), falling back to the schema bundled with the library; a
+  CSV node (no ``endpoint`` column) skips the check.
+- **RDF collect and cache.** When the node's data carries an ``endpoint``
+  column, the variables to analyse (the time, outcome and explanatory
+  columns and the stratification variables, each named once) are collected
+  from the endpoint with the RDF library (``collect_sparql_data``, bounded
+  by ``COXPH_RDF_COLLECT_TIMEOUT``). The first partial of a run collects
+  and caches the frame in the run's temporary volume; later partials read
+  the cache, so the endpoint is queried once per run.
+- **Masking.** ``mask_unnecessary_variables`` drops every column the
+  analysis does not use (the ``endpoint`` column included), so only the
+  analysed variables survive.
+- **Conversion to floats.** STRONG AYA times are numeric deltas and RDF
+  data delivers every value as text: ``coerce_time_column`` converts the
+  time column and ``coerce_covariates`` the plain explanatory variables to
+  floats, so a missing value (the missing term ``ncit:C54031``) becomes
+  NaN and the row is dropped before every threshold. A value that is not a
+  number is dropped the same way and fails the run with ``UserInputError``
+  only after the thresholds. Only the plain names are converted: a
+  categorical or scored covariate is coded with terms, which the encoding
+  step maps.
+- **Outcome recoding.** RDF data codes the outcome with ontology terms, so
+  ``outcome_col`` may map the column name to its ``event``, ``censored``
+  and optional ``missing`` codes; ``recode_outcome`` maps them to 1, 0 and
+  NaN after masking and before stratification. Codes compare through the
+  term key: a prefixed name matches its full IRI.
+- **Stratification.** ``variables_to_stratify`` selects the subpopulation
+  the run analyses. The spec is validated at ``central`` entry and
+  re-validated on the node; ``normalise_stratification`` brings the RDF
+  terms and numeric text into the form of the request, and the library's
+  ``apply_data_stratification`` runs the filter before every threshold, so
+  the rows it removes count against them.
+- **The IRI-aware code key.** The categorical and scored covariates of
+  ``expl_vars`` are encoded by ``encode_covariates`` with the STRONG AYA
+  code key (``covariate_key``): a code listed as a prefixed name matches
+  the full IRI the data holds, and the missing term ``ncit:C54031`` is
+  always missing for covariates. The encoding runs after stratification
+  (it keeps the source column the filter uses) and before the native
+  validation; the category threshold of the vanilla layer then applies on
+  RDF nodes too, after ``check_sample_size`` and before the library
+  threshold. A spec that lists the same code once as a prefixed name and
+  once as its full IRI collides under the key and is refused when the code
+  map is built — a spec error that depends on the request only.
+- **The library threshold.** ``apply_sample_size_threshold`` (the STRONG
+  AYA library's sample-size threshold) runs after the native
+  ``check_sample_size`` and ``check_category_sizes``, only when they
+  passed, so a below-threshold node is refused by the native threshold
+  alone and the library threshold never double-raises.
+
+The checks that depend on the data's values — a time that is not a number,
+a plain covariate that is not a number, an unlisted outcome code, an
+unlisted covariate code — are raised only after every threshold passed,
+so they never describe a below-threshold subpopulation, and their messages
+name the columns, never the values found.

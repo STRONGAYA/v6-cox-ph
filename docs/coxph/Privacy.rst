@@ -8,18 +8,52 @@ The partial functions run on each data station and share only aggregated
 quantities with the central aggregator. Several guards protect against the
 main leakage channels of the federated design. All guards are implemented in
 ``v6-cox-ph/privacy_guards.py`` and applied in the same order in every
-partial: parent-task check, settings load, covariate encoding and
-explanatory-variable validation (``compute_summed_z`` and
-``perform_iteration``), NaN row dropping, sample-size threshold, category
-threshold, iteration-input validation (``perform_iteration`` only),
-time-column preparation (binning, tail censoring), and the risk-set guards
-(``perform_iteration`` only). On top of these mandatory guards,
+partial: parent-task check, settings load, schema check (STRONG AYA, RDF
+nodes only — see below), RDF collection (STRONG AYA, when
+the node carries an ``endpoint`` column), masking of unanalysed variables
+(STRONG AYA), time conversion to floats and plain-covariate conversion to
+floats (STRONG AYA), outcome recoding (STRONG AYA, when ``outcome_col``
+carries outcome codes — see below), stratification (STRONG AYA, when
+requested — see below), covariate encoding and explanatory-variable
+validation (``compute_summed_z`` and ``perform_iteration``), NaN row
+dropping, sample-size threshold, category threshold, the STRONG AYA
+sample-size threshold, iteration-input validation
+(``perform_iteration`` only), time-column preparation (binning, tail
+censoring), and the risk-set guards (``perform_iteration`` only). On top of
+these mandatory guards,
 the node's privacy level adds the reconstruction row bound, small-count
 suppression of the shared event counts, an absolute floor on the size of a
 released risk set and rounding of the released aggregates (see
 Configuration below); two central-side resource caps bound the size of the
 run (see Resource caps below), and the reported curve time keys are
 coarsened centrally (see Curve time-key coarsening below).
+
+Deployment arrangement (STRONG AYA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This phase of the algorithm is built for the STRONG AYA deployment
+model: an **encrypted collaboration** with an **independent aggregator**
+— the researcher creates the main task and assigns ``central`` to the
+node of an aggregator organisation that holds no data. Two properties
+make that arrangement hold:
+
+- The data nodes' **initiator policies** decide who may send tasks to
+  them. The independent aggregator is a convention, not a vantage6
+  guarantee: nothing ties ``central`` to the aggregator's node, and the
+  parent-task guard only refuses *direct partial invocation*. A data
+  node therefore restricts ``allowed_organizations`` to the aggregator
+  organisation (or admits no users it does not trust). Without that
+  policy, a researcher whose organisation holds a node can run
+  ``central`` there and read every partial result — the partial results
+  are then encrypted for the researcher's organisation. With the policy,
+  the bypass is refused at task creation and the study still runs.
+- The **aggregator is a trust assumption**: its node holds the kwargs,
+  every partial result and the final result in plaintext (the node writes
+  the output before encrypting it, and the per-run task folders persist
+  and are mounted into every algorithm container). The partials return
+  only what ``central`` uses, and every released aggregate is
+  thresholded and guarded, so the aggregator's exposure is to
+  above-threshold aggregates — not to row-level data.
 
 Integrity / poisoning (accepted residual)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -35,6 +69,17 @@ defence; a careful adversary can stay inside the bounds. Detection of a
 careful malicious node requires secure or robust aggregation, which is
 out of scope for the vanilla algorithm.
 
+Researcher accountability (STRONG AYA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In this deployment researchers are **vetted and accountable**, not
+adversarial: task submissions must conform to the DAA (data access
+agreement) appendices, the aggregator reviews the queries it decrypts,
+and every result records the **provenance of the sender and the input
+arguments** (who submitted the run and with which arguments), so a
+released result can always be matched against its request. Stratified
+analyses run under this semi-honest, audited posture.
+
 Parent-task guard
 ~~~~~~~~~~~~~~~~~
 
@@ -46,6 +91,35 @@ partial without going through ``central``) has ``parent = None`` and is
 refused with a ``PrivacyViolation``. A failure to look up the task fails
 closed with an ``AlgorithmError``. The guard is skipped (with an info log)
 for the ``MockAlgorithmClient`` used in tests.
+
+Schema check (STRONG AYA)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On a node whose data carries an ``endpoint`` column (an RDF node), the
+request is checked against the STRONG AYA schema right after the settings
+load and before the RDF collect — before any data is read and before every
+threshold. The check reads the request and the schema only, never patient
+data: no endpoint is queried and nothing is returned, so it may fail
+before every threshold, and a refusal describes the request, never a
+subpopulation of the node's data. A CSV node (no ``endpoint`` column) gets
+no schema check.
+
+Only schema codes are allowed: every name in ``time_col``, ``outcome_col``,
+``expl_vars`` and ``variables_to_stratify`` must be the class of a schema
+variable, ``time_col`` must be continuous, ``outcome_col`` must be
+categorical and given in the mapping form, a categorical or standardised
+explanatory variable must be given in the ``categories`` or ``scores`` form
+(the algorithm never guesses the categories or the reference), and every
+listed code must be one of the variable's codes. ``Usage.rst`` lists the
+rules in full. Each failure is a ``UserInputError`` naming the variable
+and the rule broken, never data.
+
+The schema comes from the RDF library (``vantage6_strongaya_rdf``), which
+only the partials import; which version a node checks against is a node
+setting (``USE_REMOTE_SCHEMA``, ``SCHEMA_URL``, ``SCHEMA_TAG``), so each
+station checks against the schema its own data was annotated with. Without
+the settings the schema bundled with the library is used. A schema that
+cannot be loaded fails the run closed (``AlgorithmError``).
 
 Sample-size threshold
 ~~~~~~~~~~~~~~~~~~~~~
@@ -78,6 +152,74 @@ rows. At the presets that is 150 rows at ``standard`` (``max(10 x 5,
 ``minimal`` has no floor and is unchanged. Nodes below the bound are
 refused the same fail-closed way as below-threshold nodes.
 
+Stratification
+~~~~~~~~~~~~~~
+
+``variables_to_stratify`` (STRONG AYA) selects the subpopulation the run
+analyses: a mapping of variable names to lists of values to keep or
+``{'start', 'end'}`` ranges. The filter runs inside the shared
+``prepare_node_data`` hook, after masking (the stratification variables
+must survive it) and before every threshold, so the rows it removes count
+against the thresholds like any other removed rows. A stratification that
+isolates a handful of records therefore fails closed with
+``PrivacyThresholdViolation`` on the same terms as a below-threshold node:
+the sample-size threshold, the event threshold and the admission bound all
+apply to the stratified rows. The same holds for the STRONG AYA
+sample-size threshold on top.
+
+Two properties are pinned at validation time. Stratification variable
+names must be identifier-shaped or prefixed names such as ``ncit:C28421``
+(``prefix:local``, letters, digits and underscores only), because
+``apply_data_stratification`` interpolates them between backticks into a
+dataframe query; anything else, a backtick above all, is rejected with
+``UserInputError`` at ``central`` entry and re-validated on the node. And a
+stratification variable that is not a column of the node's data raises
+``UserInputError`` — the library filter would otherwise silently keep the
+whole frame, fitting the model on the wrong rows.
+
+Before the library filter runs, RDF-coded columns are brought into the
+form the request uses: for a list of values, the column and the values are
+both compared as prefixed names (a full IRI matches its ``ncit:`` name) or
+as numbers; for a range, the column is converted to floats, so a missing
+value or one that is not a number falls outside every range. The filter
+itself is the library's ``apply_data_stratification``.
+
+The model itself is unchanged: a stratified run fits the same Cox-PH model
+on the stratified rows, and the released aggregates are the same shapes as
+an unstratified run's. What changes is the row set they describe — so the
+reconstruction exposure of the risk-set guards (see the sections below)
+applies within the subpopulation, and a stratification that leaves a node
+just above the threshold releases aggregates over a small group, guarded
+by the same risk-set floor and jump guard as any small risk set.
+
+Outcome codes
+~~~~~~~~~~~~~
+
+The outcome codes in ``outcome_col`` (STRONG AYA) recode an outcome column
+that is coded with ontology terms, as RDF data is, to 1 (event), 0
+(censored) and NaN (missing). The recoding runs inside the shared
+``prepare_node_data`` hook, after masking and before stratification, in
+every partial; the RDF cache holds the collected values and every partial
+recodes them the same way, so all partials analyse the same rows. Rows with a ``missing`` code, or with a
+code ``outcome_col`` does not list, are dropped with the other incomplete
+rows and therefore count against every threshold. ``outcome_col`` is
+validated with Pydantic at ``central`` entry and re-validated on the node.
+
+A code the data holds but ``outcome_col`` does not list fails the run with
+``UserInputError``, so that a mistyped code cannot silently drop all
+censored rows and fit a model on the events alone. That error is raised
+only **after** the native and STRONG AYA thresholds passed. Raised earlier,
+it would be an oracle: a researcher could stratify down to a
+below-threshold subpopulation, leave one code out of ``outcome_col``, and
+tell from the error type (``UserInputError`` rather than
+``PrivacyThresholdViolation``) whether that subpopulation holds the code.
+After the thresholds, the error describes a subpopulation of at least
+threshold size. Telling one person's code from it would take two runs on
+subpopulations that differ by that person: cross-run differencing, which
+falls under the audited posture of Researcher accountability above (the
+result's provenance records ``outcome_col`` with the other input arguments).
+The message names the outcome column only, never the codes found.
+
 Categorical covariates
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -107,6 +249,20 @@ run then fails with ``UserInputError`` naming the variables — but only
 after every threshold passed. Raised earlier, the error would tell a
 researcher whether a below-threshold node holds a code. The error names
 the variables, never the codes found.
+
+On STRONG AYA (RDF) nodes the encoding compares codes through the term
+key: a code listed as a prefixed name (``ncit:C16576``) matches the full
+IRI the data holds, and vice versa. The STRONG AYA missing term
+(``ncit:C54031``, missing or unspecified) is always missing for
+covariates, as a prefixed name or a full IRI, so a missing value is
+dropped before every threshold and never reported as an unlisted code.
+The encoding runs after stratification (the encoder keeps the source
+column the filter uses), so the categories of a stratified run are
+counted inside the stratum: stratifying on a categorical covariate
+empties the categories outside the stratum, and the category threshold
+fails the run. The unlisted-code error fires only after every threshold
+— the native sample-size and category thresholds and the STRONG AYA
+sample-size threshold — and never echoes the codes found.
 
 Time binning
 ~~~~~~~~~~~~

@@ -17,8 +17,8 @@
         },
         {
           "name": "outcome_col",
-          "type": "string",
-          "description": "Name of the column containing the event indicator (1=event, 0=censored)."
+          "type": "json",
+          "description": "The outcome column: its name when it is coded 1=event, 0=censored, or (STRONG AYA) an object mapping the column name to its outcome codes, e.g. {\"ncit:C25717\": {\"event\": [\"ncit:C99799\", \"ncit:C99798\"], \"censored\": [\"ncit:C37987\", \"ncit:C141463\"], \"missing\": [\"ncit:C54031\"]}}. Codes may be prefixed names or full IRIs, or numbers. Rows with a 'missing' code are dropped before the thresholds; a code that is not listed fails the run."
         },
         {
           "name": "expl_vars",
@@ -34,6 +34,11 @@
           "name": "covariate_profiles",
           "type": "json",
           "description": "Optional covariate profiles for survival curves: a list of objects mapping explanatory variable names to values. Variables left out are taken at the pooled event-case mean (the baseline profile)."
+        },
+        {
+          "name": "variables_to_stratify",
+          "type": "json",
+          "description": "Optional STRONG AYA stratification: a mapping of variable names to lists of values or {'start', 'end'} ranges. The run analyses only the rows inside the requested subpopulation; the sample-size thresholds apply to the stratified rows."
         }
       ]
     },
@@ -54,13 +59,18 @@
         },
         {
           "name": "outcome_col",
-          "type": "string",
-          "description": "Name of the column containing the outcome data."
+          "type": "json",
+          "description": "The outcome column: its name when it is coded 0/1, or (STRONG AYA) an object mapping the column name to its 'event', 'censored' and optionally 'missing' codes."
         },
         {
           "name": "expl_vars",
           "type": "json",
           "description": "List of explanatory variables to include in the model: plain column names, or single-entry mappings of a column name to a categorical spec (reference and categories) or a scored spec (scores, optional missing). A list of names stays valid."
+        },
+        {
+          "name": "variables_to_stratify",
+          "type": "json",
+          "description": "Optional STRONG AYA stratification: a mapping of variable names to lists of values or {'start', 'end'} ranges. The run analyses only the rows inside the requested subpopulation; the sample-size thresholds apply to the stratified rows."
         }
       ]
     },
@@ -81,8 +91,8 @@
         },
         {
           "name": "outcome_col",
-          "type": "string",
-          "description": "Name of the column containing the outcome data."
+          "type": "json",
+          "description": "The outcome column: its name when it is coded 0/1, or (STRONG AYA) an object mapping the column name to its 'event', 'censored' and optionally 'missing' codes."
         },
         {
           "name": "expl_vars",
@@ -108,6 +118,11 @@
           "name": "unique_time_events",
           "type": "list",
           "description": "Sorted list of unique event times shared by the central function."
+        },
+        {
+          "name": "variables_to_stratify",
+          "type": "json",
+          "description": "Optional STRONG AYA stratification: a mapping of variable names to lists of values or {'start', 'end'} ranges. The run analyses only the rows inside the requested subpopulation; the sample-size thresholds apply to the stratified rows."
         }
       ]
     }

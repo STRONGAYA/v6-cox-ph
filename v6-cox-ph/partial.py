@@ -7,6 +7,8 @@ encryption if that is enabled). From there, they are sent to the partial task
 or directly to the user (if they requested partial results).
 """
 
+from typing import Optional, Union
+
 import pandas as pd
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client, data
@@ -16,7 +18,7 @@ from vantage6.algorithm.tools.exceptions import (
     PrivacyViolation,
     UserInputError,
 )
-from vantage6.algorithm.tools.util import info
+from vantage6_strongaya_general.miscellaneous import safe_log
 
 from .miscellaneous import IterationResult, SummedZResult
 from .privacy_guards import (
@@ -26,6 +28,7 @@ from .privacy_guards import (
     prepare_time_column,
     quantise_wire_aggregates,
     resolve_expl_vars,
+    resolve_outcome_col,
     round_released_aggregates,
     suppress_small_time_counts,
     validate_iteration_input,
@@ -38,8 +41,9 @@ def compute_summed_z(
     client: AlgorithmClient,
     df: pd.DataFrame,
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, dict],
     expl_vars: list,
+    variables_to_stratify: Optional[dict] = None,
 ) -> dict:
     """
     Compute the sum of the specified explanatory variables for the outcome events.
@@ -52,13 +56,19 @@ def compute_summed_z(
         The DataFrame containing the data.
     time_col : str
         The name of the column containing the time data.
-    outcome_col : str
-        The name of the column containing the outcome data.
+    outcome_col : str | dict
+        The name of the outcome column coded 0/1, or (STRONG AYA) a mapping
+        of the column name to its ``event``, ``censored`` and optionally
+        ``missing`` codes.
     expl_vars : list
         The explanatory variables: plain column names, or single-entry
         mappings of a column name to a categorical or scored spec. The node
         re-validates the spec and encodes the categorical and scored
         entries into numeric model-term columns.
+    variables_to_stratify : dict, optional
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). Only the rows inside the requested
+        subpopulation are analysed; the thresholds apply to them.
 
     Returns
     -------
@@ -66,11 +76,22 @@ def compute_summed_z(
         A dictionary containing the sum of the explanatory variables.
     """
     try:
-        info("Computing summed Z statistics")
+        safe_log("info", "Computing summed Z statistics")
+
+        # STRONG AYA: outcome_col may carry the outcome codes of RDF data;
+        # from here on outcome_col is the column name.
+        outcome_col, outcome_codes = resolve_outcome_col(outcome_col)
 
         covariates = resolve_expl_vars(expl_vars)
         df, settings, threshold_met = prepare_node_data(
-            client, df, time_col, outcome_col, covariates, need_outcome=True
+            client,
+            df,
+            time_col,
+            outcome_col,
+            covariates,
+            need_outcome=True,
+            variables_to_stratify=variables_to_stratify,
+            outcome_codes=outcome_codes,
         )
 
         if not threshold_met:
@@ -130,12 +151,13 @@ def perform_iteration(
     client: AlgorithmClient,
     df: pd.DataFrame,
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, dict],
     expl_vars: list,
     beta: list,
     centre: list,
     scale: list,
     unique_time_events: list,
+    variables_to_stratify: Optional[dict] = None,
 ) -> dict:
     """
     Perform an iteration of the algorithm, computing the necessary aggregates.
@@ -154,10 +176,11 @@ def perform_iteration(
         The DataFrame containing the data.
     time_col : str
         The name of the column containing the time data.
-    outcome_col : str
-        The name of the column containing the outcome data. Rows with a
-        missing outcome are dropped so that tail censoring uses the same
-        rows as ``compute_summed_z``.
+    outcome_col : str | dict
+        The name of the outcome column coded 0/1, or (STRONG AYA) a mapping
+        of the column name to its outcome codes; must match the run's
+        ``compute_summed_z``. Rows with a missing outcome are dropped so
+        that tail censoring uses the same rows as ``compute_summed_z``.
     expl_vars : list
         The explanatory variables: plain column names, or single-entry
         mappings of a column name to a categorical or scored spec. The node
@@ -172,6 +195,10 @@ def perform_iteration(
         The pooled covariate standard deviations over the event cases.
     unique_time_events : list
         A list of unique time events.
+    variables_to_stratify : dict, optional
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). Must match the mapping the run started
+        with: every partial analyses the same rows.
 
     Returns
     -------
@@ -179,11 +206,22 @@ def perform_iteration(
         A dictionary containing the aggregates computed during the iteration.
     """
     try:
-        info("Computing aggregates for the derivation of the partial likelihood")
+        safe_log("info", "Computing aggregates for the derivation of the partial likelihood")
+
+        # STRONG AYA: outcome_col may carry the outcome codes of RDF data;
+        # from here on outcome_col is the column name.
+        outcome_col, outcome_codes = resolve_outcome_col(outcome_col)
 
         covariates = resolve_expl_vars(expl_vars)
         df, settings, threshold_met = prepare_node_data(
-            client, df, time_col, outcome_col, covariates, need_outcome=True
+            client,
+            df,
+            time_col,
+            outcome_col,
+            covariates,
+            need_outcome=True,
+            variables_to_stratify=variables_to_stratify,
+            outcome_codes=outcome_codes,
         )
 
         # A node that passed compute_summed_z passes this check as well (the same

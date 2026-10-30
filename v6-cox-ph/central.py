@@ -6,8 +6,9 @@ The results in a return statement are sent to the vantage6 server (after
 encryption if that is enabled).
 """
 
-from typing import Optional, TypeVar
+from typing import Optional, TypeVar, Union
 
+import jwt
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ValidationError
@@ -16,7 +17,7 @@ from scipy.stats import chi2
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.tools.exceptions import AlgorithmError, UserInputError
-from vantage6.algorithm.tools.util import info, warn
+from vantage6_strongaya_general.miscellaneous import safe_log
 
 from .coxph_logic import (
     back_transform_results,
@@ -65,10 +66,11 @@ _ModelT = TypeVar("_ModelT", bound=BaseModel)
 def central(
     client: AlgorithmClient,
     time_col: str,
-    outcome_col: str,
+    outcome_col: Union[str, dict],
     expl_vars: list,
     organization_ids: Optional[list] = None,
     covariate_profiles: Optional[list] = None,
+    variables_to_stratify: Optional[dict] = None,
 ) -> dict:
     """
     Central function for the federated Cox Proportional Hazards algorithm.
@@ -87,8 +89,13 @@ def central(
         The vantage6 client instance.
     time_col : str
         Name of the column containing time data.
-    outcome_col : str
-        Name of the column containing outcome/event data (1=event, 0=censored).
+    outcome_col : str | dict
+        Name of the column containing outcome/event data (1=event, 0=censored),
+        or (STRONG AYA) a mapping of the column name to its outcome codes:
+        lists of the codes that mean ``event`` and ``censored``, and
+        optionally ``missing``, for example ``{"ncit:C25717": {"event":
+        ["ncit:C99799"], "censored": ["ncit:C37987"], "missing":
+        ["ncit:C54031"]}}``. Codes may be prefixed names or full IRIs.
     expl_vars : list
         List of explanatory variables to include in the model: plain column
         names, or single-entry mappings of a column name to a categorical
@@ -105,6 +112,12 @@ def central(
         explanatory variable names to values: a number for a plain or scored
         variable, a category label for a categorical variable. Variables left
         out are taken at the pooled event-case mean (the baseline profile).
+    variables_to_stratify : dict, optional
+        STRONG AYA stratification mapping (variable names to value lists or
+        ``start``/``end`` ranges). The run analyses only the rows inside the
+        requested subpopulation; the sample-size thresholds on the nodes
+        apply to the stratified rows, so a stratification that isolates a
+        handful of records fails closed like any other below-threshold run.
 
     Returns
     -------
@@ -118,12 +131,14 @@ def central(
         expl_vars=expl_vars,
         organization_ids=organization_ids,
         covariate_profiles=covariate_profiles,
+        variables_to_stratify=variables_to_stratify,
     )
 
     time_col = validated.time_col
     outcome_col = validated.outcome_col
     expl_vars = validated.expl_vars
     organization_ids = validated.organization_ids
+    variables_to_stratify = validated.variables_to_stratify
     # The model terms (one per plain or scored variable, one per
     # non-reference category) size the fit: the Hessian, the covariate cap,
     # the result table and the order of covariance/beta/centre/scale.
@@ -163,23 +178,24 @@ def central(
                 f"organisations {sorted(org_id for org_id in known_ids if org_id is not None)}."
             )
 
-    info(f"Sending task to organisations {ids}")
+    safe_log("info", f"Sending task to organisations {ids}")
 
     n_covs = len(model_terms)
     epochs = MAX_ITERATIONS
 
     # Subtask: compute summed Z
-    info("Defining input parameters for subtask — compute summed Z")
+    safe_log("info", "Defining input parameters for subtask — compute summed Z")
     input_ = {
         "method": "compute_summed_z",
         "kwargs": {
             "time_col": time_col,
             "outcome_col": outcome_col,
             "expl_vars": expl_vars,
+            "variables_to_stratify": variables_to_stratify,
         },
     }
 
-    info("Creating subtask for all organisations")
+    safe_log("info", "Creating subtask for all organisations")
     task = client.task.create(
         input_=input_,
         organizations=ids,
@@ -187,9 +203,9 @@ def central(
         description="Computing the summed Z statistic",
     )
 
-    info(f"Waiting for results of task: {task.get('id')}")
+    safe_log("info", f"Waiting for results of task: {task.get('id')}")
     results = client.wait_for_results(task_id=task.get("id"))
-    info(f"Results obtained of task: {task.get('id')}!")
+    safe_log("info", f"Results obtained of task: {task.get('id')}!")
     _require_all_organisations_answered(results, ids)
 
     z_sum = None
@@ -245,7 +261,7 @@ def central(
     assert z_sum is not None and sum_squares is not None
     n_events = float(aggregated_time_events["freq"].sum())
     centre, scale = pooled_standardisation(z_sum.to_numpy(dtype=float), sum_squares.to_numpy(dtype=float), n_events)
-    info("Dispatching standardised covariates (centre and scale to 2 significant figures).")
+    safe_log("info", "Dispatching standardised covariates (centre and scale to 2 significant figures).")
 
     # Aggregate summary of the guards that were active on the nodes:
     # configuration, not data; no per-node breakdown. A warning is added
@@ -278,7 +294,7 @@ def central(
             f"{floor_note}); "
             "the estimates are approximate."
         )
-        warn(guards_warning)
+        safe_log("warn", guards_warning)
 
     # The nodes round the aggregates they release to a configurable number
     # of significant figures and then quantise them to float32 precision for
@@ -315,7 +331,7 @@ def central(
     epoch = 0
 
     for epoch in range(epochs):
-        info("Defining input parameters for subtask — perform iteration")
+        safe_log("info", "Defining input parameters for subtask — perform iteration")
         input_ = {
             "method": "perform_iteration",
             "kwargs": {
@@ -326,10 +342,11 @@ def central(
                 "centre": centre.tolist(),
                 "scale": scale.tolist(),
                 "unique_time_events": unique_time_events,
+                "variables_to_stratify": variables_to_stratify,
             },
         }
 
-        info("Creating subtask for all organisations")
+        safe_log("info", "Creating subtask for all organisations")
         task = client.task.create(
             input_=input_,
             organizations=ids,
@@ -337,9 +354,9 @@ def central(
             description="Iterating to find the optimal beta",
         )
 
-        info(f"Waiting for results of task: {task.get('id')}")
+        safe_log("info", f"Waiting for results of task: {task.get('id')}")
         results = client.wait_for_results(task_id=task.get("id"))
-        info(f"Results obtained of task: {task.get('id')}!")
+        safe_log("info", f"Results obtained of task: {task.get('id')}!")
         _require_all_organisations_answered(results, ids)
 
         n_times = len(unique_time_events)
@@ -396,7 +413,7 @@ def central(
                     f"{HELD_FRACTION_WARN_THRESHOLD}; the estimates may be dominated by held "
                     f"risk sets."
                 )
-                warn(held_fraction_warning)
+                safe_log("warn", held_fraction_warning)
 
         # The log-likelihood at the current beta, from aggregates that are
         # already collected (no extra round-trip).
@@ -409,7 +426,7 @@ def central(
             # halve it and retry from the accepted point. The accepted state
             # is reported if the budget runs out mid-halving.
             step_halvings += 1
-            warn("Newton step decreased the log-likelihood; halving the step.")
+            safe_log("warn", "Newton step decreased the log-likelihood; halving the step.")
             last_step = np.asarray(last_step, dtype=float) * 0.5
             beta = accepted["beta"] - last_step
             continue
@@ -443,18 +460,18 @@ def central(
             step = solve(secondary_derivative, primary_derivative)
         except np.linalg.LinAlgError as e:
             convergence_cause = f"Hessian is singular: {e}"
-            warn(convergence_cause)
+            safe_log("warn", convergence_cause)
             break
 
         delta = float(np.max(np.abs(step)))
 
         if not np.isfinite(delta):
             convergence_cause = "Newton step is not finite"
-            warn(convergence_cause)
+            safe_log("warn", convergence_cause)
             break
 
         if delta <= STEP_TOLERANCE:
-            info("Betas have settled! Finished iterating!")
+            safe_log("info", "Betas have settled! Finished iterating!")
             converged = True
             break
 
@@ -463,7 +480,7 @@ def central(
             # released-precision jitter for two consecutive accepted
             # evaluations while the step stays small: the fit has settled
             # at the released precision.
-            info("Betas have settled at the released precision! Finished iterating!")
+            safe_log("info", "Betas have settled at the released precision! Finished iterating!")
             converged = True
             convergence_tolerance = STABLE_STEP_TOLERANCE
             break
@@ -494,7 +511,7 @@ def central(
         )
         if convergence_cause:
             msg += f"; cause: {convergence_cause}"
-        warn(msg)
+        safe_log("warn", msg)
         central_warnings.append(msg)
 
     # Compute final model results — beta, secondary_derivative and
@@ -549,6 +566,21 @@ def central(
         "n_events": int(aggregated_time_events["freq"].sum()),
         "covariance": np.asarray(model["covariance"]).tolist(),
         "algorithm_version": _algorithm_version(),
+        "variables_to_stratify": variables_to_stratify,
+        # STRONG AYA trace: the provenance of the sender and the input
+        # arguments travel with the result, so a query review at the
+        # aggregator can match the released result against the request.
+        "provenance": {
+            **_task_provenance(client),
+            "input_arguments": {
+                "time_col": time_col,
+                "outcome_col": outcome_col,
+                "expl_vars": expl_vars,
+                "organization_ids": organization_ids,
+                "covariate_profiles": validated.covariate_profiles,
+                "variables_to_stratify": variables_to_stratify,
+            },
+        },
         "baseline_cumulative_hazard": baseline_cumulative_hazard,
         "survival_curves": survival_curves,
         "curve_time_sig_figs": curve_time_sig_figs,
@@ -597,6 +629,47 @@ def _validate_riskset_aggregates(organization_id: int, agg1) -> None:
             f"Organisation {organization_id}: released risk-set sizes increase along the "
             f"grid, which no real risk-set sequence does."
         )
+
+
+def _task_provenance(client) -> dict:
+    """Provenance of the sender, recorded by the STRONG AYA layer.
+
+    The result carries who submitted the run — the task's initiating
+    user and organisation, read from the task this container runs — and
+    when, so a query review at the aggregator (the party that decrypts
+    the kwargs) can match the released result against the request. The
+    lookup is best-effort: a failed lookup warns and leaves the sender
+    unset rather than failing the analysis. The sender ids and the
+    timestamp are task metadata, not node data.
+
+    ``verify_signature=False`` is intentional — the node already verified
+    the token; the provenance lookup only reads ``sub`` (same as the
+    parent-task guard).
+    """
+    provenance = {
+        "submitted_by_user": None,
+        "submitted_by_organisation": None,
+        "submitted_at": None,
+    }
+    token = getattr(client, "_access_token", None)
+    if token is None:
+        return provenance
+    try:
+        # nosec B101 - intentional: the node verified the token; only sub is read
+        task_id = jwt.decode(token, options={"verify_signature": False, "verify_exp": False, "verify_sub": False})[
+            "sub"
+        ]["task_id"]
+        task = client.task.get(task_id)
+    except Exception as e:
+        safe_log("warn", f"Could not record task provenance: {type(e).__name__}")
+        return provenance
+    if isinstance(task, dict):
+        init_user = task.get("init_user") or {}
+        init_org = task.get("init_org") or {}
+        provenance["submitted_by_user"] = init_user.get("id")
+        provenance["submitted_by_organisation"] = init_org.get("id")
+        provenance["submitted_at"] = task.get("created_at")
+    return provenance
 
 
 def _released_sig_figs(settings) -> int:
